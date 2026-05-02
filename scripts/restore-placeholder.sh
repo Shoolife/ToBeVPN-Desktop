@@ -45,6 +45,15 @@ if [ -z "$BOT" ] || [ -z "$PANEL" ]; then
     exit 0
 fi
 
+# Skip restore on CI: the runner is ephemeral and the still-injected
+# config files are exactly what `tauri build` (which we run after vite)
+# needs to embed the right CSP / capabilities into the bundle. Restoring
+# placeholders mid-flow would break the .deb / .nsis output.
+if [ "${CI:-}" = "true" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "✓ CI environment — skipping placeholder restore"
+    exit 0
+fi
+
 restore_in() {
     local file=$1
     [ -f "$file" ] || return 0

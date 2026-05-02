@@ -42,6 +42,16 @@ if [ -z "${PANEL_HOST:-}" ] && [ -f .env ]; then
 fi
 
 if [ -z "${BOT_API_HOST:-}" ] || [ -z "${PANEL_HOST:-}" ]; then
+    # Hosts unavailable. If the working tree already has real hosts
+    # injected (from an earlier CI step), leave it alone — `tauri build`
+    # invokes us a second time via `beforeBuildCommand` and at that point
+    # the env vars aren't propagated through the tauri-cli child process.
+    # Detect "already injected" by checking the placeholder is gone.
+    if ! grep -q "__BOT_API_HOST__" src-tauri/tauri.conf.json 2>/dev/null \
+       && ! grep -q "__PANEL_HOST__" src-tauri/tauri.conf.json 2>/dev/null; then
+        echo "✓ hosts already injected (skipping)"
+        exit 0
+    fi
     echo "ERROR: BOT_API_HOST and PANEL_HOST must be set (env or .env)" >&2
     echo "  current: BOT_API_HOST=${BOT_API_HOST:-<unset>} PANEL_HOST=${PANEL_HOST:-<unset>}" >&2
     exit 1
