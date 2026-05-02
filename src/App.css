@@ -1,0 +1,352 @@
+/* Bundled Twemoji Country Flags — Windows' Segoe UI Emoji has no flag glyphs.
+   The unicode-range restricts downloading/use to flag codepoints, so on macOS
+   and Linux the native color flags still render normally. */
+@font-face {
+  font-family: "Twemoji Country Flags";
+  src: url("./assets/TwemojiCountryFlags.woff2") format("woff2");
+  unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067,
+    U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0d0d0d;
+  --surface: #2b2b2b;
+  --surface-2: #353535;
+  --border: #3a3a3a;
+  --text: #ececec;
+  --text-muted: #a4a4a4;
+  --accent: #3a8dff;
+  --accent-hover: #4d9aff;
+  --danger: #ff5a5a;
+  --success: #43d39e;
+
+  color-scheme: dark;
+  color: var(--text);
+  background-color: var(--bg);
+  font-family: "Twemoji Country Flags", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.app {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* Screen transition layers */
+.screen-layer {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+}
+
+.app-error {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.app-error__card {
+  width: min(440px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.app-error__title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.app-error__text {
+  font-size: 16px;
+  color: var(--text);
+}
+
+.app-error__details {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* Fade + subtle scale transitions */
+.screen-enter-from-right,
+.screen-enter-from-left {
+  animation: screen-fade-in 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.screen-exit-to-left,
+.screen-exit-to-right {
+  animation: screen-fade-out 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes screen-fade-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes screen-fade-out {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(1.04); }
+}
+
+/* Screen container */
+.screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  padding: 32px;
+}
+
+.screen__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.screen__title {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.screen__subtitle {
+  color: var(--text-muted);
+  font-size: 17px;
+  margin-top: 22px;
+  line-height: 1.55;
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.btn:hover { background: var(--accent-hover); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn--ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+.btn--ghost:hover { background: var(--surface-2); }
+
+.btn--danger { background: var(--danger); }
+
+/* Primary call-to-action across the app: same light pill as the
+   subscription "Купить" button. Use this for any prominent action that
+   isn't a destructive or status-toggling control. */
+.cta-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  border-radius: 12px;
+  border: none;
+  background: #DADCE5;
+  color: #2D2F37;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+  cursor: pointer;
+  transition: background 120ms, box-shadow 120ms;
+}
+.cta-pill:hover:not(:disabled) {
+  background: #E3E5EE;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+}
+.cta-pill:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Cards */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+/* Splash */
+.splash {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 18px;
+}
+
+.splash__logo {
+  width: 110px;
+  height: 110px;
+  border-radius: 28px;
+  background: linear-gradient(135deg, var(--accent) 0%, #7a5cff 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 48px;
+  font-weight: 700;
+  color: white;
+}
+
+.splash__name {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* Pairing */
+.pairing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 32px;
+  text-align: center;
+}
+
+.pairing__header {
+  max-width: 420px;
+}
+
+.pairing__header .screen__subtitle {
+  text-wrap: balance;
+}
+
+.pairing__qr {
+  padding: 20px;
+  background: white;
+  border-radius: 20px;
+}
+
+.pairing__actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.pairing__action-btn {
+  min-width: 310px;
+}
+
+.pairing__code {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 16px;
+}
+
+.pairing__hint {
+  color: var(--text-muted);
+  font-size: 17px;
+  padding: 0 16px;
+}
+
+.pairing__hint--error {
+  color: #F44336;
+}
+
+/* Home */
+.home {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 16px;
+}
+
+.home__status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 28px 16px;
+}
+
+.home__power {
+  width: 156px;
+  height: 156px;
+  border-radius: 78px;
+  background: var(--surface);
+  border: 2px solid var(--border);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 56px;
+  cursor: pointer;
+  transition: all 150ms;
+}
+
+.home__power--on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  box-shadow: 0 0 24px rgba(58, 141, 255, 0.4);
+}
+
+.home__status-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.home__status-text--on { color: var(--success); }

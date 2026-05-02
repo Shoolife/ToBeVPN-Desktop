@@ -1,0 +1,42 @@
+[package]
+name = "tobevpn-desktop"
+version = "1.0.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "tobevpn_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "time", "process", "sync", "macros", "io-util"] }
+hostname = "0.4"
+log = "0.4"
+tauri-plugin-http = "2.5.8"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+machine-uid = "0.5"
+os_info = { version = "3", default-features = false }
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+dirs = "6"
+sha2 = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+tauri-plugin-single-instance = "2"

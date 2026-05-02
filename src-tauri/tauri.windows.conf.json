@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "title": "ToBeVPN",
+        "width": 494,
+        "height": 855,
+        "minWidth": 494,
+        "maxWidth": 494,
+        "minHeight": 855,
+        "maxHeight": 855,
+        "resizable": false,
+        "maximizable": false,
+        "fullscreen": false,
+        "center": true,
+        "backgroundColor": "#0a1628"
+      }
+    ]
+  },
+  "bundle": {
+    "resources": [
+      "bin/geoip.dat",
+      "bin/geosite.dat",
+      "bin/wintun.dll"
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./installer.nsh"
+      }
+    }
+  }
+}

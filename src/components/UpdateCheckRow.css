@@ -1,0 +1,36 @@
+.update-check-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-info-row__label--muted {
+  color: var(--text-muted);
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+}
+
+.update-check-row__btn {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 100ms;
+  white-space: nowrap;
+}
+
+.update-check-row__btn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.update-check-row__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

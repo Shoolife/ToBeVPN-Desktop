@@ -1,0 +1,272 @@
+name: build
+
+on:
+  push:
+    branches: [main, feat/windows-support]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # Security gate — runs first, blocks builds when a known CVE is in the
+  # dependency tree. Catches incidents like postcss XSS / rustls-webpki CRL
+  # panic that we patched manually during the recent audit.
+  audit:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: npm audit (production deps, high+ blocks)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: cargo audit
+        working-directory: src-tauri
+        run: cargo audit
+
+  build-linux:
+    needs: audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Download Linux sidecar binaries
+        run: |
+          set -e
+          mkdir -p src-tauri/bin
+
+          echo "Downloading Xray-core (Linux x64)..."
+          curl -fsSL -o xray.zip \
+            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -o xray.zip -d xray-extracted
+          cp xray-extracted/xray src-tauri/bin/xray-x86_64-unknown-linux-gnu
+          cp xray-extracted/geoip.dat src-tauri/bin/
+          cp xray-extracted/geosite.dat src-tauri/bin/
+          chmod +x src-tauri/bin/xray-x86_64-unknown-linux-gnu
+
+          echo "Downloading tun2socks (Linux amd64)..."
+          curl -fsSL -o tun2socks.zip \
+            https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-amd64.zip
+          unzip -o tun2socks.zip -d tun2socks-extracted
+          cp tun2socks-extracted/tun2socks-linux-amd64 \
+             src-tauri/bin/tun2socks-x86_64-unknown-linux-gnu
+          chmod +x src-tauri/bin/tun2socks-x86_64-unknown-linux-gnu
+
+          echo "--- bin/ contents ---"
+          ls -la src-tauri/bin
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Inject backend hostnames
+        # tauri.conf.json and capabilities/default.json carry __BOT_API_HOST__
+        # / __PANEL_HOST__ placeholders in source so the public repo never
+        # leaks production domains. We substitute the real hosts here from
+        # CI secrets right before the build.
+        env:
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST }}
+        run: bash scripts/inject-backend-host.sh
+
+      - name: Build Linux .deb
+        # TAURI_SIGNING_* are passed only for tag pushes — that's when Tauri's
+        # bundler emits a .sig file alongside the .deb so the updater plugin
+        # can verify the bundle on the user's machine. For branch pushes the
+        # secrets are absent and Tauri skips signing, which is fine: those
+        # builds aren't published to the GitHub Release.
+        # When TAURI_SIGNING_PRIVATE_KEY is set, the bundler auto-emits a
+        # .sig file alongside each .deb (driven by createUpdaterArtifacts in
+        # tauri.conf.json — the explicit "updater" target is not a real
+        # bundle type).
+        run: npx tauri build --bundles deb
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ToBeVPN-linux-deb
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/*.deb.sig
+          if-no-files-found: error
+
+  build-windows:
+    needs: audit
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Download Windows sidecar binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
+
+          Write-Host "Downloading Xray-core (Windows x64)..."
+          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip" -OutFile xray.zip
+          Expand-Archive -Path xray.zip -DestinationPath xray-extracted -Force
+          Copy-Item xray-extracted/xray.exe src-tauri/bin/xray-x86_64-pc-windows-msvc.exe
+          Copy-Item xray-extracted/geoip.dat src-tauri/bin/ -Force
+          Copy-Item xray-extracted/geosite.dat src-tauri/bin/ -Force
+
+          Write-Host "Downloading tun2socks (Windows amd64)..."
+          Invoke-WebRequest -Uri "https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-windows-amd64.zip" -OutFile tun2socks.zip
+          Expand-Archive -Path tun2socks.zip -DestinationPath tun2socks-extracted -Force
+          Copy-Item tun2socks-extracted/tun2socks-windows-amd64.exe src-tauri/bin/tun2socks-x86_64-pc-windows-msvc.exe
+
+          Write-Host "Downloading Wintun driver..."
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
+          Expand-Archive -Path wintun.zip -DestinationPath wintun-extracted -Force
+          Copy-Item wintun-extracted/wintun/bin/amd64/wintun.dll src-tauri/bin/wintun.dll
+
+          Write-Host "--- bin/ contents ---"
+          Get-ChildItem src-tauri/bin
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Inject backend hostnames
+        shell: bash
+        env:
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST }}
+        run: bash scripts/inject-backend-host.sh
+
+      - name: Build Windows .exe (NSIS)
+        run: npx tauri build --bundles nsis
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
+
+      - uses: actions/upload-artifact@v5
+        with:
+          # GitHub Actions always wraps uploaded artifacts in a zip; we can't
+          # ship a bare .exe through this API. The archive contains a single
+          # ready-to-run installer .exe inside, plus the .sig file the
+          # tauri-plugin-updater verifies before applying the update.
+          name: ToBeVPN-windows-exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
+          if-no-files-found: error
+
+  # Tag-triggered: when push refs/tags/v*, attach both artifacts to a
+  # GitHub Release. Works only on tag pushes — regular branch pushes still
+  # produce artifacts but don't create a release.
+  release:
+    needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+
+      - name: Generate Tauri updater manifest (latest.json)
+        # The updater plugin (tauri-plugin-updater) on each user device fetches
+        # this manifest from the configured endpoint and uses the embedded
+        # ed25519 signature to verify the bundle before applying. The format
+        # is the standard one Tauri expects: `version`, `pub_date`, and a
+        # `platforms` map keyed by `os-arch`. We only build for x86_64 today.
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          DEB=$(find dist/ToBeVPN-linux-deb -name "*.deb" -not -name "*.sig" | head -1)
+          DEB_SIG=$(find dist/ToBeVPN-linux-deb -name "*.deb.sig" | head -1)
+          EXE=$(find dist/ToBeVPN-windows-exe -name "*.exe" -not -name "*.sig" | head -1)
+          EXE_SIG=$(find dist/ToBeVPN-windows-exe -name "*.exe.sig" | head -1)
+
+          if [ -z "$DEB" ] || [ -z "$DEB_SIG" ] || [ -z "$EXE" ] || [ -z "$EXE_SIG" ]; then
+            echo "::error::Missing one of: deb=$DEB sig=$DEB_SIG exe=$EXE sig=$EXE_SIG"
+            ls -R dist/
+            exit 1
+          fi
+
+          DEB_NAME=$(basename "$DEB")
+          EXE_NAME=$(basename "$EXE")
+          DEB_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${DEB_NAME}"
+          EXE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${EXE_NAME}"
+          DEB_SIG_CONTENT=$(cat "$DEB_SIG")
+          EXE_SIG_CONTENT=$(cat "$EXE_SIG")
+
+          cat > latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "linux-x86_64": {
+                "signature": "${DEB_SIG_CONTENT}",
+                "url": "${DEB_URL}"
+              },
+              "windows-x86_64": {
+                "signature": "${EXE_SIG_CONTENT}",
+                "url": "${EXE_URL}"
+              }
+            }
+          }
+          EOF
+          echo "--- latest.json ---"
+          cat latest.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ToBeVPN-linux-deb/*.deb
+            dist/ToBeVPN-linux-deb/*.deb.sig
+            dist/ToBeVPN-windows-exe/*.exe
+            dist/ToBeVPN-windows-exe/*.exe.sig
+            latest.json
+          generate_release_notes: true

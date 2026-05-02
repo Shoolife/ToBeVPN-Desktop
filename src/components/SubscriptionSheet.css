@@ -1,0 +1,377 @@
+.sub-sheet-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  animation: sub-sheet-backdrop-in 200ms ease;
+}
+
+.sub-sheet-overlay--closing {
+  animation: sub-sheet-backdrop-out 200ms ease forwards;
+}
+
+@keyframes sub-sheet-backdrop-in {
+  from { background: rgba(0, 0, 0, 0); }
+  to   { background: rgba(0, 0, 0, 0.55); }
+}
+
+@keyframes sub-sheet-backdrop-out {
+  from { background: rgba(0, 0, 0, 0.55); }
+  to   { background: rgba(0, 0, 0, 0); }
+}
+
+.sub-sheet {
+  background: #1c1c1c;
+  border-radius: 24px 24px 0 0;
+  max-height: 88%;
+  display: flex;
+  flex-direction: column;
+  animation: sub-sheet-slide-up 280ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.sub-sheet--closing {
+  animation: sub-sheet-slide-down 240ms cubic-bezier(0.4, 0, 0.8, 0.3) forwards;
+}
+
+@keyframes sub-sheet-slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+@keyframes sub-sheet-slide-down {
+  from { transform: translateY(0); }
+  to   { transform: translateY(100%); }
+}
+
+.sub-sheet__handle {
+  width: 36px;
+  height: 4px;
+  background: #938F99;
+  opacity: 0.4;
+  border-radius: 2px;
+  margin: 12px auto 0;
+  flex-shrink: 0;
+}
+
+.sub-sheet__content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 24px 32px;
+}
+
+.sub-sheet__title {
+  font-size: 24px;
+  font-weight: 700;
+  color: #E6E1E5;
+  margin-bottom: 16px;
+  letter-spacing: 0;
+}
+
+/* Current plan card — slightly lighter than the sheet background. */
+.sub-current {
+  background: #262626;
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.sub-current__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.sub-current__label {
+  font-size: 15px;
+  font-weight: 500;
+  color: #A8A8AE;
+  margin-bottom: 0;
+}
+
+.sub-current__name {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.sub-current__name--green { color: #4CAF50; }
+.sub-current__name--orange { color: #FF9800; }
+.sub-current__name--red { color: #F44336; }
+
+.sub-current__hint {
+  font-size: 14px;
+  color: #A8A8AE;
+  margin-top: 2px;
+}
+
+.sub-current__limits {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.sub-current__sep {
+  font-size: 22px;
+  font-weight: 700;
+  color: #A8A8AE;
+  line-height: 1;
+}
+
+.sub-limit {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.15;
+}
+
+.sub-limit__value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #E6E5E9;
+  letter-spacing: -0.01em;
+}
+
+.sub-limit__label {
+  font-size: 14px;
+  color: #A8A8AE;
+  margin-top: 4px;
+}
+
+.sub-sheet__divider {
+  height: 1px;
+  background: #3A3A3E;
+  margin: 0 0 20px;
+}
+
+.sub-sheet__section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #E6E5E9;
+  margin-bottom: 12px;
+}
+
+/* Plan options — unselected: transparent; selected: neutral primaryContainer */
+.sub-plan {
+  display: flex;
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 12px;
+  padding: 8px 16px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  transition: background 120ms;
+  width: 100%;
+  text-align: left;
+}
+
+.sub-plan:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sub-plan--selected {
+  background: #3F434C;
+}
+
+.sub-plan--selected:hover {
+  background: #464A54;
+}
+
+.sub-plan__radio {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #79797F;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-right: 12px;
+}
+
+.sub-plan--selected .sub-plan__radio {
+  background: #C9CAD2;
+}
+
+.sub-plan__radio-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2C2E36;
+}
+
+.sub-plan__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.sub-plan__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #E6E5E9;
+  line-height: 1.25;
+}
+
+.sub-plan--selected .sub-plan__title {
+  color: #E2E2EA;
+}
+
+.sub-plan__desc {
+  font-size: 12px;
+  color: #A8A8AE;
+  margin-top: 2px;
+}
+
+.sub-plan--selected .sub-plan__desc {
+  color: #C4C4CC;
+  opacity: 0.85;
+}
+
+.sub-plan__price {
+  font-size: 16px;
+  font-weight: 700;
+  color: #E6E5E9;
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+.sub-plan--selected .sub-plan__price {
+  color: #E2E2EA;
+}
+
+.sub-sheet__hint {
+  font-size: 12px;
+  color: #A8A8AE;
+  margin: 12px 0 16px;
+}
+
+/* Filled button — neutral primary (Material You) */
+.sub-sheet__buy-btn {
+  width: 100%;
+  height: 40px;
+  border-radius: 12px;
+  border: none;
+  background: #DADCE5;
+  color: #2D2F37;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+  cursor: pointer;
+  transition: background 120ms, box-shadow 120ms;
+}
+
+.sub-sheet__buy-btn:hover {
+  background: #E3E5EE;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+}
+
+/* QR overlay */
+.sub-qr-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  animation: sub-qr-fade-in 200ms ease;
+  padding: 24px;
+}
+
+@keyframes sub-qr-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.sub-qr-overlay--closing {
+  animation: sub-qr-fade-out 200ms ease forwards;
+}
+
+@keyframes sub-qr-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+.sub-qr-card {
+  background: #2b2b2b;
+  border: 1px solid #3a3a3a;
+  border-radius: 24px;
+  padding: 24px;
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: sub-qr-scale-in 240ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+.sub-qr-card--closing {
+  animation: sub-qr-scale-out 200ms cubic-bezier(0.4, 0, 0.8, 0.3) forwards;
+}
+
+@keyframes sub-qr-scale-in {
+  from { transform: scale(0.9); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+
+@keyframes sub-qr-scale-out {
+  from { transform: scale(1); opacity: 1; }
+  to   { transform: scale(0.9); opacity: 0; }
+}
+
+.sub-qr-card__title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.sub-qr-card__qr {
+  background: white;
+  padding: 14px;
+  border-radius: 16px;
+  margin-bottom: 16px;
+}
+
+.sub-qr-card__hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.sub-qr-card__hint--error {
+  color: var(--danger);
+}
+
+/* Inherits from .cta-pill — only adjust spacing here. */
+.sub-qr-card__open-tg {
+  margin-top: 16px;
+}
+
+.sub-qr-card__close {
+  width: 100%;
+  height: 42px;
+  border-radius: 10px;
+  border: 1px solid #242424;
+  background: #222222;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms;
+  margin-top: 8px;
+}
+
+.sub-qr-card__close:hover {
+  background: #2c2c2c;
+}

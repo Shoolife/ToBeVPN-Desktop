@@ -1,0 +1,390 @@
+// Thin fetch wrapper for the bot backend using per-device sessions.
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import { BOT_API_BASE_URL } from "./config";
+import { getDeviceFingerprint } from "../session/fingerprint";
+import {
+  clearDeviceSession,
+  getSession,
+  hasValidAccessToken,
+  hasValidRefreshToken,
+  updateSessionFromTokens,
+} from "../session/store";
+import {
+  clearSecureSession,
+  persistCurrentSessionSecrets,
+} from "../session/secureSession";
+import type {
+  ApiResponse,
+  AuthRequestDto,
+  AuthRequestResponseDto,
+  AuthStatusDto,
+  BootstrapRequestDto,
+  DeviceRegisterRequestDto,
+  DeviceUnlinkRequestDto,
+  LinkedDevicesDto,
+  PanelNodeDto,
+  PanelResponse,
+  PanelSubInfoDto,
+  PanelUserDto,
+  PurchasePlansDto,
+  RefreshRequestDto,
+  SaveEmailRequestDto,
+  SessionTokensDto,
+  TvPairCreateRequestDto,
+  TvPairCreateResponseDto,
+  TvPairStatusDto,
+} from "./types";
+
+// In production the WebKit webview origin (tauri://localhost) is rejected by
+// CORS, so route HTTP through the Rust-side plugin which bypasses CORS.
+// In dev we keep window.fetch so Vite's /api proxy continues to work.
+const httpFetch: typeof fetch = import.meta.env.DEV ? window.fetch.bind(window) : tauriFetch;
+
+type AuthMode = "access" | "none";
+
+function resolveBase(): string {
+  const base = BOT_API_BASE_URL;
+  if (base === "/" || base === "") return window.location.origin + "/";
+  return base;
+}
+
+function buildUrl(path: string, query?: Record<string, string | number | undefined>): string {
+  const trimmed = path.startsWith("/") ? path.slice(1) : path;
+  const url = new URL(trimmed, resolveBase());
+  if (query) {
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+    }
+  }
+  return url.toString();
+}
+
+// Hard ceiling on every API call. Without this a broken VPN tunnel leaves the
+// fetch pending forever — even after the user disconnects — because the
+// underlying TCP socket was opened through a route that no longer exists.
+const REQUEST_TIMEOUT_MS = 15_000;
+
+let tokenOperation: Promise<string | null> | null = null;
+
+function runTokenOperation(
+  operation: () => Promise<string | null>,
+): Promise<string | null> {
+  if (tokenOperation) return tokenOperation;
+  tokenOperation = operation().finally(() => {
+    tokenOperation = null;
+  });
+  return tokenOperation;
+}
+
+async function performFetch(
+  path: string,
+  init: RequestInit = {},
+  query?: Record<string, string | number | undefined>,
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const fingerprint = await getDeviceFingerprint();
+  if (!headers.has("User-Agent")) {
+    headers.set("User-Agent", fingerprint.userAgent);
+  }
+
+  const controller = new AbortController();
+  const userSignal = init.signal;
+  if (userSignal) {
+    if (userSignal.aborted) {
+      controller.abort();
+    } else {
+      userSignal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+  const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    return await httpFetch(buildUrl(path, query), {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted && (!userSignal || !userSignal.aborted)) {
+      throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function parseErrorMessage(response: Response): Promise<string> {
+  // Cap the surfaced error message length so a hostile/buggy backend payload
+  // can't blow up the UI layout. React already escapes the text — no XSS — but
+  // multi-MB error bodies or multi-line markdown break the layout.
+  const sanitize = (raw: string): string =>
+    raw.replace(/[\n\r\t]+/g, " ").trim().slice(0, 200);
+  try {
+    const text = await response.text();
+    if (!text) return `HTTP ${response.status}`;
+    try {
+      const parsed = JSON.parse(text) as { message?: string; detail?: string };
+      if (typeof parsed.message === "string" && parsed.message.trim())
+        return sanitize(parsed.message);
+      if (typeof parsed.detail === "string" && parsed.detail.trim())
+        return sanitize(parsed.detail);
+    } catch {
+      // Not JSON — fall back to raw text.
+    }
+    return sanitize(text);
+  } catch {
+    return `HTTP ${response.status}`;
+  }
+}
+
+async function expectJson<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    throw new Error(await parseErrorMessage(response));
+  }
+  return (await response.json()) as T;
+}
+
+async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
+  const session = getSession();
+  const requestBody: BootstrapRequestDto = {
+    device_id: session.deviceId,
+    platform: "desktop",
+  };
+  const response = await performFetch("api/device/bootstrap", {
+    method: "POST",
+    body: JSON.stringify(requestBody),
+  });
+  const payload = await expectJson<ApiResponse<SessionTokensDto>>(response);
+  if (!payload.success || !payload.data) {
+    throw new Error(payload.message ?? "Bootstrap failed");
+  }
+  updateSessionFromTokens(payload.data);
+  await persistCurrentSessionSecrets();
+  return payload.data;
+}
+
+async function refreshDeviceSessionInternal(refreshToken: string): Promise<SessionTokensDto> {
+  const requestBody: RefreshRequestDto = {
+    refresh_token: refreshToken,
+  };
+  const response = await performFetch("api/device/refresh", {
+    method: "POST",
+    body: JSON.stringify(requestBody),
+  });
+  const payload = await expectJson<ApiResponse<SessionTokensDto>>(response);
+  if (!payload.success || !payload.data) {
+    throw new Error(payload.message ?? "Refresh failed");
+  }
+  updateSessionFromTokens(payload.data);
+  await persistCurrentSessionSecrets();
+  return payload.data;
+}
+
+export async function ensureDeviceSession(): Promise<void> {
+  const session = getSession();
+  if (hasValidAccessToken(session)) return;
+
+  await runTokenOperation(async () => {
+    const current = getSession();
+    if (hasValidAccessToken(current)) return current.accessToken;
+
+    if (hasValidRefreshToken(current) && current.refreshToken) {
+      try {
+        const refreshed = await refreshDeviceSessionInternal(current.refreshToken);
+        return refreshed.access_token;
+      } catch (error) {
+        console.warn("[device-session] refresh failed during startup:", error);
+      }
+    }
+
+    const bootstrapped = await bootstrapDeviceSessionInternal();
+    return bootstrapped.access_token;
+  });
+}
+
+export async function syncDeviceSessionState(): Promise<void> {
+  await runTokenOperation(async () => {
+    const current = getSession();
+
+    if (current.refreshToken) {
+      try {
+        const refreshed = await refreshDeviceSessionInternal(current.refreshToken);
+        return refreshed.access_token;
+      } catch (error) {
+        console.warn("[device-session] refresh state sync failed:", error);
+      }
+    }
+
+    const bootstrapped = await bootstrapDeviceSessionInternal();
+    return bootstrapped.access_token;
+  });
+}
+
+async function getAccessTokenForRequest(): Promise<string | null> {
+  const current = getSession();
+  if (hasValidAccessToken(current)) return current.accessToken;
+
+  try {
+    await ensureDeviceSession();
+  } catch (error) {
+    console.warn("[device-session] ensureDeviceSession failed:", error);
+  }
+
+  const updated = getSession();
+  return hasValidAccessToken(updated) ? updated.accessToken : null;
+}
+
+async function recoverAccessTokenAfter401(previousToken: string | null): Promise<string | null> {
+  const current = getSession();
+  if (hasValidAccessToken(current) && current.accessToken !== previousToken) {
+    return current.accessToken;
+  }
+
+  return runTokenOperation(async () => {
+    const latest = getSession();
+    if (hasValidAccessToken(latest) && latest.accessToken !== previousToken) {
+      return latest.accessToken;
+    }
+
+    if (hasValidRefreshToken(latest) && latest.refreshToken) {
+      try {
+        const refreshed = await refreshDeviceSessionInternal(latest.refreshToken);
+        return refreshed.access_token;
+      } catch (error) {
+        console.warn("[device-session] refresh after 401 failed:", error);
+        await clearSecureSession();
+        clearDeviceSession();
+      }
+    }
+
+    try {
+      const bootstrapped = await bootstrapDeviceSessionInternal();
+      return bootstrapped.access_token;
+    } catch (error) {
+      console.warn("[device-session] bootstrap after 401 failed:", error);
+      await clearSecureSession();
+      clearDeviceSession();
+      return null;
+    }
+  });
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  query?: Record<string, string | number | undefined>,
+  authMode: AuthMode = "access",
+  retryOn401 = true,
+): Promise<T> {
+  const headers = new Headers(init.headers);
+  let accessToken: string | null = null;
+
+  if (authMode === "access") {
+    accessToken = await getAccessTokenForRequest();
+    if (accessToken) {
+      headers.set("Authorization", `Bearer ${accessToken}`);
+    }
+  }
+
+  const response = await performFetch(path, { ...init, headers }, query);
+  if (response.status === 401 && authMode === "access" && retryOn401) {
+    const recoveredToken = await recoverAccessTokenAfter401(accessToken);
+    if (recoveredToken) {
+      return request(path, init, query, authMode, false);
+    }
+  }
+
+  return expectJson<T>(response);
+}
+
+// --- Deep-link authentication ---
+
+export function requestAuth(
+  req: AuthRequestDto,
+): Promise<ApiResponse<AuthRequestResponseDto>> {
+  return request("api/auth/request", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export function checkAuthStatus(token: string): Promise<ApiResponse<AuthStatusDto>> {
+  return request("api/auth/status", { method: "GET" }, { token }, "none");
+}
+
+// --- Devices ---
+
+export function registerDevice(req: DeviceRegisterRequestDto): Promise<ApiResponse<unknown>> {
+  return request("api/device/register", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export function unlinkDevice(req: DeviceUnlinkRequestDto): Promise<ApiResponse<unknown>> {
+  return request("api/device/unlink", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export function logoutDevice(): Promise<ApiResponse<unknown>> {
+  return request("api/device/logout", { method: "POST" });
+}
+
+export function getDevices(): Promise<ApiResponse<LinkedDevicesDto>> {
+  return request("api/devices", { method: "GET" });
+}
+
+// --- TV pairing ---
+
+export function createTvPairing(
+  req: TvPairCreateRequestDto,
+): Promise<ApiResponse<TvPairCreateResponseDto>> {
+  return request("api/tv/pair/create", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export function checkTvPairingStatus(code: string): Promise<ApiResponse<TvPairStatusDto>> {
+  return request("api/tv/pair/status", { method: "GET" }, { code }, "none");
+}
+
+// --- Panel proxy ---
+
+export function getUserByTelegramId(
+  telegramId: number,
+): Promise<PanelResponse<PanelUserDto[]>> {
+  return request(`api/panel/user-by-telegram/${telegramId}`, { method: "GET" });
+}
+
+export function getNodes(): Promise<PanelResponse<PanelNodeDto[]>> {
+  return request("api/panel/nodes", { method: "GET" });
+}
+
+export function getSubscriptionInfo(
+  shortUuid: string,
+): Promise<PanelResponse<PanelSubInfoDto>> {
+  return request(`api/panel/sub/${shortUuid}/info`, { method: "GET" });
+}
+
+// --- Email ---
+
+export function saveEmail(req: SaveEmailRequestDto): Promise<ApiResponse<unknown>> {
+  return request("api/device/save-email", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+// --- Purchase plans ---
+
+export function getPurchasePlans(): Promise<ApiResponse<PurchasePlansDto>> {
+  return request("api/purchase/plans", { method: "GET" });
+}

@@ -1,0 +1,314 @@
+.settings-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+/* Top bar */
+.settings-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 12px 8px;
+  flex-shrink: 0;
+}
+
+.settings-topbar__back {
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms;
+  flex-shrink: 0;
+}
+
+.settings-topbar__back:hover {
+  background: var(--surface-2);
+}
+
+.settings-topbar__title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+/* Content */
+.settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Cards */
+.settings-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+}
+
+.settings-card--clickable {
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.settings-card--clickable:hover {
+  background: var(--surface-2);
+}
+
+.settings-card__header {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+.settings-card__hint {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.settings-card__row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.settings-card__col {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-card__col .settings-card__hint {
+  margin-top: 0;
+}
+
+.settings-card__arrow {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+/* Info rows */
+.settings-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.settings-info-row__label {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.settings-info-row__value {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.settings-info-row__value--green {
+  color: #4CAF50;
+}
+
+.settings-info-row__value--orange {
+  color: #FF9800;
+}
+
+.settings-info-row__value--red {
+  color: #F44336;
+}
+
+.settings-card__renew-hint {
+  font-size: 13px;
+  color: #F44336;
+  margin-top: 6px;
+}
+
+/* Chips */
+.settings-chips {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-chip {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 8px;
+  border: 1px solid #5C5C61;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+}
+
+.settings-chip:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.settings-chip--active {
+  background: #3F434C;
+  border-color: transparent;
+}
+
+.settings-chip--active:hover {
+  background: #464A54;
+}
+
+/* Email edit */
+.settings-email-edit-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 120ms, background 120ms;
+}
+
+.settings-email-edit-btn:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.settings-email-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-email-edit__input {
+  width: 100%;
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  padding: 0 12px;
+  outline: none;
+  transition: border-color 120ms;
+  box-sizing: border-box;
+}
+
+.settings-email-edit__input:focus {
+  border-color: var(--accent);
+}
+
+.settings-email-edit__error {
+  font-size: 13px;
+  color: #F44336;
+}
+
+.settings-email-edit__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Logout button */
+.settings-logout-btn {
+  width: 100%;
+  height: 44px;
+  border-radius: 14px;
+  border: 1px solid #F44336;
+  background: transparent;
+  color: #F44336;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.settings-logout-btn:hover {
+  background: rgba(244, 67, 54, 0.08);
+}
+
+/* Dialog overlay */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(4px);
+}
+
+.dialog {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 24px;
+  max-width: 340px;
+  width: calc(100% - 48px);
+}
+
+.dialog__title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.dialog__message {
+  font-size: 14px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-bottom: 24px;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dialog__btn {
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 10px;
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.dialog__btn--secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.dialog__btn--secondary:hover {
+  background: var(--surface-2);
+}
+
+.dialog__btn--primary {
+  background: #DADCE5;
+  color: #2D2F37;
+}
+
+.dialog__btn--primary:hover {
+  background: #E3E5EE;
+}

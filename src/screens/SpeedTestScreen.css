@@ -1,0 +1,180 @@
+.speed-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+/* Top bar */
+.speed-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 12px 8px;
+  flex-shrink: 0;
+}
+
+.speed-topbar__back {
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms;
+  flex-shrink: 0;
+}
+
+.speed-topbar__back:hover {
+  background: var(--surface-2);
+}
+
+.speed-topbar__title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.speed-vpn-badge {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.speed-vpn-badge--on {
+  background: rgba(67, 211, 158, 0.16);
+  color: #43d39e;
+  border: 1px solid rgba(67, 211, 158, 0.32);
+}
+
+.speed-vpn-badge--off {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.speed-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 24px 28px;
+  overflow-y: auto;
+}
+
+/* Gauge */
+.speed-gauge {
+  width: 320px;
+  height: 320px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.speed-gauge__svg {
+  position: absolute;
+  inset: 0;
+}
+
+.speed-gauge__center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  user-select: none;
+}
+
+.speed-gauge__value {
+  font-size: 52px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1;
+}
+
+.speed-gauge__unit {
+  font-size: 15px;
+  color: var(--text-muted);
+}
+
+/* Phase label */
+.speed-phase {
+  margin-top: 16px;
+  font-size: 17px;
+  color: var(--text-muted);
+  min-height: 24px;
+  text-align: center;
+}
+
+.speed-phase--error {
+  color: #F44336;
+}
+
+/* Results */
+.speed-results {
+  margin-top: 40px;
+  display: flex;
+  gap: 14px;
+  width: 100%;
+}
+
+.speed-result {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.speed-result__label {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-transform: none;
+}
+
+.speed-result__value {
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.speed-result__value--green { color: #4CAF50; }
+.speed-result__value--orange { color: #FF9800; }
+.speed-result__value--red { color: #F44336; }
+.speed-result__value--muted { color: var(--text-muted); }
+
+.speed-result__unit {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Start button */
+.speed-start-btn {
+  margin-top: auto;
+  width: 100%;
+  height: 52px;
+  border-radius: 16px;
+  border: none;
+  background: #DADCE5;
+  color: #2D2F37;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.speed-start-btn:hover {
+  background: #E3E5EE;
+}

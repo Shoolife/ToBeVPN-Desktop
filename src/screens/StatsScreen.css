@@ -1,0 +1,334 @@
+.stats-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+/* Top bar */
+.stats-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 12px 8px;
+  flex-shrink: 0;
+}
+
+.stats-topbar__back {
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms;
+  flex-shrink: 0;
+}
+
+.stats-topbar__back:hover {
+  background: var(--surface-2);
+}
+
+.stats-topbar__title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+/* Scrollable content */
+.stats-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Hero card */
+.stats-hero {
+  background: linear-gradient(135deg, rgba(33, 150, 243, 0.35) 0%, rgba(76, 175, 80, 0.18) 100%);
+  border-radius: 24px;
+  padding: 20px;
+}
+
+.stats-hero__top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.stats-hero__icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(33, 150, 243, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.stats-hero__label {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.stats-hero__sublabel {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.stats-hero__total {
+  font-size: 36px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 16px;
+  letter-spacing: -0.02em;
+}
+
+.stats-hero__metrics {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.stats-hero__metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+}
+
+.stats-hero__metric-icon {
+  color: rgba(255, 255, 255, 0.75);
+  margin-bottom: 4px;
+}
+
+.stats-hero__metric-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.stats-hero__metric-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.stats-hero__divider {
+  width: 1px;
+  height: 36px;
+  background: rgba(255, 255, 255, 0.15);
+  flex-shrink: 0;
+}
+
+/* Period selector */
+.stats-periods {
+  display: flex;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.stats-period-chip {
+  padding: 6px 16px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 120ms;
+}
+
+.stats-period-chip:hover {
+  background: var(--surface-2);
+}
+
+.stats-period-chip--active {
+  background: rgba(33, 150, 243, 0.25);
+  border-color: rgba(33, 150, 243, 0.4);
+  color: #64B5F6;
+}
+
+.stats-period-chip--active:hover {
+  background: rgba(33, 150, 243, 0.3);
+}
+
+/* Chart */
+.stats-chart {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 20px 16px 12px 8px;
+  height: 200px;
+  min-height: 200px;
+  flex-shrink: 0;
+  display: flex;
+}
+
+.stats-chart__y-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 0 6px 20px 0;
+  min-width: 36px;
+  text-align: right;
+}
+
+.stats-chart__y-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.stats-chart__area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.stats-chart__gridlines {
+  position: absolute;
+  inset: 0 0 20px 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.stats-chart__gridline {
+  border-bottom: 1px dashed rgba(138, 151, 168, 0.15);
+}
+
+.stats-chart__gridline:last-child {
+  border-bottom: 1px solid rgba(138, 151, 168, 0.2);
+}
+
+.stats-chart__bars {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  padding-bottom: 20px;
+}
+
+.stats-chart__bar-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  justify-content: flex-end;
+}
+
+.stats-chart__bar {
+  width: 100%;
+  max-width: 28px;
+  border-radius: 5px 5px 1px 1px;
+  background: linear-gradient(to bottom, #2196F3, rgba(33, 150, 243, 0.18));
+  transition: height 750ms cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  min-height: 0;
+}
+
+.stats-chart__bar--max {
+  background: linear-gradient(to bottom, #4CAF50, rgba(76, 175, 80, 0.2));
+  box-shadow: 0 0 8px rgba(76, 175, 80, 0.15);
+}
+
+.stats-chart__bar--max::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 4px 4px 1px 1px;
+  border: 1.5px solid #4CAF50;
+  pointer-events: none;
+}
+
+.stats-chart__bar-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  opacity: 0.7;
+  margin-top: 4px;
+  text-align: center;
+  white-space: nowrap;
+  position: absolute;
+  bottom: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* Period label */
+.stats-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 4px 4px;
+}
+
+/* Stat rows */
+.stats-row {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 16px;
+}
+
+.stats-row__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.stats-row__period {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.stats-row__bytes {
+  font-size: 16px;
+  font-weight: 700;
+  color: #4CAF50;
+}
+
+.stats-row__detail {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.stats-row__bar-bg {
+  height: 5px;
+  background: rgba(138, 151, 168, 0.15);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.stats-row__bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(to right, #2196F3, #4CAF50);
+  transition: width 500ms ease;
+}
+
+/* No data */
+.stats-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
