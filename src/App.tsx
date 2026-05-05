@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import SplashScreen from "./screens/SplashScreen";
 import PairingScreen from "./screens/PairingScreen";
 import HomeScreen from "./screens/HomeScreen";
@@ -213,16 +214,18 @@ export default function App() {
         >
           {renderScreen(currentScreen)}
         </div>
-        {/* Overlay above every screen — matches the Android phone behaviour
-            where the update banner persists across navigation. The banner
-            is self-hiding when no update is available; the overlay
-            wrapper itself accepts no pointer events outside the card so
-            it doesn't block clicks on the screens beneath it. */}
-        {currentScreen !== "splash" && currentScreen !== "pairing" && (
-          <div className="update-banner-overlay">
-            <UpdateBanner />
-          </div>
-        )}
+        {/* Overlay above every screen. We portal it onto document.body so
+            it sits outside the .app container's overflow:hidden / animated
+            screen-layer transforms — those create new containing blocks
+            and break position:fixed under WebKitGTK on Linux. Document
+            body is guaranteed to be the viewport-relative root. */}
+        {currentScreen !== "splash" && currentScreen !== "pairing" &&
+          createPortal(
+            <div className="update-banner-overlay">
+              <UpdateBanner />
+            </div>,
+            document.body,
+          )}
       </AppErrorBoundary>
     </main>
   );
