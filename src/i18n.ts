@@ -178,8 +178,8 @@ const strings = {
     update_banner_retry: "Повторить",
     update_check_button: "Проверить",
     update_check_button_loading: "Проверка…",
-    update_check_uptodate: "Установлена последняя версия ({version})",
-    update_available_short: "Доступна: {version}",
+    update_check_uptodate: "Версия {version}",
+    update_available_short: "Версия {current} · доступна v{version}",
   },
   en: {
     // Splash
@@ -344,8 +344,8 @@ const strings = {
     update_banner_retry: "Retry",
     update_check_button: "Check",
     update_check_button_loading: "Checking…",
-    update_check_uptodate: "Latest version installed ({version})",
-    update_available_short: "Available: {version}",
+    update_check_uptodate: "Version {version}",
+    update_available_short: "Version {current} · v{version} available",
   },
 } as const;
 

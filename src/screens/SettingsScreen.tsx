@@ -243,21 +243,18 @@ export default function SettingsScreen({
           </div>
         </div>
 
-        {/* About card */}
+        {/* About card. We deliberately don't render a separate
+            "Version: 1.0.x" row here anymore — UpdateCheckRow already
+            shows the current version (and an "available v…" suffix when
+            a new release is out), so a standalone version row would just
+            duplicate the same number twice in the same card. */}
         <div className="settings-card">
           <div className="settings-card__header">{t("about")}</div>
-          <div className="settings-info-row">
-            <span className="settings-info-row__label">{t("version")}</span>
-            {/* __APP_VERSION__ is injected by Vite from package.json — single
-                source of truth so the displayed version always matches the
-                tag we ship under. */}
-            <span className="settings-info-row__value">{__APP_VERSION__}</span>
-          </div>
+          <UpdateCheckRow />
           <div className="settings-info-row">
             <span className="settings-info-row__label">{t("xray")}</span>
             <span className="settings-info-row__value">Xray-core v26.3.27</span>
           </div>
-          <UpdateCheckRow />
         </div>
 
         {/* Logout */}

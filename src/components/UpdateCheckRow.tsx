@@ -39,7 +39,9 @@ export default function UpdateCheckRow() {
   };
 
   const status = info
-    ? t("update_available_short").replace("{version}", info.version)
+    ? t("update_available_short")
+        .replace("{current}", __APP_VERSION__)
+        .replace("{version}", info.version)
     : t("update_check_uptodate").replace("{version}", __APP_VERSION__);
 
   return (
