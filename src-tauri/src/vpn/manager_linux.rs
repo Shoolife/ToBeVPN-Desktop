@@ -796,11 +796,20 @@ echo "[TUN-SCRIPT] Done!"
     /// up with their own script installed at /usr/local/bin/tobevpn-helper.sh
     /// — passwordlessly callable as root forever after.
     async fn ensure_helper_installed() -> Result<bool, String> {
+        // Normalise line endings and trailing whitespace before comparing so
+        // that a CRLF-on-disk or extra-newline-in-tarball file still counts
+        // as equal to the build-time embedded copy. Without this, the tiniest
+        // whitespace drift triggers a re-install (which fires its own pkexec
+        // prompt) every time the user starts a session — that's where the
+        // "asks for password twice" bug came from after updating the .deb.
+        let normalise = |s: &str| s.replace("\r\n", "\n").trim_end_matches('\n').to_string();
+        let embedded_helper = normalise(HELPER_SH);
+        let embedded_policy = normalise(POLICY_XML);
         let helper_ok = std::fs::read_to_string(POLKIT_HELPER)
-            .map(|c| c == HELPER_SH)
+            .map(|c| normalise(&c) == embedded_helper)
             .unwrap_or(false);
         let policy_ok = std::fs::read_to_string(POLKIT_POLICY)
-            .map(|c| c == POLICY_XML)
+            .map(|c| normalise(&c) == embedded_policy)
             .unwrap_or(false);
         if helper_ok && policy_ok {
             return Ok(true);

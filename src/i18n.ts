@@ -5,7 +5,16 @@ const STORAGE_KEY = "tobevpn_lang";
 export function getSavedLang(): Lang {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved === "en" || saved === "ru") return saved;
-  return "ru";
+  // First launch — pick a sane default from the OS / browser locale so
+  // the very first frame (Splash, Pairing) reads correctly. We only
+  // ship Russian and English, so anything that doesn't look English
+  // falls back to Russian.
+  const sys =
+    typeof navigator !== "undefined"
+      ? (navigator.language || (navigator.languages && navigator.languages[0]) || "")
+          .toLowerCase()
+      : "";
+  return sys.startsWith("en") ? "en" : "ru";
 }
 
 export function saveLang(lang: Lang) {
