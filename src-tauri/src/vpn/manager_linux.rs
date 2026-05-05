@@ -796,22 +796,23 @@ echo "[TUN-SCRIPT] Done!"
     /// up with their own script installed at /usr/local/bin/tobevpn-helper.sh
     /// — passwordlessly callable as root forever after.
     async fn ensure_helper_installed() -> Result<bool, String> {
-        // Normalise line endings and trailing whitespace before comparing so
-        // that a CRLF-on-disk or extra-newline-in-tarball file still counts
-        // as equal to the build-time embedded copy. Without this, the tiniest
-        // whitespace drift triggers a re-install (which fires its own pkexec
-        // prompt) every time the user starts a session — that's where the
-        // "asks for password twice" bug came from after updating the .deb.
-        let normalise = |s: &str| s.replace("\r\n", "\n").trim_end_matches('\n').to_string();
-        let embedded_helper = normalise(HELPER_SH);
-        let embedded_policy = normalise(POLICY_XML);
-        let helper_ok = std::fs::read_to_string(POLKIT_HELPER)
-            .map(|c| normalise(&c) == embedded_helper)
-            .unwrap_or(false);
-        let policy_ok = std::fs::read_to_string(POLKIT_POLICY)
-            .map(|c| normalise(&c) == embedded_policy)
-            .unwrap_or(false);
-        if helper_ok && policy_ok {
+        // The .deb postinst (and the NSIS installer on Windows) drops both
+        // files in their final locations as part of installing the app, so
+        // by the time the user starts a session the helper is already on
+        // disk with root ownership and the polkit policy active. The old
+        // logic compared embedded vs on-disk byte-for-byte and, on the
+        // tiniest whitespace drift between include_str! and the .deb
+        // payload, fired a one-time-install pkexec — the second password
+        // prompt the user hit on every fresh install or upgrade.
+        //
+        // Trust .deb / NSIS as the source of truth: if both files exist,
+        // we're done. Only fall through to the pkexec fallback if the
+        // installer didn't run (e.g. the binary was launched out of a
+        // tarball or the .deb's postinst was skipped) — that's the edge
+        // case the manual installer was originally written for.
+        let helper_present = std::path::Path::new(POLKIT_HELPER).is_file();
+        let policy_present = std::path::Path::new(POLKIT_POLICY).is_file();
+        if helper_present && policy_present {
             return Ok(true);
         }
 

@@ -125,12 +125,16 @@
   padding: 14px 15px;
 }
 
+/* Subscription card used to pull a darker, near-black fill (#141414)
+   that read as semi-transparent against --bg, while the other cards on
+   Home use --surface (#2b2b2b). Match them so all four cards on the
+   home screen share the same background tone. */
 .home-card--sub {
-  background: #141414;
+  background: var(--surface);
 }
 
 .home-card--sub.home-card--clickable:hover {
-  background: #1c1c1c;
+  background: var(--surface-2);
 }
 
 .home-card--clickable {
