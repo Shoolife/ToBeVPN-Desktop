@@ -219,6 +219,24 @@ body {
   padding: 16px;
 }
 
+/* In-app updater banner overlay. Floats over every screen at the top of
+   the window. The wrapper itself accepts no pointer events so the screen
+   beneath stays interactive when the banner is empty/idle; the banner
+   card flips pointer-events back on. */
+.update-banner-overlay {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100% - 32px));
+  z-index: 10000;
+  pointer-events: none;
+}
+
+.update-banner-overlay > * {
+  pointer-events: auto;
+}
+
 /* Splash */
 .splash {
   display: flex;

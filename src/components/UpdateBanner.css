@@ -1,12 +1,29 @@
 .update-banner {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 16px;
-  margin: 0 24px 12px;
+  border-radius: 14px;
+  padding: 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* Single-row variant for the Available state — title on the left,
+   actions on the right. Mirrors the Android phone banner. */
+.update-banner__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-banner__row .update-banner__title {
+  flex: 1;
+  font-size: 14px;
+}
+
+.update-banner__row .update-banner__actions {
+  margin-top: 0;
 }
 
 .update-banner__title {

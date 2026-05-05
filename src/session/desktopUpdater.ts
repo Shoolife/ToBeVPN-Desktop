@@ -56,10 +56,36 @@ function readCache(): CachedCheck | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CachedCheck;
     if (Date.now() - parsed.ts > CACHE_TTL_MS) return null;
+    // After the user installs an update, __APP_VERSION__ catches up but the
+    // cache entry still says "v1.0.1 available". Drop stale "available"
+    // rows whose version is <= current so we don't keep nagging the user
+    // about a release they've already installed.
+    if (parsed.info && compareSemver(parsed.info.version, __APP_VERSION__) <= 0) {
+      return null;
+    }
     return parsed;
   } catch {
     return null;
   }
+}
+
+/**
+ * Returns -1, 0 or 1 for left vs right semver comparison. Tolerant of "v"
+ * prefix and pre-release suffixes (treats "1.2.3-rc1" as 1.2.3).
+ */
+function compareSemver(a: string, b: string): number {
+  const parse = (raw: string): number[] => {
+    const cleaned = raw.replace(/^v/, "").split(/[-+]/, 1)[0];
+    const parts = cleaned.split(".").map((p) => Number(p) || 0);
+    while (parts.length < 3) parts.push(0);
+    return parts.slice(0, 3);
+  };
+  const left = parse(a);
+  const right = parse(b);
+  for (let i = 0; i < 3; i++) {
+    if (left[i] !== right[i]) return left[i] < right[i] ? -1 : 1;
+  }
+  return 0;
 }
 
 function writeCache(info: DesktopUpdateInfo | null) {

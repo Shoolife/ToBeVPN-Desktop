@@ -87,16 +87,15 @@ function Available({
   onDownload: () => void;
   onDismiss: () => void;
 }) {
+  // Compact one-row layout. We deliberately skip GitHub's release notes
+  // here — the auto-generated body for tag-only releases is a noisy
+  // "Full Changelog: <url>" string and pads the banner to half the
+  // screen.
   return (
-    <>
+    <div className="update-banner__row">
       <div className="update-banner__title">
         {t("update_banner_title").replace("{version}", info.version)}
       </div>
-      {info.notes && (
-        <div className="update-banner__notes">
-          {info.notes.split("\n").slice(0, 4).join("\n").trim()}
-        </div>
-      )}
       <div className="update-banner__actions">
         <button className="update-banner__btn-text" onClick={onDismiss}>
           {t("update_banner_later")}
@@ -105,7 +104,7 @@ function Available({
           {t("update_banner_download")}
         </button>
       </div>
-    </>
+    </div>
   );
 }
 

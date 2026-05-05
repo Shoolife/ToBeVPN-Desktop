@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
-import UpdateBanner from "../components/UpdateBanner";
+// UpdateBanner now mounts in App as a top-of-window overlay so it
+// covers every screen, not only Home.
 import {
   countryFlagForUi,
   serverCountryCodeForUi,
@@ -214,9 +215,6 @@ export default function HomeScreen({
       </div>
 
       <div className="home-content">
-        {/* Show update banner above the connect area only — no banner when
-            no update is published. */}
-        <UpdateBanner />
         <div className="home-connect-area">
           <button
             className={`home-power ${connected ? "home-power--on" : ""} ${connecting ? "home-power--connecting" : ""}`}

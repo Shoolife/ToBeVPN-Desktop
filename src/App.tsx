@@ -8,6 +8,7 @@ import StatsScreen from "./screens/StatsScreen";
 import SpeedTestScreen from "./screens/SpeedTestScreen";
 import DevicesScreen from "./screens/DevicesScreen";
 import AppErrorBoundary from "./components/AppErrorBoundary";
+import UpdateBanner from "./components/UpdateBanner";
 import { isPaired, useSession } from "./session/store";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
 import { connectVpn, getVpnRuntime } from "./session/vpnState";
@@ -212,6 +213,16 @@ export default function App() {
         >
           {renderScreen(currentScreen)}
         </div>
+        {/* Overlay above every screen — matches the Android phone behaviour
+            where the update banner persists across navigation. The banner
+            is self-hiding when no update is available; the overlay
+            wrapper itself accepts no pointer events outside the card so
+            it doesn't block clicks on the screens beneath it. */}
+        {currentScreen !== "splash" && currentScreen !== "pairing" && (
+          <div className="update-banner-overlay">
+            <UpdateBanner />
+          </div>
+        )}
       </AppErrorBoundary>
     </main>
   );

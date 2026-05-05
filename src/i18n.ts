@@ -166,12 +166,12 @@ const strings = {
     // In-app updater (`{version}` placeholder is substituted by JS at runtime —
     // we don't use tf() because the indexed placeholder syntax doesn't read
     // well in update strings, so we keep simple string replace in the banner).
-    update_banner_title: "Доступна новая версия {version}",
+    update_banner_title: "Доступна v{version}",
     update_banner_download: "Скачать",
     update_banner_later: "Позже",
-    update_banner_downloading_title: "Загружаем {version}…",
+    update_banner_downloading_title: "Загружаем v{version}",
     update_banner_cancel: "Отменить",
-    update_banner_ready_title: "Версия {version} готова к установке",
+    update_banner_ready_title: "v{version} готова к установке",
     update_banner_ready_description: "Перезапустите приложение, чтобы применить обновление.",
     update_banner_install: "Установить",
     update_banner_failed_title: "Не удалось обновить",
@@ -332,12 +332,12 @@ const strings = {
     speed_measure_failed: "Speed measurement failed",
 
     // In-app updater
-    update_banner_title: "New version {version} available",
+    update_banner_title: "v{version} available",
     update_banner_download: "Download",
     update_banner_later: "Later",
-    update_banner_downloading_title: "Downloading {version}…",
+    update_banner_downloading_title: "Downloading v{version}",
     update_banner_cancel: "Cancel",
-    update_banner_ready_title: "Update {version} ready",
+    update_banner_ready_title: "v{version} ready",
     update_banner_ready_description: "Restart the app to apply the update.",
     update_banner_install: "Install",
     update_banner_failed_title: "Update failed",
