@@ -27,6 +27,7 @@ PID_FILE="/tmp/tobevpn_tun2socks.pid"
 # file is owned by root and not world-writable (so a non-root user can't
 # drop a malicious binary into one of these paths and call us).
 ALLOWED_TUN2SOCKS_PREFIXES=(
+    "/usr/bin/"
     "/usr/lib/"
     "/usr/local/lib/"
     "/opt/"

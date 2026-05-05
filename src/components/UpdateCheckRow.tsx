@@ -1,48 +1,38 @@
 // Settings → About → "Check for updates" row.
 //
 // Mirrors the Android phone/TV equivalent. Tapping the button bypasses the
-// 7-day cache and forces a fresh GitHub probe via the Tauri Updater plugin.
-// The actual update banner lives on the Home screen — here we only surface
-// inline status so the user gets feedback without leaving Settings.
+// 7-day cache (and any pending dismissal) and forces a fresh GitHub probe
+// via the shared updateStore. The store is the same source of truth used
+// by the home/overlay UpdateBanner, so a forced check here re-surfaces the
+// banner across every screen.
 
-import { useEffect, useState } from "react";
 import { t } from "../i18n";
-import { checkForUpdate, type DesktopUpdateInfo } from "../session/desktopUpdater";
+import {
+  forceCheckUpdate,
+  useManualCheckInFlight,
+  useUpdateState,
+} from "../session/updateStore";
 import "./UpdateCheckRow.css";
 
 export default function UpdateCheckRow() {
-  const [info, setInfo] = useState<DesktopUpdateInfo | null>(null);
-  const [checking, setChecking] = useState(false);
+  const state = useUpdateState();
+  const checking = useManualCheckInFlight();
 
-  // On mount we read the cache (no-network call). The Home banner has
-  // already done a real probe at app startup, so this is just a display
-  // refresh — won't burn the GitHub rate limit.
-  useEffect(() => {
-    let cancelled = false;
-    void checkForUpdate(false).then((result) => {
-      if (!cancelled) setInfo(result);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // "Available" is the only state that should override the default
+  // "На последней версии {current}" message — once the user dismisses
+  // (state → idle) we want the row to flip back to up-to-date even
+  // though the cache still remembers v1.0.5 in the background.
+  const status =
+    state.kind === "available"
+      ? t("update_available_short")
+          .replace("{current}", __APP_VERSION__)
+          .replace("{version}", state.info.version)
+      : t("update_check_uptodate").replace("{version}", __APP_VERSION__);
 
-  const handleCheck = async () => {
+  const onClick = () => {
     if (checking) return;
-    setChecking(true);
-    try {
-      const result = await checkForUpdate(true);
-      setInfo(result);
-    } finally {
-      setChecking(false);
-    }
+    void forceCheckUpdate();
   };
-
-  const status = info
-    ? t("update_available_short")
-        .replace("{current}", __APP_VERSION__)
-        .replace("{version}", info.version)
-    : t("update_check_uptodate").replace("{version}", __APP_VERSION__);
 
   return (
     <div className="settings-info-row update-check-row">
@@ -51,7 +41,7 @@ export default function UpdateCheckRow() {
       </span>
       <button
         className="update-check-row__btn"
-        onClick={handleCheck}
+        onClick={onClick}
         disabled={checking}
       >
         {checking ? t("update_check_button_loading") : t("update_check_button")}

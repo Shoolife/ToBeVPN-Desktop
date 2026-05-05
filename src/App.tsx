@@ -214,18 +214,21 @@ export default function App() {
         >
           {renderScreen(currentScreen)}
         </div>
-        {/* Overlay above every screen. We portal it onto document.body so
-            it sits outside the .app container's overflow:hidden / animated
-            screen-layer transforms — those create new containing blocks
-            and break position:fixed under WebKitGTK on Linux. Document
-            body is guaranteed to be the viewport-relative root. */}
+        {/* Overlay above every screen. We portal it onto a dedicated
+            #overlay-root sibling of #root (declared in index.html) so it
+            sits outside the .app container's overflow:hidden and the
+            screen-transition transforms — both create new containing
+            blocks that break position:fixed under WebKitGTK on Linux. */}
         {currentScreen !== "splash" && currentScreen !== "pairing" &&
-          createPortal(
-            <div className="update-banner-overlay">
-              <UpdateBanner />
-            </div>,
-            document.body,
-          )}
+          (() => {
+            const target = document.getElementById("overlay-root") ?? document.body;
+            return createPortal(
+              <div className="update-banner-overlay">
+                <UpdateBanner />
+              </div>,
+              target,
+            );
+          })()}
       </AppErrorBoundary>
     </main>
   );

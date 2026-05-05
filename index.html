@@ -7,11 +7,28 @@
     <title>ToBeVPN</title>
     <style>
       html, body, #root { background: #0a1628; margin: 0; height: 100%; }
+      /* Dedicated overlay layer for the in-app updater banner. Lives as a
+         sibling of #root so it sits outside .app's overflow:hidden + the
+         screen-transition transforms. WebKitGTK clips position:fixed
+         descendants of overflow:hidden bodies in some edge cases — this
+         layer has its own viewport-anchored positioning and lets the banner
+         simply fill it. */
+      #overlay-root {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 0;
+        pointer-events: none;
+        z-index: 10000;
+      }
+      #overlay-root > * { pointer-events: auto; }
     </style>
   </head>
 
   <body>
     <div id="root"></div>
+    <div id="overlay-root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

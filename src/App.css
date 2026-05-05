@@ -219,17 +219,18 @@ body {
   padding: 16px;
 }
 
-/* In-app updater banner overlay. Floats over every screen at the top of
-   the window. The wrapper itself accepts no pointer events so the screen
-   beneath stays interactive when the banner is empty/idle; the banner
-   card flips pointer-events back on. */
+/* In-app updater banner overlay. Mounted into #overlay-root (a fixed
+   sibling of #root, declared in index.html) so it floats over every
+   screen at the top of the window without being clipped by .app's
+   overflow:hidden or the screen-transition transforms. Pointer events:
+   the overlay layer itself is transparent to clicks, but the banner
+   card inside flips them back on. */
 .update-banner-overlay {
-  position: fixed;
+  position: absolute;
   top: 12px;
   left: 50%;
   transform: translateX(-50%);
-  width: min(560px, calc(100% - 32px));
-  z-index: 10000;
+  width: min(320px, calc(100% - 64px));
   pointer-events: none;
 }
 

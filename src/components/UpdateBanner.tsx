@@ -2,77 +2,50 @@
 // same UX strings, same behavior — but driven by tauri-plugin-updater so the
 // install step is silent (Windows NSIS /UPDATE) or single-prompt (Linux pkexec
 // dpkg) instead of routing the user to the system package installer dialog.
+//
+// All state is owned by `updateStore` (the desktop equivalent of the Android
+// UpdateViewModel). This component is a pure presentation layer — it
+// subscribes to the shared store, so dismissing here also flips the
+// "Available" row in Settings to "На последней версии", and clicking
+// "Проверить" in Settings re-surfaces this banner.
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { t } from "../i18n";
 import {
-  checkForUpdate,
-  downloadAndInstall,
+  dismissUpdate,
+  ensureInitialCheck,
+  retryUpdate,
+  startUpdateDownload,
+  useUpdateState,
   type DesktopUpdateInfo,
   type DesktopUpdateProgress,
-  type DesktopUpdateState,
-} from "../session/desktopUpdater";
+} from "../session/updateStore";
 import "./UpdateBanner.css";
 
 export default function UpdateBanner() {
-  const [state, setState] = useState<DesktopUpdateState>({ kind: "idle" });
+  const state = useUpdateState();
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const info = await checkForUpdate();
-      if (cancelled || !info) return;
-      setState({ kind: "available", info });
-    })();
-    return () => {
-      cancelled = true;
-    };
+    void ensureInitialCheck();
   }, []);
-
-  const handleDownload = async () => {
-    if (state.kind !== "available") return;
-    const info = state.info;
-    setState({ kind: "downloading", info, progress: { downloaded: 0, total: 0 } });
-    try {
-      await downloadAndInstall((progress: DesktopUpdateProgress) => {
-        setState((current) =>
-          current.kind === "downloading"
-            ? { kind: "downloading", info: current.info, progress }
-            : current,
-        );
-      });
-      // After downloadAndInstall the relaunch happens inside the plugin; the
-      // UI is going down anyway, but flip to ready as a no-op safety in case
-      // the plugin returns without restarting (e.g., user denies UAC).
-      setState({ kind: "ready", info });
-    } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
-      setState({ kind: "failed", reason });
-    }
-  };
-
-  const dismiss = () => setState({ kind: "idle" });
-  const retry = () => {
-    void (async () => {
-      const info = await checkForUpdate();
-      if (info) setState({ kind: "available", info });
-      else setState({ kind: "idle" });
-    })();
-  };
 
   if (state.kind === "idle") return null;
 
   return (
     <div className="update-banner">
       {state.kind === "available" && (
-        <Available info={state.info} onDownload={handleDownload} onDismiss={dismiss} />
+        <Available
+          info={state.info}
+          onDownload={() => void startUpdateDownload()}
+          onDismiss={dismissUpdate}
+        />
       )}
       {state.kind === "downloading" && (
         <Downloading info={state.info} progress={state.progress} />
       )}
       {state.kind === "ready" && <Ready info={state.info} />}
       {state.kind === "failed" && (
-        <Failed reason={state.reason} onRetry={retry} onDismiss={dismiss} />
+        <Failed reason={state.reason} onRetry={retryUpdate} onDismiss={dismissUpdate} />
       )}
     </div>
   );
