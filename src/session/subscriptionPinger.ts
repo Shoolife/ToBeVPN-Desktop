@@ -17,8 +17,8 @@ const FALLBACK_TIMEOUT_MS = 7_000;
 /**
  * Best-effort HWID ping against the subscription URL. Tries the original
  * panel URL first; on network failure / timeout retries the same key
- * against the fallback endpoint fallback so the HWID record still
- * lands even when the panel is unreachable (RKN block, partner outage).
+ * against the configured fallback endpoint so the HWID record still
+ * lands even when the panel is unreachable (network block, partner outage).
  */
 export async function pingSubscriptionUrl(
   subscriptionUrl: string | null | undefined,
@@ -41,7 +41,7 @@ export async function pingSubscriptionUrl(
       const fallback = buildFallbackUrl(subscriptionUrl);
       if (!fallback) throw primaryError;
       console.warn(
-        "[pingSubscriptionUrl] primary failed, falling back to fallback endpoint:",
+        "[pingSubscriptionUrl] primary failed, retrying via fallback:",
         primaryError,
       );
       await timedFetch(fallback, headers, FALLBACK_TIMEOUT_MS);
@@ -62,11 +62,11 @@ async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number):
 }
 
 /**
- * Derives the fallback endpoint fallback URL from the panel URL by
- * extracting the trailing path segment (the subscription key) and
- * appending it to SUBS_FALLBACK_URL, which is configured to already
- * end with `?sub=`. Returns null if the operator hasn't set the
- * fallback or the input URL has no key segment.
+ * Derives the fallback endpoint URL from the panel URL by extracting
+ * the trailing path segment (the subscription key) and appending it
+ * to SUBS_FALLBACK_URL, which is configured to already end with
+ * `?sub=`. Returns null if the operator hasn't set the fallback or
+ * the input URL has no key segment.
  */
 function buildFallbackUrl(panelUrl: string): string | null {
   if (!SUBS_FALLBACK_URL) return null;

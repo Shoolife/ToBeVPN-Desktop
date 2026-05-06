@@ -63,9 +63,9 @@ function buildUrl(
 }
 
 /**
- * Build the fallback endpoint fallback URL by encoding the original
- * path-with-query into a `?u=` parameter. The function is configured to
- * forward whatever lands in `u` to <bot-api-host>. We pass a relative path
+ * Build the fallback URL by encoding the original path-with-query into a
+ * `?u=` parameter. The fallback endpoint is configured to forward whatever
+ * lands in `u` to the upstream backend. We pass a relative path
  * (`/api/...?token=...`) rather than the full URL so the function can't
  * be coerced into proxying arbitrary destinations (no open-proxy / SSRF).
  */
@@ -168,7 +168,7 @@ async function performFetch(
     if (!BOT_API_FALLBACK_URL) throw primaryError;
     if (userSignal?.aborted) throw primaryError;
     console.warn(
-      `[bot-api] primary request to ${path} failed, falling back to fallback endpoint:`,
+      `[bot-api] primary request to ${path} failed, retrying via fallback:`,
       primaryError,
     );
     return await attemptFetch(

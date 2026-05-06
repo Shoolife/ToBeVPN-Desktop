@@ -66,7 +66,9 @@ if [ -z "${FALLBACK_HOST:-}" ] && [ -f .env ]; then
         FALLBACK_HOST=$(extract_host "${line#VITE_FALLBACK_BOT_DOMAIN=}")
     fi
 fi
-: "${FALLBACK_HOST:=<fallback-host>}"
+# RFC 2606 reserved TLD — guaranteed never to resolve in DNS, so an
+# unconfigured fallback can't accidentally match someone else's host.
+: "${FALLBACK_HOST:=example.invalid}"
 
 if [ -z "${BOT_API_HOST:-}" ] || [ -z "${PANEL_HOST:-}" ]; then
     # Hosts unavailable. If the working tree already has real hosts

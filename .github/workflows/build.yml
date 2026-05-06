@@ -119,7 +119,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
-          # fallback endpoint fallbacks. Empty when the secret is unset
+          # Fallback endpoint URLs. Empty when the secret is unset
           # — the JS layer treats empty strings as "no fallback configured"
           # and skips the retry path entirely, so a missing secret degrades
           # gracefully to v1.0.6 behavior instead of breaking the build.
