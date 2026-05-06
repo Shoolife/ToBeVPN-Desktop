@@ -20,7 +20,8 @@
       "identifier": "http:default",
       "allow": [
         { "url": "https://__BOT_API_HOST__/*" },
-        { "url": "https://__PANEL_HOST__/*" }
+        { "url": "https://__PANEL_HOST__/*" },
+        { "url": "https://__FALLBACK_HOST__/*" }
       ]
     },
     "updater:default",

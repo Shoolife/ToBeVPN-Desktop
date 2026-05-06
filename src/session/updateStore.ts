@@ -266,6 +266,24 @@ export async function startUpdateDownload(): Promise<void> {
 
   let downloaded = 0;
   let total = 0;
+  // tauri-plugin-updater fires Progress events as fast as the HTTP client
+  // hands chunks back — easily 100+/s on a fast pipe. Pushing each one
+  // through React re-renders the banner needlessly and causes the bar to
+  // visibly stutter when bursts of small chunks arrive together. Coalesce
+  // them onto a single rAF tick so we update the UI at most ~60Hz, with
+  // the latest cumulative byte count.
+  let rafScheduled = false;
+  const flushProgress = () => {
+    rafScheduled = false;
+    if (snapshot.state.kind === "downloading") {
+      setState({ kind: "downloading", info, progress: { downloaded, total } });
+    }
+  };
+  const scheduleProgress = () => {
+    if (rafScheduled) return;
+    rafScheduled = true;
+    requestAnimationFrame(flushProgress);
+  };
   try {
     await update.downloadAndInstall((event) => {
       switch (event.event) {
@@ -277,16 +295,15 @@ export async function startUpdateDownload(): Promise<void> {
           break;
         case "Progress":
           downloaded += event.data.chunkLength;
-          if (snapshot.state.kind === "downloading") {
-            setState({ kind: "downloading", info, progress: { downloaded, total } });
-          }
+          scheduleProgress();
           break;
         case "Finished":
+          downloaded = total > 0 ? total : downloaded;
           if (snapshot.state.kind === "downloading") {
             setState({
               kind: "downloading",
               info,
-              progress: { downloaded: total > 0 ? total : downloaded, total },
+              progress: { downloaded, total },
             });
           }
           break;

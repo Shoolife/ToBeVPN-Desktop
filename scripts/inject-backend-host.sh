@@ -41,6 +41,33 @@ if [ -z "${PANEL_HOST:-}" ] && [ -f .env ]; then
     fi
 fi
 
+# Fallback hosts — extract just the hostname from the full URL so we can
+# whitelist them in capabilities/default.json. The full URL also lives in
+# VITE_FALLBACK_*_DOMAIN inside .env so the JS layer can build requests
+# against it; here we only care about the host for the http-plugin scope.
+extract_host() {
+    local url=$1
+    url="${url#https://}"
+    url="${url#http://}"
+    url="${url%%/*}"
+    url="${url%%\?*}"
+    echo "$url"
+}
+# Both fallback URLs (bot + subs) live on the same fallback host, so
+# capabilities only needs one scope entry. We extract the host from
+# whichever VITE_FALLBACK_*_DOMAIN is set and trust that both functions
+# share the same hostname (which is the practical reality of fallback endpoints).
+if [ -z "${FALLBACK_HOST:-}" ] && [ -f .env ]; then
+    line=$(grep -E '^VITE_FALLBACK_BOT_DOMAIN=' .env || true)
+    if [ -z "$line" ]; then
+        line=$(grep -E '^VITE_FALLBACK_SUBS_DOMAIN=' .env || true)
+        [ -n "$line" ] && FALLBACK_HOST=$(extract_host "${line#VITE_FALLBACK_SUBS_DOMAIN=}")
+    else
+        FALLBACK_HOST=$(extract_host "${line#VITE_FALLBACK_BOT_DOMAIN=}")
+    fi
+fi
+: "${FALLBACK_HOST:=<fallback-host>}"
+
 if [ -z "${BOT_API_HOST:-}" ] || [ -z "${PANEL_HOST:-}" ]; then
     # Hosts unavailable. If the working tree already has real hosts
     # injected (from an earlier CI step), leave it alone — `tauri build`
@@ -87,6 +114,7 @@ restore_placeholder src-tauri/tauri.conf.json __BOT_API_HOST__ BOT_API_HOST
 restore_placeholder src-tauri/tauri.conf.json __PANEL_HOST__   PANEL_HOST
 restore_placeholder src-tauri/capabilities/default.json __BOT_API_HOST__ BOT_API_HOST
 restore_placeholder src-tauri/capabilities/default.json __PANEL_HOST__   PANEL_HOST
+restore_placeholder src-tauri/capabilities/default.json __FALLBACK_HOST__ FALLBACK_HOST
 
 # Step 2: inject real hosts.
 sed -i.bak \
@@ -95,6 +123,11 @@ sed -i.bak \
     src-tauri/tauri.conf.json \
     src-tauri/capabilities/default.json
 
+sed -i.bak \
+    -e "s|__FALLBACK_HOST__|${FALLBACK_HOST}|g" \
+    src-tauri/capabilities/default.json
+
 rm -f src-tauri/tauri.conf.json.bak src-tauri/capabilities/default.json.bak
 
 echo "✓ injected BOT_API_HOST=${BOT_API_HOST} PANEL_HOST=${PANEL_HOST}"
+echo "✓ injected FALLBACK_HOST=${FALLBACK_HOST}"

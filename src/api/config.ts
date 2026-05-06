@@ -20,3 +20,19 @@ if (!isDev && !envUrl) {
 }
 const fullUrl = envUrl.endsWith("/") ? envUrl : envUrl + "/";
 export const BOT_API_BASE_URL = isDev ? "/" : fullUrl;
+
+// Optional bot-API fallback. Empty in dev (Vite proxies /api/*); only used
+// in production when the primary BOT_API_BASE_URL request fails. The
+// configured value is the full fallback endpoint URL (no trailing `?u=`);
+// the original path-with-query is URL-encoded and passed as `?u=<path>`.
+// The function decodes it and forwards to the upstream backend.
+const fallbackBot = (import.meta.env.VITE_FALLBACK_BOT_DOMAIN ?? "").trim();
+export const BOT_API_FALLBACK_URL: string | null =
+  !isDev && fallbackBot ? fallbackBot.replace(/\/+$/, "") : null;
+
+// Subscription URL fallback. The .env entry already ends with `?sub=` so
+// the caller just appends the short_uuid (taken from the panel's public
+// <panel-host>/<KEY> URL). Empty if the operator hasn't set it — in
+// which case we skip the retry path.
+const fallbackSubs = (import.meta.env.VITE_FALLBACK_SUBS_DOMAIN ?? "").trim();
+export const SUBS_FALLBACK_URL: string | null = fallbackSubs ? fallbackSubs : null;

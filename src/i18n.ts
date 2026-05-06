@@ -23,6 +23,9 @@ export function saveLang(lang: Lang) {
 
 const strings = {
   ru: {
+    // Brand
+    app_partner: "× Meow VPN",
+
     // Splash
     splash_tagline: "твоё будущее приватно",
 
@@ -191,6 +194,9 @@ const strings = {
     update_available_short: "Версия {current} · доступна v{version}",
   },
   en: {
+    // Brand
+    app_partner: "× Meow VPN",
+
     // Splash
     splash_tagline: "your future is private",
 

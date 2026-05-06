@@ -1,6 +1,6 @@
 // Thin fetch wrapper for the bot backend using per-device sessions.
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
-import { BOT_API_BASE_URL } from "./config";
+import { BOT_API_BASE_URL, BOT_API_FALLBACK_URL } from "./config";
 import { getDeviceFingerprint } from "../session/fingerprint";
 import {
   clearDeviceSession,
@@ -42,15 +42,18 @@ const httpFetch: typeof fetch = import.meta.env.DEV ? window.fetch.bind(window) 
 
 type AuthMode = "access" | "none";
 
-function resolveBase(): string {
-  const base = BOT_API_BASE_URL;
+function resolveBase(base: string = BOT_API_BASE_URL): string {
   if (base === "/" || base === "") return window.location.origin + "/";
   return base;
 }
 
-function buildUrl(path: string, query?: Record<string, string | number | undefined>): string {
+function buildUrl(
+  path: string,
+  query?: Record<string, string | number | undefined>,
+  base?: string,
+): string {
   const trimmed = path.startsWith("/") ? path.slice(1) : path;
-  const url = new URL(trimmed, resolveBase());
+  const url = new URL(trimmed, resolveBase(base));
   if (query) {
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
@@ -59,10 +62,40 @@ function buildUrl(path: string, query?: Record<string, string | number | undefin
   return url.toString();
 }
 
+/**
+ * Build the fallback endpoint fallback URL by encoding the original
+ * path-with-query into a `?u=` parameter. The function is configured to
+ * forward whatever lands in `u` to <bot-api-host>. We pass a relative path
+ * (`/api/...?token=...`) rather than the full URL so the function can't
+ * be coerced into proxying arbitrary destinations (no open-proxy / SSRF).
+ */
+function buildFallbackBotUrl(
+  path: string,
+  query: Record<string, string | number | undefined> | undefined,
+  fallbackBase: string,
+): string {
+  const trimmed = path.startsWith("/") ? path : "/" + path;
+  let pathWithQuery = trimmed;
+  if (query) {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== null) params.set(key, String(value));
+    }
+    const qs = params.toString();
+    if (qs) pathWithQuery += "?" + qs;
+  }
+  const sep = fallbackBase.includes("?") ? "&" : "?";
+  return `${fallbackBase}${sep}u=${encodeURIComponent(pathWithQuery)}`;
+}
+
 // Hard ceiling on every API call. Without this a broken VPN tunnel leaves the
 // fetch pending forever — even after the user disconnects — because the
 // underlying TCP socket was opened through a route that no longer exists.
-const REQUEST_TIMEOUT_MS = 15_000;
+// Split between primary and fallback so a single user-visible request never
+// exceeds REQUEST_TIMEOUT_MS even when both legs fire.
+const PRIMARY_TIMEOUT_MS = 8_000;
+const FALLBACK_TIMEOUT_MS = 7_000;
+const REQUEST_TIMEOUT_MS = PRIMARY_TIMEOUT_MS + FALLBACK_TIMEOUT_MS;
 
 let tokenOperation: Promise<string | null> | null = null;
 
@@ -74,6 +107,36 @@ function runTokenOperation(
     tokenOperation = null;
   });
   return tokenOperation;
+}
+
+// Single attempt against one base URL with its own abort controller. Lifting
+// this out of performFetch lets us fire two attempts (primary then fallback)
+// each with its own timeout while still honouring the caller's abort signal.
+async function attemptFetch(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  userSignal: AbortSignal | null | undefined,
+): Promise<Response> {
+  const controller = new AbortController();
+  if (userSignal) {
+    if (userSignal.aborted) {
+      controller.abort();
+    } else {
+      userSignal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await httpFetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted && (!userSignal || !userSignal.aborted)) {
+      throw new Error(`Request timed out after ${timeoutMs / 1000}s`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function performFetch(
@@ -91,30 +154,29 @@ async function performFetch(
     headers.set("User-Agent", fingerprint.userAgent);
   }
 
-  const controller = new AbortController();
-  const userSignal = init.signal;
-  if (userSignal) {
-    if (userSignal.aborted) {
-      controller.abort();
-    } else {
-      userSignal.addEventListener("abort", () => controller.abort(), { once: true });
-    }
-  }
-  const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const userSignal = init.signal ?? null;
+  const baseInit: RequestInit = { ...init, headers };
 
   try {
-    return await httpFetch(buildUrl(path, query), {
-      ...init,
-      headers,
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (controller.signal.aborted && (!userSignal || !userSignal.aborted)) {
-      throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
+    return await attemptFetch(
+      buildUrl(path, query, BOT_API_BASE_URL),
+      baseInit,
+      BOT_API_FALLBACK_URL ? PRIMARY_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+      userSignal,
+    );
+  } catch (primaryError) {
+    if (!BOT_API_FALLBACK_URL) throw primaryError;
+    if (userSignal?.aborted) throw primaryError;
+    console.warn(
+      `[bot-api] primary request to ${path} failed, falling back to fallback endpoint:`,
+      primaryError,
+    );
+    return await attemptFetch(
+      buildFallbackBotUrl(path, query, BOT_API_FALLBACK_URL),
+      baseInit,
+      FALLBACK_TIMEOUT_MS,
+      userSignal,
+    );
   }
 }
 

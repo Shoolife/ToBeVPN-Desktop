@@ -13,11 +13,25 @@
   flex-shrink: 0;
 }
 
+.home-topbar__brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .home-topbar__title {
   font-size: 22px;
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.01em;
+}
+
+.home-topbar__partner {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
 .home-topbar__btn {

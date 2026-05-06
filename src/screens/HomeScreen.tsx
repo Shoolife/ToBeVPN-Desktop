@@ -205,7 +205,10 @@ export default function HomeScreen({
   return (
     <div className="home-root">
       <div className="home-topbar">
-        <span className="home-topbar__title">ToBeVPN</span>
+        <div className="home-topbar__brand">
+          <span className="home-topbar__title">ToBeVPN</span>
+          <span className="home-topbar__partner">{t("app_partner")}</span>
+        </div>
         <button className="home-topbar__btn" onClick={onSettings} title={t("settings")}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3"/>

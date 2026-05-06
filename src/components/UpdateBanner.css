@@ -53,7 +53,9 @@
 .update-banner__progress-fill {
   height: 100%;
   background: var(--accent);
-  transition: width 200ms ease-out;
+  /* Linear + 400ms bridges gaps between bursty plugin-updater chunks so
+     the bar reads as a continuous fill instead of a series of jumps. */
+  transition: width 400ms linear;
 }
 
 .update-banner__progress-text {
