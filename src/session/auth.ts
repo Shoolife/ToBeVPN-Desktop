@@ -502,6 +502,22 @@ export interface VpnServer {
   isOnline: boolean;
 }
 
+/**
+ * True for the panel's "subscription expired" placeholder server. The
+ * parser accepts it because it's a syntactically-valid VLESS URL, but
+ * its uuid is the all-zeros UUID and the address points nowhere —
+ * passing it to xray would crash the tunnel manager.
+ */
+export function isSentinelServer(server: VpnServer): boolean {
+  return (
+    server.uuid === "00000000-0000-0000-0000-000000000000" ||
+    !server.address ||
+    server.address === "127.0.0.1" ||
+    server.address === "0.0.0.0" ||
+    /истекла|expired/i.test(server.name)
+  );
+}
+
 function parseVlessUrl(url: string): VpnServer | null {
   if (!url.startsWith("vless://")) return null;
   try {
@@ -561,7 +577,12 @@ export async function fetchVpnServers(): Promise<VpnServer[]> {
 
   const servers = subInfo.links
     .map(parseVlessUrl)
-    .filter((s): s is VpnServer => s !== null);
+    .filter((s): s is VpnServer => s !== null)
+    // Drop the panel's "subscription expired" placeholder link. It looks
+    // like a valid VLESS URL to the parser but its uuid is all-zeros and
+    // the address is unreachable — feeding it to xray would crash the
+    // tunnel manager. Mirrors the phone's Server.isSentinel filter.
+    .filter((s) => !isSentinelServer(s));
 
   if (debug) console.log("[fetchVpnServers] Parsed servers:", servers.length, "of", subInfo.links.length);
 

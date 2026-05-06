@@ -158,8 +158,18 @@ export default function App() {
                 prev.address === server.address &&
                 prev.port === server.port &&
                 prev.uuid === server.uuid;
+              // Skip the live-switch entirely when the user picked the
+              // panel's "subscription expired" sentinel. ServersScreen
+              // already filters it out of the list, but a stale cache
+              // could still surface it on first launch after upgrade
+              // — never feed it to the engine.
+              const sentinel =
+                server.uuid === "00000000-0000-0000-0000-000000000000" ||
+                !server.address ||
+                server.address === "127.0.0.1" ||
+                server.address === "0.0.0.0";
               const runtime = getVpnRuntime();
-              if (!sameAsPrev && (runtime.connected || runtime.connecting)) {
+              if (!sentinel && !sameAsPrev && (runtime.connected || runtime.connecting)) {
                 void connectVpn({
                   address: server.address,
                   port: server.port,

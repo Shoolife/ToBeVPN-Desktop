@@ -259,6 +259,15 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/**
+ * Public, non-React-hook subscription to session changes. Useful for
+ * non-component code (e.g. the VPN runtime that needs to react to plan
+ * transitions) that can't call useSession.
+ */
+export function subscribeSession(listener: (session: Session) => void): () => void {
+  return subscribe(() => listener(current));
+}
+
 export function useSession(): Session {
   return useSyncExternalStore(subscribe, getSession, getSession);
 }

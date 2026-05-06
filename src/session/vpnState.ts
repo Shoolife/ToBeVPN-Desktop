@@ -15,7 +15,7 @@ import {
   sessionEnd as statsSessionEnd,
   recordTraffic,
 } from "./stats";
-import { getSession } from "./store";
+import { getSession, subscribeSession } from "./store";
 import { registerCurrentDevice, syncSubscription } from "./auth";
 
 // Bumps server-side `last_seen_at` every HEARTBEAT_TICKS seconds while VPN is
@@ -100,6 +100,28 @@ function stopPolling() {
 }
 
 export async function connectVpn(server: ServerVpnConfig): Promise<void> {
+  // Refuse the panel's "subscription expired" sentinel server before we
+  // hand it to the Rust-side engine. xray would crash on its all-zeros
+  // uuid / dummy address, taking the whole webview down with it.
+  if (
+    server.uuid === "00000000-0000-0000-0000-000000000000" ||
+    !server.address ||
+    server.address === "127.0.0.1" ||
+    server.address === "0.0.0.0"
+  ) {
+    const msg = "Subscription expired. Renew it to connect.";
+    setState({ connecting: false, connected: false, lastError: msg });
+    throw new Error(msg);
+  }
+  // Refuse any connect attempt while the user's plan is EXPIRED. The
+  // backend's only "server" for an expired user is the sentinel above,
+  // and even if some other code path supplies a real server, the panel
+  // won't authorize the session — fail fast with a friendly error.
+  if (getSession().userPlan === "EXPIRED") {
+    const msg = "Subscription expired. Renew it to connect.";
+    setState({ connecting: false, connected: false, lastError: msg });
+    throw new Error(msg);
+  }
   setState({ connecting: true, lastError: null });
   // Fire-and-forget: hits the panel's public sub URL with HWID headers so
   // panel registers/refreshes the HWID device on every connect.
@@ -164,6 +186,18 @@ function ensureVpnDiedListener() {
   });
 }
 ensureVpnDiedListener();
+
+// Auto-stop the tunnel the moment the user's plan transitions to
+// EXPIRED. Without this the green "Connected" badge stays on the
+// screen indefinitely (the panel told us we're expired but the local
+// xray keeps the tunnel up), and the next user action — picking a
+// server — would drag the expired sentinel through the live-switch
+// path and crash the engine.
+subscribeSession((session) => {
+  if (session.userPlan !== "EXPIRED") return;
+  if (!state.connected && !state.connecting) return;
+  void disconnectVpn().catch(() => {});
+});
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
