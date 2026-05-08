@@ -63,29 +63,24 @@ function buildUrl(
 }
 
 /**
- * Build the fallback URL by encoding the original path-with-query into a
- * `?u=` parameter. The fallback endpoint is configured to forward whatever
- * lands in `u` to the upstream backend. We pass a relative path
- * (`/api/...?token=...`) rather than the full URL so the function can't
- * be coerced into proxying arbitrary destinations (no open-proxy / SSRF).
+ * Build the fallback URL by reusing the canonical primary URL and only
+ * swapping its host. The fallback gateway mirrors the primary's API
+ * surface 1:1, so the path / query / body / headers travel verbatim;
+ * only the hostname differs. `fallbackHost` is a bare hostname (e.g.
+ * "gateway.example.invalid") — we tolerate a stray scheme or trailing
+ * slash so an operator-pasted value doesn't silently break the URL.
  */
 function buildFallbackBotUrl(
   path: string,
   query: Record<string, string | number | undefined> | undefined,
-  fallbackBase: string,
+  fallbackHost: string,
 ): string {
-  const trimmed = path.startsWith("/") ? path : "/" + path;
-  let pathWithQuery = trimmed;
-  if (query) {
-    const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(query)) {
-      if (value !== undefined && value !== null) params.set(key, String(value));
-    }
-    const qs = params.toString();
-    if (qs) pathWithQuery += "?" + qs;
-  }
-  const sep = fallbackBase.includes("?") ? "&" : "?";
-  return `${fallbackBase}${sep}u=${encodeURIComponent(pathWithQuery)}`;
+  const url = new URL(buildUrl(path, query, BOT_API_BASE_URL));
+  const cleanHost = fallbackHost
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  url.host = cleanHost;
+  return url.toString();
 }
 
 // Hard ceiling on every API call. Without this a broken VPN tunnel leaves the

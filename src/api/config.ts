@@ -23,9 +23,10 @@ export const BOT_API_BASE_URL = isDev ? "/" : fullUrl;
 
 // Optional bot-API fallback. Empty in dev (Vite proxies /api/*); only used
 // in production when the primary BOT_API_BASE_URL request fails. The
-// configured value is the full fallback endpoint URL (no trailing `?u=`);
-// the original path-with-query is URL-encoded and passed as `?u=<path>`.
-// The function decodes it and forwards to the upstream backend.
+// configured value is a bare hostname (e.g. "gateway.example.invalid")
+// that mirrors the primary backend's API surface 1:1 — the client just
+// swaps the host of the original request, keeping path / query / body /
+// headers verbatim.
 const fallbackBot = (import.meta.env.VITE_FALLBACK_BOT_DOMAIN ?? "").trim();
 export const BOT_API_FALLBACK_URL: string | null =
   !isDev && fallbackBot ? fallbackBot.replace(/\/+$/, "") : null;
