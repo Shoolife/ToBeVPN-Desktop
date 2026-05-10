@@ -49,6 +49,71 @@ const TELEGRAM_BOT_NAME = "meow_meow_vpn_bot";
 
 let cachedHostname: string | null = null;
 
+// Subscription refresh throttling. The interval comes from the panel's
+// `profile-update-interval` header (read by pingSubscriptionUrl); we cache
+// it in localStorage along with the last successful sync so quick re-mounts
+// of the home/server screens don't each trigger their own panel hit.
+const SUB_SYNC_AT_KEY = "tobevpn_sub_sync_at_v1";
+const SUB_INTERVAL_KEY = "tobevpn_sub_interval_ms_v1";
+const SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v1";
+// 12h matches the default surfaced in panel's "subscription
+// auto-refresh" panel field. Used until the first successful ping
+// returns a `profile-update-interval` value.
+const DEFAULT_SUB_INTERVAL_MS = 12 * 60 * 60 * 1000;
+
+// Single in-flight syncSubscription. Concurrent callers (vpnState.connectVpn,
+// HomeScreen useEffect, manual refresh) all await the same promise so we
+// never fire two parallel /api/panel/sub/.../info round-trips.
+let syncInFlight: Promise<void> | null = null;
+
+function readSubInterval(): number {
+  try {
+    const raw = localStorage.getItem(SUB_INTERVAL_KEY);
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SUB_INTERVAL_MS;
+  } catch {
+    return DEFAULT_SUB_INTERVAL_MS;
+  }
+}
+
+function readSubLastSyncAt(): number {
+  try {
+    const raw = localStorage.getItem(SUB_SYNC_AT_KEY);
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeSubSyncState(intervalMs: number | null): void {
+  try {
+    const interval = intervalMs ?? readSubInterval();
+    localStorage.setItem(SUB_SYNC_AT_KEY, String(Date.now()));
+    localStorage.setItem(SUB_INTERVAL_KEY, String(interval));
+  } catch {
+    // localStorage can fail in private-mode webviews; the next call falls
+    // back to the default interval, which is the safest behaviour.
+  }
+}
+
+function readCachedSubscriptionUrl(): string | null {
+  try {
+    return localStorage.getItem(SUB_URL_CACHE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedSubscriptionUrl(url: string | null): void {
+  try {
+    if (url) localStorage.setItem(SUB_URL_CACHE_KEY, url);
+    else localStorage.removeItem(SUB_URL_CACHE_KEY);
+  } catch {
+    // ignore — see writeSubSyncState
+  }
+}
+
 async function settleStartupStep<T>(
   label: string,
   task: Promise<T>,
@@ -259,14 +324,55 @@ export async function authenticateWithTelegramId(
     panelUserUuid: preferredPanelUserUuid,
   });
 
-  await syncSubscription();
+  // Force the sync — we just authenticated and the user expects to
+  // immediately see the right plan (PAID / FREE_TRIAL), not whatever
+  // was cached pre-login.
+  await syncSubscription({ force: true });
 }
 
 /**
  * Refresh subscription info (plan, expiry, traffic) from the panel.
  * No-op for unpaired devices.
+ *
+ * @param force when true, bypass the panel-recommended refresh cadence
+ *   (`profile-update-interval`, default 12h). Use this for explicit
+ *   user-initiated refreshes (the Refresh button on the server list);
+ *   leave it false for ambient triggers (HomeScreen mount, post-login
+ *   recovery) so we don't hit the panel on every re-mount.
  */
-export async function syncSubscription(): Promise<void> {
+export async function syncSubscription(opts: { force?: boolean } = {}): Promise<void> {
+  const { force = false } = opts;
+  if (syncInFlight) return syncInFlight;
+  if (!force) {
+    const last = readSubLastSyncAt();
+    if (last > 0 && Date.now() - last < readSubInterval()) return;
+  }
+  syncInFlight = runSyncSubscription().finally(() => {
+    syncInFlight = null;
+  });
+  return syncInFlight;
+}
+
+/**
+ * Bare HWID-marker ping — used by the connect path so panel registers
+ * the device on every VPN start. Skips the JSON
+ * /api/panel/sub/.../info call entirely; reads the subscription URL
+ * from the localStorage cache populated by the most recent
+ * syncSubscription. If the cache is empty (very first connect on a fresh
+ * install before any sync has completed) we silently no-op — the next
+ * ambient sync will populate it.
+ */
+export async function pingHwidOnly(): Promise<void> {
+  const url = readCachedSubscriptionUrl();
+  if (!url) return;
+  try {
+    await pingSubscriptionUrl(url);
+  } catch {
+    // best-effort — connect proceeds regardless
+  }
+}
+
+async function runSyncSubscription(): Promise<void> {
   let session = getSession();
   if (!session.isLinked) return;
 
@@ -308,8 +414,19 @@ export async function syncSubscription(): Promise<void> {
   }
 
   // Direct hit on the panel's public sub URL with HWID headers — only request
-  // panel actually parses for HWID device tracking.
-  pingSubscriptionUrl(subscriptionUrl).catch(() => {});
+  // panel actually parses for HWID device tracking. The response also
+  // carries the panel-recommended auto-refresh cadence (`profile-update-interval`),
+  // which we feed back into the throttle window. We await it (rather than
+  // fire-and-forget as before) so the throttle bookkeeping below sees the
+  // fresh interval — pingSubscriptionUrl already enforces its own timeout.
+  writeCachedSubscriptionUrl(subscriptionUrl);
+  let intervalMs: number | null = null;
+  try {
+    intervalMs = await pingSubscriptionUrl(subscriptionUrl);
+  } catch {
+    // ignore — pingSubscriptionUrl swallows its own errors and returns null
+  }
+  writeSubSyncState(intervalMs);
 
   const isActive = subUser.is_active && subUser.user_status === "ACTIVE";
   const cachedPlan = session.userPlan;

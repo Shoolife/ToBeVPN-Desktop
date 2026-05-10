@@ -16,6 +16,8 @@
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "core:window:allow-set-size",
+    "core:window:allow-center",
     {
       "identifier": "http:default",
       "allow": [

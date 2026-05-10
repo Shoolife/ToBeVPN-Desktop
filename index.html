@@ -6,15 +6,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ToBeVPN</title>
     <style>
-      html, body, #root { background: #0a1628; margin: 0; height: 100%; }
+      html, body { background: #0a1628; margin: 0; height: 100%; overflow: hidden; }
+      /* Centre the fixed-layout app frame inside whatever window size the
+         user has dragged us to. body is the flex container; #scale-frame is
+         the fixed 494×895 design surface we transform-scale to fit. */
+      body { display: flex; justify-content: center; align-items: flex-start; }
+      /* The design surface is fixed at 494×895 so every screen, modal and
+         absolute-positioned element keeps its hand-tuned coordinates. We
+         only ever scale this whole box — never reflow its children. The
+         var is set by App.tsx based on window.innerHeight; defaults to 1
+         so the first paint on a normal-size monitor is correct. */
+      #scale-frame {
+        width: 494px;
+        height: 895px;
+        transform: scale(var(--app-scale, 1));
+        transform-origin: top center;
+        position: relative;
+        flex-shrink: 0;
+      }
+      #root { width: 100%; height: 100%; }
       /* Dedicated overlay layer for the in-app updater banner. Lives as a
-         sibling of #root so it sits outside .app's overflow:hidden + the
-         screen-transition transforms. WebKitGTK clips position:fixed
-         descendants of overflow:hidden bodies in some edge cases — this
-         layer has its own viewport-anchored positioning and lets the banner
-         simply fill it. */
+         sibling of #root inside #scale-frame so it inherits the same
+         transform — without that the banner would render at its
+         pre-scale 494px width on a shrunken window and clip past the
+         right edge. */
       #overlay-root {
-        position: fixed;
+        position: absolute;
         top: 0;
         left: 0;
         width: 100%;
@@ -27,8 +44,10 @@
   </head>
 
   <body>
-    <div id="root"></div>
-    <div id="overlay-root"></div>
+    <div id="scale-frame">
+      <div id="root"></div>
+      <div id="overlay-root"></div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
+import { getCurrentWindow, LogicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
 import PairingScreen from "./screens/PairingScreen";
 import HomeScreen from "./screens/HomeScreen";
@@ -112,6 +113,84 @@ export default function App() {
       startDeviceLinkPolling();
     }
     return () => stopDeviceLinkPolling();
+  }, []);
+
+  // Adaptive scaling for laptops whose screen height is below the design
+  // target of 895px (1366×768 / 1280×720 / netbooks). On those screens
+  // a fixed 494×895 window would clip past the bottom of the desktop.
+  // We do two things on mount:
+  //   1. Shrink the window itself proportionally so it fits in the
+  //      monitor's working area (minus a 80px allowance for the taskbar
+  //      and chrome).
+  //   2. Set the CSS `--app-scale` variable on :root so the
+  //      #scale-frame in index.html visually shrinks the design surface
+  //      to match. We also subscribe to the window's resize event so a
+  //      manual drag updates the scale live.
+  useEffect(() => {
+    const DESIGN_W = 494;
+    const DESIGN_H = 895;
+    const MIN_SCALE = 0.55;
+    const SCREEN_MARGIN_PX = 80;
+
+    const apply = (scale: number) => {
+      const clamped = Math.min(1, Math.max(MIN_SCALE, scale));
+      document.documentElement.style.setProperty("--app-scale", String(clamped));
+    };
+
+    const recomputeFromInnerSize = () => {
+      const wScale = window.innerWidth / DESIGN_W;
+      const hScale = window.innerHeight / DESIGN_H;
+      apply(Math.min(wScale, hScale));
+    };
+
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const mon = await primaryMonitor();
+        if (!cancelled && mon) {
+          const usableH = mon.size.height / mon.scaleFactor - SCREEN_MARGIN_PX;
+          if (usableH < DESIGN_H) {
+            const scale = Math.max(MIN_SCALE, usableH / DESIGN_H);
+            const win = getCurrentWindow();
+            await win.setSize(
+              new LogicalSize(
+                Math.round(DESIGN_W * scale),
+                Math.round(DESIGN_H * scale),
+              ),
+            );
+            await win.center();
+          }
+        }
+      } catch {
+        // primaryMonitor() can fail on headless / unusual setups —
+        // recomputeFromInnerSize below still produces a sensible scale
+        // from whatever size the window ended up at.
+      }
+      if (cancelled) return;
+      recomputeFromInnerSize();
+      // Fire a second pass on the next frame: setSize() resolves before
+      // the webview has finished reflowing, so window.innerHeight isn't
+      // yet the new value and our first scale computation would lag by
+      // one paint.
+      requestAnimationFrame(() => { if (!cancelled) recomputeFromInnerSize(); });
+
+      try {
+        const win = getCurrentWindow();
+        const handle = await win.onResized(() => recomputeFromInnerSize());
+        if (cancelled) handle();
+        else unlisten = handle;
+      } catch {
+        // ignore — without the listener resize won't update the scale
+        // live, but the initial fit on mount is already correct.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   const renderScreen = (screen: Screen) => {

@@ -6,7 +6,7 @@ import {
   serverCountryCodeForUi,
   serverDisplayName,
 } from "../components/serverDisplay";
-import { fetchVpnServers, type VpnServer } from "../session/auth";
+import { fetchVpnServers, syncSubscription, type VpnServer } from "../session/auth";
 import Spinner from "../components/Spinner";
 import type { SelectedServer } from "../App";
 import "./ServersScreen.css";
@@ -75,10 +75,16 @@ export default function ServersScreen({
     }
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts: { force?: boolean } = {}) => {
     setLoading(true);
     setError(null);
     try {
+      // Force the subscription sync only when the user explicitly hit the
+      // Refresh button — opening the screen normally rides the throttle
+      // window so re-entering doesn't hammer the panel.
+      if (opts.force) {
+        await syncSubscription({ force: true }).catch(() => {});
+      }
       const vpnServers = await fetchVpnServers();
       const items: ServerItem[] = vpnServers.map((s) => ({
         ...s,
@@ -112,7 +118,7 @@ export default function ServersScreen({
         <button
           className="servers-topbar__refresh"
           title={t("refresh")}
-          onClick={load}
+          onClick={() => load({ force: true })}
           disabled={loading}
         >
           <svg

@@ -16,7 +16,7 @@ import {
   recordTraffic,
 } from "./stats";
 import { getSession, subscribeSession } from "./store";
-import { registerCurrentDevice, syncSubscription } from "./auth";
+import { pingHwidOnly, registerCurrentDevice } from "./auth";
 
 // Bumps server-side `last_seen_at` every HEARTBEAT_TICKS seconds while VPN is
 // connected. /api/device/register is the only client-callable endpoint that
@@ -124,8 +124,11 @@ export async function connectVpn(server: ServerVpnConfig): Promise<void> {
   }
   setState({ connecting: true, lastError: null });
   // Fire-and-forget: hits the panel's public sub URL with HWID headers so
-  // panel registers/refreshes the HWID device on every connect.
-  syncSubscription().catch(() => {});
+  // panel registers/refreshes the HWID device on every connect. Bare
+  // ping only — the JSON /api/panel/sub/.../info refresh is throttled by
+  // syncSubscription's profile-update-interval window and shouldn't be
+  // coupled to the connect cadence.
+  pingHwidOnly().catch(() => {});
   try {
     await engineStart(server);
     statsSessionStart();

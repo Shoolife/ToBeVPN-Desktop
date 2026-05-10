@@ -19,11 +19,18 @@ const FALLBACK_TIMEOUT_MS = 7_000;
  * panel URL first; on network failure / timeout retries the same key
  * against the configured fallback endpoint so the HWID record still
  * lands even when the panel is unreachable (network block, partner outage).
+ *
+ * Returns the panel-recommended auto-refresh cadence in milliseconds,
+ * parsed from the `profile-update-interval` response header (an integer
+ * number of hours, the V2Ray subscription convention also honoured by
+ * Happ / V2RayN). Returns `null` when the URL is missing, both legs
+ * fail, or the panel didn't include a usable header — callers fall
+ * back to the cached / default interval.
  */
 export async function pingSubscriptionUrl(
   subscriptionUrl: string | null | undefined,
-): Promise<void> {
-  if (!subscriptionUrl) return;
+): Promise<number | null> {
+  if (!subscriptionUrl) return null;
   try {
     const fp = await getDeviceFingerprint();
     const headers: HeadersInit = {
@@ -35,8 +42,8 @@ export async function pingSubscriptionUrl(
     if (fp.hwid) (headers as Record<string, string>)["x-hwid"] = fp.hwid;
 
     try {
-      await timedFetch(subscriptionUrl, headers, PRIMARY_TIMEOUT_MS);
-      return;
+      const res = await timedFetch(subscriptionUrl, headers, PRIMARY_TIMEOUT_MS);
+      return readIntervalMs(res.headers.get("profile-update-interval"));
     } catch (primaryError) {
       const fallback = buildFallbackUrl(subscriptionUrl);
       if (!fallback) throw primaryError;
@@ -44,21 +51,37 @@ export async function pingSubscriptionUrl(
         "[pingSubscriptionUrl] primary failed, retrying via fallback:",
         primaryError,
       );
-      await timedFetch(fallback, headers, FALLBACK_TIMEOUT_MS);
+      const res = await timedFetch(fallback, headers, FALLBACK_TIMEOUT_MS);
+      return readIntervalMs(res.headers.get("profile-update-interval"));
     }
   } catch (e) {
     console.warn("[pingSubscriptionUrl] failed:", e);
+    return null;
   }
 }
 
-async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<void> {
+async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    await httpFetch(url, { method: "GET", headers, signal: controller.signal });
+    return await httpFetch(url, { method: "GET", headers, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// Floor at 1h so a misconfigured panel can't cause the client to hammer it;
+// ceiling at 7d so a typo'd value doesn't disable refreshes for the
+// foreseeable future.
+const MIN_INTERVAL_HOURS = 1;
+const MAX_INTERVAL_HOURS = 24 * 7;
+
+function readIntervalMs(raw: string | null): number | null {
+  if (!raw) return null;
+  const parsed = parseFloat(raw.trim());
+  if (!isFinite(parsed) || parsed <= 0) return null;
+  const hours = Math.min(Math.max(parsed, MIN_INTERVAL_HOURS), MAX_INTERVAL_HOURS);
+  return hours * 60 * 60 * 1000;
 }
 
 /**
