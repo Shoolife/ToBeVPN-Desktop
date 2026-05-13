@@ -65,13 +65,16 @@ export default function ServersScreen({
       invoke<number>("tcp_ping", { host: s.address, port: s.port, timeoutMs: 3000 })
         .then((ms) => {
           if (pingGenRef.current !== gen) return;
-          if (ms >= 0) {
-            setServers((prev) =>
-              prev.map((srv) => (srv.id === s.id ? { ...srv, ping: ms } : srv)),
-            );
-          }
+          setServers((prev) =>
+            prev.map((srv) => (srv.id === s.id ? { ...srv, ping: ms >= 0 ? ms : -1 } : srv)),
+          );
         })
-        .catch(() => {});
+        .catch(() => {
+          if (pingGenRef.current !== gen) return;
+          setServers((prev) =>
+            prev.map((srv) => (srv.id === s.id ? { ...srv, ping: -1 } : srv)),
+          );
+        });
     }
   }, []);
 
@@ -209,6 +212,8 @@ export default function ServersScreen({
               </div>
               {!server.isOnline ? (
                 <span className="server-item__offline-badge">{t("server_offline")}</span>
+              ) : server.ping < 0 ? (
+                <span className="server-item__ping-unavailable">{t("server_unavailable")}</span>
               ) : server.ping > 0 ? (
                 <div className="server-item__ping">
                   <span className="server-item__ping-value" style={{ color: pingColor(server.ping) }}>

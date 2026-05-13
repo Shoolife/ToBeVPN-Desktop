@@ -4913,7 +4913,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tobevpn-desktop"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "dirs",
  "hostname",

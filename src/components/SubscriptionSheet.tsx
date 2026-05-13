@@ -15,6 +15,13 @@ interface CurrentLimits {
 }
 
 const BOT_NAME = "meow_meow_vpn_bot";
+const FALLBACK_PLAN_DURATIONS = [
+  { days: 1, rubPrice: 15 },
+  { days: 7, rubPrice: 65 },
+  { days: 30, rubPrice: 200 },
+  { days: 90, rubPrice: 500 },
+  { days: 365, rubPrice: 1500 },
+];
 
 interface PlanRow {
   key: string;
@@ -74,6 +81,11 @@ function formatStars(amount: string): string {
   return `${Math.trunc(v)} \u2B50`;
 }
 
+function formatFallbackPrice(rubPrice: number, isRu: boolean): string {
+  if (isRu) return formatRub(String(rubPrice));
+  return formatStars(String(Math.round(rubPrice / 1.3)));
+}
+
 function formatDurationPrice(duration: PurchaseDurationDto, isRu: boolean): string {
   const map = new Map(duration.prices.map((p) => [p.currency, p.amount] as const));
   if (isRu) {
@@ -94,25 +106,20 @@ function formatDurationPrice(duration: PurchaseDurationDto, isRu: boolean): stri
   return "—";
 }
 
-function planDescription(plan: PurchasePlanDto | null, isRu: boolean): string {
-  if (!plan) return t("plan_quota_month");
-  const trafficGb = plan.traffic_limit;
-  const deviceLimit = plan.device_limit;
+function planDescription(plan: PurchasePlanDto | null): string {
+  const trafficGb = plan?.traffic_limit;
+  const deviceLimit = plan?.device_limit;
   const trafficPart =
-    trafficGb <= 0
-      ? isRu
-        ? "Безлимитный трафик"
-        : "Unlimited traffic"
-      : isRu
-        ? `${trafficGb} ГБ / месяц`
-        : `${trafficGb} GB / month`;
+    trafficGb === undefined || trafficGb === null
+      ? t("plan_quota_month")
+      : trafficGb <= 0
+        ? t("plan_unlimited_traffic")
+        : tf("plan_traffic_month_fmt", trafficGb);
   const devicePart =
-    deviceLimit > 0
-      ? isRu
-        ? `до ${deviceLimit} устройств`
-        : `up to ${deviceLimit} devices`
-      : null;
-  return devicePart ? `${trafficPart} \u00B7 ${devicePart}` : trafficPart;
+    deviceLimit && deviceLimit > 0
+      ? tf("plan_devices_fmt", deviceLimit)
+      : t("plan_devices_unknown");
+  return `${trafficPart} \u00B7 ${devicePart}`;
 }
 
 function pickSourcePlan(data: PurchasePlansDto): PurchasePlanDto | null {
@@ -126,10 +133,17 @@ function pickSourcePlan(data: PurchasePlansDto): PurchasePlanDto | null {
 }
 
 function buildRows(data: PurchasePlansDto | null, isRu: boolean): PlanRow[] {
-  if (!data) return [];
-  const sourcePlan = pickSourcePlan(data);
-  if (!sourcePlan) return [];
-  const desc = planDescription(sourcePlan, isRu);
+  const sourcePlan = data ? pickSourcePlan(data) : null;
+  const desc = planDescription(sourcePlan);
+  if (!sourcePlan) {
+    return FALLBACK_PLAN_DURATIONS.map((d) => ({
+      key: planKey(d.days),
+      title: planTitle(d.days),
+      description: desc,
+      priceDisplay: formatFallbackPrice(d.rubPrice, isRu),
+      paymentUrl: null,
+    }));
+  }
   return [...sourcePlan.durations]
     .filter((d) => d.days > 0)
     .sort((a, b) => a.order_index - b.order_index)
@@ -213,8 +227,12 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
 
   // Fetch real per-user limits (matches phone's loadCurrentLimits in MainViewModel).
   useEffect(() => {
-    if (session.telegramId === null) return;
+    if (session.telegramId === null) {
+      setCurrentLimits(null);
+      return;
+    }
     let cancelled = false;
+    setCurrentLimits(null);
     getUserByTelegramId(session.telegramId)
       .then(({ response }) => {
         if (cancelled) return;
@@ -225,13 +243,18 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           deviceLimit: Number(user.hwid_device_limit ?? 0) || 0,
         });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setCurrentLimits(null);
+      });
     return () => {
       cancelled = true;
     };
   }, [session.telegramId]);
 
-  const rows = useMemo(() => buildRows(plansData, isRu), [plansData, isRu]);
+  const rows = useMemo(
+    () => (plansLoading ? [] : buildRows(plansData, isRu)),
+    [plansData, plansLoading, isRu],
+  );
 
   // Keep the selection valid as the rows refresh.
   useEffect(() => {
@@ -341,16 +364,22 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       break;
   }
 
-  // Limits chip (only for PAID/ADMIN, only when server returned positive values).
+  // Limits chip. For PAID/ADMIN we show unknown placeholders immediately when
+  // the current user limits request is unavailable.
   const trafficGb =
     currentLimits && currentLimits.trafficLimitBytes > 0
       ? Math.floor(currentLimits.trafficLimitBytes / (1024 * 1024 * 1024))
       : null;
   const deviceLimit =
     currentLimits && currentLimits.deviceLimit > 0 ? currentLimits.deviceLimit : null;
-  const showLimits =
-    (session.userPlan === "PAID" || session.userPlan === "ADMIN") &&
-    (trafficGb !== null || deviceLimit !== null);
+  const showLimits = session.userPlan === "PAID" || session.userPlan === "ADMIN";
+  const trafficLimitValue =
+    trafficGb !== null
+      ? `${trafficGb} ${t("unit_gb")}`
+      : currentLimits && currentLimits.trafficLimitBytes <= 0
+        ? "\u221E"
+        : `XXX ${t("unit_gb")}`;
+  const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : "XX";
 
   return (
     <div
@@ -376,23 +405,15 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
             </div>
             {showLimits && (
               <div className="sub-current__limits">
-                {trafficGb !== null && (
-                  <div className="sub-limit">
-                    <div className="sub-limit__value">
-                      {trafficGb} {t("unit_gb")}
-                    </div>
-                    <div className="sub-limit__label">{t("per_month_short")}</div>
-                  </div>
-                )}
-                {trafficGb !== null && deviceLimit !== null && (
-                  <span className="sub-current__sep">·</span>
-                )}
-                {deviceLimit !== null && (
-                  <div className="sub-limit">
-                    <div className="sub-limit__value">{deviceLimit}</div>
-                    <div className="sub-limit__label">{t("devices_label")}</div>
-                  </div>
-                )}
+                <div className="sub-limit">
+                  <div className="sub-limit__value">{trafficLimitValue}</div>
+                  <div className="sub-limit__label">{t("per_month_short")}</div>
+                </div>
+                <span className="sub-current__sep">·</span>
+                <div className="sub-limit">
+                  <div className="sub-limit__value">{deviceLimitValue}</div>
+                  <div className="sub-limit__label">{t("devices_label")}</div>
+                </div>
               </div>
             )}
           </div>

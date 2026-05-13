@@ -142,9 +142,11 @@ export default function HomeScreen({
       timeoutMs: 3000,
     })
       .then((ms) => {
-        if (!cancelled && ms >= 0) setPing(ms);
+        if (!cancelled) setPing(ms >= 0 ? ms : -1);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setPing(-1);
+      });
     return () => {
       cancelled = true;
     };
@@ -267,12 +269,18 @@ export default function HomeScreen({
                 </div>
               )}
             </div>
-            {selectedServer && ping > 0 && (
+            {selectedServer && ping !== 0 && (
               <div className="home-card__ping">
-                <span className="home-card__ping-value" style={{ color: pingColor(ping) }}>
-                  {ping}
-                </span>
-                <span className="home-card__ping-unit">{t("speed_unit_ms")}</span>
+                {ping > 0 ? (
+                  <>
+                    <span className="home-card__ping-value" style={{ color: pingColor(ping) }}>
+                      {ping}
+                    </span>
+                    <span className="home-card__ping-unit">{t("speed_unit_ms")}</span>
+                  </>
+                ) : (
+                  <span className="home-card__ping-unavailable">{t("server_unavailable")}</span>
+                )}
               </div>
             )}
             <svg className="home-card__arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

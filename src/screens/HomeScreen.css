@@ -219,6 +219,13 @@
   margin-top: 2px;
 }
 
+.home-card__ping-unavailable {
+  font-size: 12px;
+  font-weight: 600;
+  color: #F44336;
+  white-space: nowrap;
+}
+
 .home-session__header {
   display: flex;
   align-items: center;

@@ -63,24 +63,28 @@ function buildUrl(
 }
 
 /**
- * Build the fallback URL by reusing the canonical primary URL and only
- * swapping its host. The fallback gateway mirrors the primary's API
- * surface 1:1, so the path / query / body / headers travel verbatim;
- * only the hostname differs. `fallbackHost` is a bare hostname (e.g.
- * "gateway.example.invalid") — we tolerate a stray scheme or trailing
- * slash so an operator-pasted value doesn't silently break the URL.
+ * Build the fallback URL for the proxy function. The function receives the
+ * original API target in `u` as host + path + query, e.g.
+ * `<primary-host>/api/config?x=1`. Method/body/headers are preserved by the
+ * retry call itself.
  */
 function buildFallbackBotUrl(
   path: string,
   query: Record<string, string | number | undefined> | undefined,
-  fallbackHost: string,
-): string {
-  const url = new URL(buildUrl(path, query, BOT_API_BASE_URL));
-  const cleanHost = fallbackHost
-    .replace(/^https?:\/\//, "")
-    .replace(/\/.*$/, "");
-  url.host = cleanHost;
-  return url.toString();
+  fallbackProxyUrl: string,
+): string | null {
+  try {
+    const primary = new URL(buildUrl(path, query, BOT_API_BASE_URL));
+    const target = `${primary.host}${primary.pathname}${primary.search}`;
+    const normalizedFallback = fallbackProxyUrl.match(/^https?:\/\//)
+      ? fallbackProxyUrl
+      : `https://${fallbackProxyUrl}`;
+    const url = new URL(normalizedFallback);
+    url.searchParams.set("u", target);
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 // Hard ceiling on every API call. Without this a broken VPN tunnel leaves the
@@ -166,8 +170,10 @@ async function performFetch(
       `[bot-api] primary request to ${path} failed, retrying via fallback:`,
       primaryError,
     );
+    const fallbackUrl = buildFallbackBotUrl(path, query, BOT_API_FALLBACK_URL);
+    if (!fallbackUrl) throw primaryError;
     return await attemptFetch(
-      buildFallbackBotUrl(path, query, BOT_API_FALLBACK_URL),
+      fallbackUrl,
       baseInit,
       FALLBACK_TIMEOUT_MS,
       userSignal,

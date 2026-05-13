@@ -145,3 +145,11 @@
   flex-shrink: 0;
   margin-left: 12px;
 }
+
+.server-item__ping-unavailable {
+  font-size: 12px;
+  font-weight: 600;
+  color: #F44336;
+  flex-shrink: 0;
+  margin-left: 12px;
+}
