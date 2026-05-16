@@ -228,6 +228,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v5
         with:
           path: dist
@@ -278,6 +282,17 @@ jobs:
           echo "--- latest.json ---"
           cat latest.json
 
+      - name: Generate release notes
+        run: |
+          set -e
+          PREVIOUS_TAG=$(git tag --list 'v*' --sort=-v:refname | awk -v current="$GITHUB_REF_NAME" '$0 != current { print; exit }')
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREVIOUS_TAG}...${GITHUB_REF_NAME}" > release-notes.md
+          else
+            echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" > release-notes.md
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -287,4 +302,4 @@ jobs:
             dist/ToBeVPN-windows-exe/*.exe
             dist/ToBeVPN-windows-exe/*.exe.sig
             latest.json
-          generate_release_notes: true
+          body_path: release-notes.md
