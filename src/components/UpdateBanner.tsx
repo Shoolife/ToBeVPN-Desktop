@@ -1,7 +1,7 @@
 // In-app updater banner. Mirrors the Android equivalents — same four phases,
 // same UX strings, same behavior — but driven by tauri-plugin-updater so the
-// install step is silent (Windows NSIS /UPDATE) or single-prompt (Linux pkexec
-// dpkg) instead of routing the user to the system package installer dialog.
+// install step is silent (Windows NSIS /UPDATE) or routed through a constrained
+// Linux polkit helper instead of sending the user to the package installer UI.
 //
 // All state is owned by `updateStore` (the desktop equivalent of the Android
 // UpdateViewModel). This component is a pure presentation layer — it
@@ -92,19 +92,26 @@ function Downloading({
     progress.total > 0 ? Math.min(progress.downloaded / progress.total, 1) : 0;
   const downloadedMb = (progress.downloaded / (1024 * 1024)).toFixed(1);
   const totalMb = progress.total > 0 ? (progress.total / (1024 * 1024)).toFixed(1) : null;
+  const progressClass = progress.indeterminate
+    ? "update-banner__progress update-banner__progress--indeterminate"
+    : "update-banner__progress";
   return (
     <>
       <div className="update-banner__title">
         {t("update_banner_downloading_title").replace("{version}", info.version)}
       </div>
-      <div className="update-banner__progress">
+      <div className={progressClass}>
         <div
           className="update-banner__progress-fill"
           style={{ width: `${fraction * 100}%` }}
         />
       </div>
       <div className="update-banner__progress-text">
-        {totalMb ? `${downloadedMb} МБ / ${totalMb} МБ` : `${downloadedMb} МБ`}
+        {progress.indeterminate
+          ? t("update_banner_installing_privileged")
+          : totalMb
+            ? `${downloadedMb} МБ / ${totalMb} МБ`
+            : `${downloadedMb} МБ`}
       </div>
     </>
   );

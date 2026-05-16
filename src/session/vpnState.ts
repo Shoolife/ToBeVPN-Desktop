@@ -23,6 +23,14 @@ import { pingHwidOnly, registerCurrentDevice } from "./auth";
 // touches that column — without this the device's "Last active" row in the
 // account's device list freezes at the moment of the last app launch.
 const HEARTBEAT_TICKS = 60;
+const TUNNEL_HEALTH_INITIAL_DELAY_MS = 2_500;
+const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
+const TUNNEL_HEALTH_RETRY_MS = 3_000;
+const TUNNEL_HEALTH_ATTEMPTS = 4;
+const TUNNEL_HEALTH_TIMEOUT_MS = 7_000;
+const TUNNEL_RECOVERY_RESTART_DELAY_MS = 700;
+const MAX_TUNNEL_RECOVERY_ATTEMPTS = 2;
+const TUNNEL_PROBE_URL = "https://speed.cloudflare.com/__down?bytes=1";
 
 export interface VpnRuntimeState {
   connected: boolean;
@@ -59,6 +67,10 @@ export function getVpnRuntime(): VpnRuntimeState {
 
 let pollTimer: number | null = null;
 let heartbeatCounter = 0;
+let healthTimer: number | null = null;
+let connectionGeneration = 0;
+let watchdogRecoveryAttempts = 0;
+let currentServerForRecovery: ServerVpnConfig | null = null;
 
 function startPolling() {
   if (pollTimer !== null) return;
@@ -99,7 +111,23 @@ function stopPolling() {
   heartbeatCounter = 0;
 }
 
+function isPaidOrAdmin(): boolean {
+  const { userPlan } = getSession();
+  return userPlan === "PAID" || userPlan === "ADMIN";
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 export async function connectVpn(server: ServerVpnConfig): Promise<void> {
+  return connectVpnInternal(server, true);
+}
+
+async function connectVpnInternal(
+  server: ServerVpnConfig,
+  resetWatchdogRecovery: boolean,
+): Promise<void> {
   // Refuse the panel's "subscription expired" sentinel server before we
   // hand it to the Rust-side engine. xray would crash on its all-zeros
   // uuid / dummy address, taking the whole webview down with it.
@@ -122,15 +150,26 @@ export async function connectVpn(server: ServerVpnConfig): Promise<void> {
     setState({ connecting: false, connected: false, lastError: msg });
     throw new Error(msg);
   }
+  const gen = ++connectionGeneration;
+  currentServerForRecovery = server;
+  if (resetWatchdogRecovery) {
+    watchdogRecoveryAttempts = 0;
+  }
   setState({ connecting: true, lastError: null });
-  // Fire-and-forget: hits the panel's public sub URL with HWID headers so
-  // panel registers/refreshes the HWID device on every connect. Bare
-  // ping only — the JSON /api/panel/sub/.../info refresh is throttled by
-  // syncSubscription's profile-update-interval window and shouldn't be
-  // coupled to the connect cadence.
-  pingHwidOnly().catch(() => {});
+  // Limited/trial access depends on the HWID marker being registered before
+  // the first outbound connection. Paid/admin users don't need to wait on
+  // this best-effort ping, so keep their connect path fast.
+  if (isPaidOrAdmin()) {
+    pingHwidOnly().catch(() => {});
+  } else {
+    await pingHwidOnly();
+  }
   try {
     await engineStart(server);
+    if (gen !== connectionGeneration) {
+      await engineStop().catch(() => {});
+      return;
+    }
     statsSessionStart();
     setState({
       connecting: false,
@@ -139,14 +178,20 @@ export async function connectVpn(server: ServerVpnConfig): Promise<void> {
       sessionBytes: 0,
     });
     startPolling();
+    startTunnelHealthCheck(gen);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    setState({ connecting: false, connected: false, lastError: msg });
+    if (gen === connectionGeneration) {
+      setState({ connecting: false, connected: false, lastError: msg });
+    }
     throw e;
   }
 }
 
 export async function disconnectVpn(): Promise<void> {
+  connectionGeneration++;
+  currentServerForRecovery = null;
+  stopTunnelHealthCheck();
   stopPolling();
   setState({ connecting: false });
   try {
@@ -159,6 +204,99 @@ export async function disconnectVpn(): Promise<void> {
       sessionStartTime: null,
       sessionBytes: 0,
     });
+  }
+}
+
+function startTunnelHealthCheck(gen: number) {
+  stopTunnelHealthCheck();
+  healthTimer = window.setTimeout(() => {
+    void runTunnelHealthLoop(gen);
+  }, TUNNEL_HEALTH_INITIAL_DELAY_MS);
+}
+
+function stopTunnelHealthCheck() {
+  if (healthTimer !== null) {
+    clearTimeout(healthTimer);
+    healthTimer = null;
+  }
+}
+
+async function runTunnelHealthLoop(gen: number): Promise<void> {
+  if (gen !== connectionGeneration || !state.connected) return;
+
+  if (navigator.onLine !== false) {
+    const healthy = await probeTunnelWithRetries(TUNNEL_HEALTH_ATTEMPTS);
+    if (gen !== connectionGeneration || !state.connected) return;
+    if (healthy) {
+      watchdogRecoveryAttempts = 0;
+    } else {
+      await recoverTunnelAfterHealthFailure(gen);
+      return;
+    }
+  }
+
+  if (gen !== connectionGeneration || !state.connected) return;
+  healthTimer = window.setTimeout(() => {
+    void runTunnelHealthLoop(gen);
+  }, TUNNEL_HEALTH_INTERVAL_MS);
+}
+
+async function recoverTunnelAfterHealthFailure(gen: number): Promise<void> {
+  if (gen !== connectionGeneration || !state.connected) return;
+  const server = currentServerForRecovery;
+  if (!server || watchdogRecoveryAttempts >= MAX_TUNNEL_RECOVERY_ATTEMPTS) {
+    await stopVpnWithError("VPN tunnel stopped forwarding traffic");
+    return;
+  }
+
+  watchdogRecoveryAttempts++;
+  await disconnectVpn().catch(() => {});
+  await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
+  if (!state.connected && !state.connecting) {
+    await connectVpnInternal(server, false).catch(() => {});
+  }
+}
+
+async function stopVpnWithError(message: string): Promise<void> {
+  connectionGeneration++;
+  currentServerForRecovery = null;
+  stopTunnelHealthCheck();
+  stopPolling();
+  try {
+    await engineStop();
+  } finally {
+    statsSessionEnd();
+    setState({
+      connected: false,
+      connecting: false,
+      sessionStartTime: null,
+      sessionBytes: 0,
+      lastError: message,
+    });
+  }
+}
+
+async function probeTunnelWithRetries(attempts: number): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    if (await probeTunnelOnce()) return true;
+    if (i < attempts - 1) await sleepMs(TUNNEL_HEALTH_RETRY_MS);
+  }
+  return false;
+}
+
+async function probeTunnelOnce(): Promise<boolean> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), TUNNEL_HEALTH_TIMEOUT_MS);
+  try {
+    const response = await fetch(TUNNEL_PROBE_URL, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -175,6 +313,9 @@ function ensureVpnDiedListener() {
   if (vpnDiedListenerRegistered) return;
   vpnDiedListenerRegistered = true;
   listen<string>("vpn-died", (event) => {
+    connectionGeneration++;
+    currentServerForRecovery = null;
+    stopTunnelHealthCheck();
     stopPolling();
     setState({
       connected: false,

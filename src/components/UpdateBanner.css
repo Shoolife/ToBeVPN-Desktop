@@ -58,6 +58,20 @@
   transition: width 400ms linear;
 }
 
+.update-banner__progress--indeterminate .update-banner__progress-fill {
+  width: 36% !important;
+  animation: update-banner-indeterminate 1.15s ease-in-out infinite;
+}
+
+@keyframes update-banner-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
 .update-banner__progress-text {
   font-size: 12px;
   color: var(--text-muted);

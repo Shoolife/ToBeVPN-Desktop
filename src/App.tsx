@@ -14,7 +14,7 @@ import UpdateBanner from "./components/UpdateBanner";
 import { isPaired, useSession } from "./session/store";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
 import { connectVpn, getVpnRuntime } from "./session/vpnState";
-import { loadLastServer, saveLastServer } from "./session/lastServer";
+import { clearLastServer, loadLastServer, saveLastServer } from "./session/lastServer";
 import "./App.css";
 
 export type Screen = "splash" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices";
@@ -106,6 +106,15 @@ export default function App() {
       forceGoToPairing();
     }
   }, [session.isLinked, forceGoToPairing]);
+
+  useEffect(() => {
+    if (!session.isLinked) {
+      setSelectedServer(null);
+      clearLastServer();
+      return;
+    }
+    setSelectedServer(loadLastServer());
+  }, [session.isLinked, session.shortUuid]);
 
   // Start device-link polling when already authenticated on mount.
   useEffect(() => {
@@ -208,6 +217,10 @@ export default function App() {
             onStats={() => goForward("stats")}
             onSpeedTest={() => goForward("speedtest")}
             selectedServer={selectedServer}
+            onServerChange={(server) => {
+              setSelectedServer(server);
+              saveLastServer(server);
+            }}
           />
         );
       case "settings":

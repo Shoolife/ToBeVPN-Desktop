@@ -1154,6 +1154,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -3537,6 +3538,7 @@ checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -4913,15 +4915,20 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tobevpn-desktop"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
+ "base64 0.22.1",
  "dirs",
  "hostname",
+ "infer",
  "keyring",
  "libc",
  "log",
  "machine-uid",
+ "minisign-verify",
  "os_info",
+ "reqwest 0.13.2",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -4933,6 +4940,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
 ]
 

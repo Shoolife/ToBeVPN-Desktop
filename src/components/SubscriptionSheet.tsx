@@ -2,7 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { QRCodeSVG } from "qrcode.react";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
-import { fetchPurchasePlans } from "../session/auth";
+import {
+  fetchPurchasePlans,
+  markPendingPurchaseStarted,
+  startPendingPurchaseRefreshIfNeeded,
+} from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { getUserByTelegramId } from "../api/client";
 import type { PurchaseDurationDto, PurchasePlanDto, PurchasePlansDto } from "../api/types";
@@ -227,7 +231,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
 
   // Fetch real per-user limits (matches phone's loadCurrentLimits in MainViewModel).
   useEffect(() => {
-    if (session.telegramId === null) {
+    if (!session.isLinked || session.telegramId === null) {
       setCurrentLimits(null);
       return;
     }
@@ -249,7 +253,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     return () => {
       cancelled = true;
     };
-  }, [session.telegramId]);
+  }, [session.isLinked, session.telegramId, session.userPlan, session.planExpiresAt]);
 
   const rows = useMemo(
     () => (plansLoading ? [] : buildRows(plansData, isRu)),
@@ -332,8 +336,24 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       setOpeningTelegram(false);
     }
   };
+  const canPurchase = session.isLinked && session.telegramId !== null;
+  const handleShowQr = () => {
+    if (!canPurchase) {
+      setOpenError(t("not_authorized"));
+      return;
+    }
+    if (!selectedRow) return;
+    markPendingPurchaseStarted({
+      baselinePlan: session.userPlan,
+      baselineExpiresAt: session.planExpiresAt,
+    });
+    startPendingPurchaseRefreshIfNeeded();
+    setQrVisible(true);
+  };
   const buyText = selectedRow
-    ? tf("buy_plan", selectedRow.title, selectedRow.priceDisplay)
+    ? canPurchase
+      ? tf("buy_plan", selectedRow.title, selectedRow.priceDisplay)
+      : t("not_authorized")
     : t("subscription");
 
   // Current plan summary
@@ -451,8 +471,8 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
 
           <button
             className="sub-sheet__buy-btn"
-            onClick={() => setQrVisible(true)}
-            disabled={!selectedRow}
+            onClick={handleShowQr}
+            disabled={!selectedRow || !canPurchase}
           >
             {buyText}
           </button>

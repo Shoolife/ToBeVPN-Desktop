@@ -36,6 +36,7 @@ const strings = {
     pairing_open_telegram: "Открыть Telegram на этом ПК",
     pairing_opening_telegram: "Открываем Telegram…",
     pairing_open_failed: "Не удалось открыть Telegram",
+    not_authorized: "Не авторизован",
 
     // Connection states
     state_disconnected: "Отключено",
@@ -50,6 +51,10 @@ const strings = {
     traffic: "Трафик",
     subscription: "Подписка",
     free_tier_hint: "Бесплатный пробный период",
+    trial_access_banner: "ВРЕМЕННЫЙ ПРОБНЫЙ ДОСТУП",
+    trial_access_title: "Временный доступ",
+    trial_access_description: "Пробный доступ выдаётся один раз и быстро заканчивается. Оформите тариф, чтобы сохранить доступ к серверам и не потерять подключение после окончания пробного периода.",
+    trial_access_open_plans: "К тарифам",
 
     // Servers
     server_select: "Выберите сервер",
@@ -186,6 +191,7 @@ const strings = {
     update_banner_download: "Скачать",
     update_banner_later: "Позже",
     update_banner_downloading_title: "Загружаем v{version}",
+    update_banner_installing_privileged: "Скачиваем и устанавливаем подписанное обновление…",
     update_banner_cancel: "Отменить",
     update_banner_ready_title: "v{version} готова к установке",
     update_banner_ready_description: "Перезапустите приложение, чтобы применить обновление.",
@@ -211,6 +217,7 @@ const strings = {
     pairing_open_telegram: "Open Telegram on this PC",
     pairing_opening_telegram: "Opening Telegram…",
     pairing_open_failed: "Could not open Telegram",
+    not_authorized: "Not signed in",
 
     // Connection states
     state_disconnected: "Disconnected",
@@ -225,6 +232,10 @@ const strings = {
     traffic: "Traffic",
     subscription: "Subscription",
     free_tier_hint: "Free trial",
+    trial_access_banner: "TEMPORARY TRIAL ACCESS",
+    trial_access_title: "Temporary access",
+    trial_access_description: "Trial access is issued once and ends quickly. Choose a plan to keep server access and avoid losing the connection after the trial expires.",
+    trial_access_open_plans: "Plans",
 
     // Servers
     server_select: "Select a server",
@@ -359,6 +370,7 @@ const strings = {
     update_banner_download: "Download",
     update_banner_later: "Later",
     update_banner_downloading_title: "Downloading v{version}",
+    update_banner_installing_privileged: "Downloading and installing the signed update…",
     update_banner_cancel: "Cancel",
     update_banner_ready_title: "v{version} ready",
     update_banner_ready_description: "Restart the app to apply the update.",

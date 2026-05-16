@@ -9,7 +9,12 @@ import {
   serverCountryCodeForUi,
   serverDisplayName,
 } from "../components/serverDisplay";
-import { syncSubscription } from "../session/auth";
+import {
+  fetchVpnServers,
+  startPendingPurchaseRefreshIfNeeded,
+  syncSubscription,
+  type VpnServer,
+} from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { connectVpn, disconnectVpn, useVpnRuntime, clearVpnError } from "../session/vpnState";
 import type { SelectedServer } from "../App";
@@ -95,6 +100,35 @@ function planHint(plan: UserPlan, expiresAt: number | null): string {
   return "";
 }
 
+function toSelectedServer(server: VpnServer): SelectedServer {
+  return {
+    name: server.name,
+    country: server.country,
+    address: server.address,
+    port: server.port,
+    uuid: server.uuid,
+    flow: server.flow,
+    security: server.security,
+    sni: server.sni,
+    fingerprint: server.fingerprint,
+    public_key: server.public_key,
+    short_id: server.short_id,
+    network: server.network,
+    path: server.path,
+    mode: server.mode,
+    spx: server.spx,
+  };
+}
+
+function sameServer(a: SelectedServer, b: VpnServer): boolean {
+  return (
+    a.address === b.address &&
+    a.port === b.port &&
+    a.uuid === b.uuid &&
+    a.sni === b.sni
+  );
+}
+
 export default function HomeScreen({
   onLogout: _onLogout,
   onSettings,
@@ -102,6 +136,7 @@ export default function HomeScreen({
   onStats,
   onSpeedTest,
   selectedServer,
+  onServerChange,
 }: {
   onLogout: () => void;
   onSettings: () => void;
@@ -109,11 +144,13 @@ export default function HomeScreen({
   onStats: () => void;
   onSpeedTest: () => void;
   selectedServer: SelectedServer | null;
+  onServerChange: (server: SelectedServer) => void;
 }) {
   const session = useSession();
   const vpn = useVpnRuntime();
   const { connected, connecting, sessionBytes, sessionStartTime, lastError } = vpn;
   const [showSubscription, setShowSubscription] = useState(false);
+  const [showTrialInfo, setShowTrialInfo] = useState(false);
 
   const elapsed = sessionStartTime
     ? Math.floor((Date.now() - sessionStartTime) / 1000)
@@ -126,6 +163,7 @@ export default function HomeScreen({
 
   useEffect(() => {
     void syncSubscription();
+    startPendingPurchaseRefreshIfNeeded();
   }, []);
 
   // Ping the selected server so the home card mirrors phone (latency on the right).
@@ -155,6 +193,25 @@ export default function HomeScreen({
   const [localError, setLocalError] = useState<string | null>(null);
   const vpnError = localError ?? lastError;
 
+  const prepareServerForConnect = async (): Promise<SelectedServer | null> => {
+    if (!selectedServer) return null;
+    if (isPaidOrAdmin) return selectedServer;
+
+    await syncSubscription({ force: true }).catch(() => {});
+    const freshServers = await fetchVpnServers().catch(() => []);
+    const fresh =
+      freshServers.find((server) => sameServer(selectedServer, server)) ??
+      freshServers[0] ??
+      null;
+    if (!fresh) return null;
+
+    const resolved = toSelectedServer(fresh);
+    if (!sameServer(selectedServer, fresh)) {
+      onServerChange(resolved);
+    }
+    return resolved;
+  };
+
   const handleToggle = async () => {
     if (connected) {
       try {
@@ -170,20 +227,25 @@ export default function HomeScreen({
     }
     setLocalError(null);
     clearVpnError();
+    const serverToConnect = await prepareServerForConnect();
+    if (!serverToConnect) {
+      setLocalError(t("servers_empty"));
+      return;
+    }
     const serverConfig = {
-      address: selectedServer.address,
-      port: selectedServer.port,
-      uuid: selectedServer.uuid,
-      flow: selectedServer.flow,
-      security: selectedServer.security,
-      sni: selectedServer.sni,
-      fingerprint: selectedServer.fingerprint,
-      public_key: selectedServer.public_key,
-      short_id: selectedServer.short_id,
-      network: selectedServer.network,
-      path: selectedServer.path,
-      mode: selectedServer.mode,
-      spx: selectedServer.spx,
+      address: serverToConnect.address,
+      port: serverToConnect.port,
+      uuid: serverToConnect.uuid,
+      flow: serverToConnect.flow,
+      security: serverToConnect.security,
+      sni: serverToConnect.sni,
+      fingerprint: serverToConnect.fingerprint,
+      public_key: serverToConnect.public_key,
+      short_id: serverToConnect.short_id,
+      network: serverToConnect.network,
+      path: serverToConnect.path,
+      mode: serverToConnect.mode,
+      spx: serverToConnect.spx,
     };
     try {
       await connectVpn(serverConfig);
@@ -218,6 +280,23 @@ export default function HomeScreen({
           </svg>
         </button>
       </div>
+
+      {session.userPlan === "FREE_TRIAL" && (
+        <button
+          className="home-trial-banner"
+          type="button"
+          onClick={() => setShowTrialInfo(true)}
+        >
+          <span className="home-trial-banner__icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+          </span>
+          <span className="home-trial-banner__text">{t("trial_access_banner")}</span>
+        </button>
+      )}
 
       <div className="home-content">
         <div className="home-connect-area">
@@ -372,6 +451,41 @@ export default function HomeScreen({
 
       {showSubscription && (
         <SubscriptionSheet onDismiss={() => setShowSubscription(false)} />
+      )}
+
+      {showTrialInfo && (
+        <div className="home-trial-dialog-overlay" onClick={() => setShowTrialInfo(false)}>
+          <div className="home-trial-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="home-trial-dialog__header">
+              <span className="home-trial-dialog__icon">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+              </span>
+              <div className="home-trial-dialog__title">{t("trial_access_title")}</div>
+            </div>
+            <div className="home-trial-dialog__text">{t("trial_access_description")}</div>
+            <div className="home-trial-dialog__actions">
+              <button
+                className="home-trial-dialog__btn home-trial-dialog__btn--secondary"
+                onClick={() => setShowTrialInfo(false)}
+              >
+                {t("cancel")}
+              </button>
+              <button
+                className="home-trial-dialog__btn home-trial-dialog__btn--primary"
+                onClick={() => {
+                  setShowTrialInfo(false);
+                  setShowSubscription(true);
+                }}
+              >
+                {t("trial_access_open_plans")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

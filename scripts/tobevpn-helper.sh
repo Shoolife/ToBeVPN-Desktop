@@ -1,8 +1,8 @@
 #!/bin/bash
 # Privileged TUN/routing helper for ToBeVPN.
 # Installed at /usr/local/bin and invoked via pkexec; the matching polkit
-# policy (app.tobevpn.network.policy) gates calls behind a single auth prompt
-# scoped per session (auth_self_keep).
+# policy (app.tobevpn.network.policy) allows active local sessions to call
+# this constrained helper without repeated password prompts.
 #
 # SECURITY: this script runs as root. Do NOT accept arbitrary executable paths
 # from the caller — pkexec passes argv straight through, so a malicious caller

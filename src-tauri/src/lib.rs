@@ -1,4 +1,6 @@
 mod vpn;
+#[cfg(target_os = "linux")]
+pub mod linux_update;
 
 use keyring::{Entry, Error as KeyringError};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,6 +124,18 @@ fn clear_secure_session() -> Result<(), String> {
         Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
         Err(e) => Err(format!("Could not clear secure session: {e}")),
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+async fn install_latest_linux_update(version: String) -> Result<(), String> {
+    linux_update::install_latest_via_polkit(version).await
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+async fn install_latest_linux_update(_version: String) -> Result<(), String> {
+    Err("Linux update helper is unavailable on this platform".into())
 }
 
 /// Measure TCP connect latency to `host:port`.
@@ -352,6 +366,7 @@ pub fn run() {
             load_secure_session,
             save_secure_session,
             clear_secure_session,
+            install_latest_linux_update,
             tcp_ping,
             resolve_host,
             start_vpn,

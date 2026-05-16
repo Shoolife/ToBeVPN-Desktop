@@ -11,6 +11,7 @@
 //     the dismissal so the banner can re-surface immediately.
 
 import { useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 
@@ -23,6 +24,7 @@ export interface DesktopUpdateInfo {
 export interface DesktopUpdateProgress {
   downloaded: number;
   total: number;
+  indeterminate?: boolean;
 }
 
 export type DesktopUpdateState =
@@ -258,6 +260,23 @@ export async function startUpdateDownload(): Promise<void> {
   const info = current.info;
   setState({ kind: "downloading", info, progress: { downloaded: 0, total: 0 } });
 
+  if (isLinuxDesktop()) {
+    setState({
+      kind: "downloading",
+      info,
+      progress: { downloaded: 0, total: 0, indeterminate: true },
+    });
+    try {
+      await invoke("install_latest_linux_update", { version: info.version });
+      setState({ kind: "ready", info });
+      await relaunch();
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      setState({ kind: "failed", reason, info });
+    }
+    return;
+  }
+
   const update = cachedUpdate ?? (await check());
   if (!update) {
     setState({ kind: "failed", reason: "No update available", info });
@@ -315,4 +334,8 @@ export async function startUpdateDownload(): Promise<void> {
     const reason = e instanceof Error ? e.message : String(e);
     setState({ kind: "failed", reason, info });
   }
+}
+
+function isLinuxDesktop(): boolean {
+  return navigator.userAgent.toLowerCase().includes("linux");
 }

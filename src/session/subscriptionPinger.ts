@@ -1,5 +1,5 @@
 // Direct GET on the panel's public subscription URL with HWID headers.
-// This is the only request panel actually parses to create/refresh an
+// This is the only request the subscription panel parses to create/refresh an
 // HWID device record; the bot's /api/* endpoints don't expose it to the panel.
 // We hit the URL (a) before each VPN connect, (b) on subscription refresh.
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";

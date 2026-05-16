@@ -56,15 +56,30 @@ let cachedHostname: string | null = null;
 const SUB_SYNC_AT_KEY = "tobevpn_sub_sync_at_v1";
 const SUB_INTERVAL_KEY = "tobevpn_sub_interval_ms_v1";
 const SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v1";
-// 12h matches the default surfaced in panel's "subscription
+const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
+const PENDING_AUTH_TOKEN_KEY = "tobevpn_pending_auth_token_v1";
+// 12h matches the default surfaced in the panel's "subscription
 // auto-refresh" panel field. Used until the first successful ping
 // returns a `profile-update-interval` value.
 const DEFAULT_SUB_INTERVAL_MS = 12 * 60 * 60 * 1000;
+
+const PURCHASE_REFRESH_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
+const PURCHASE_REFRESH_TOTAL_WINDOW_MS = 10 * 60 * 1000;
+const PURCHASE_REFRESH_INTERVAL_MS = 3_000;
+const PURCHASE_REFRESH_SLOW_INTERVAL_MS = 30_000;
+const PURCHASE_PENDING_MAX_AGE_MS = 30 * 60 * 1000;
 
 // Single in-flight syncSubscription. Concurrent callers (vpnState.connectVpn,
 // HomeScreen useEffect, manual refresh) all await the same promise so we
 // never fire two parallel /api/panel/sub/.../info round-trips.
 let syncInFlight: Promise<void> | null = null;
+let pendingPurchaseRefresh: Promise<void> | null = null;
+
+interface PendingPurchaseState {
+  startedAt: number;
+  baselinePlan: UserPlan | null;
+  baselineExpiresAt: number | null;
+}
 
 function readSubInterval(): number {
   try {
@@ -111,6 +126,90 @@ function writeCachedSubscriptionUrl(url: string | null): void {
     else localStorage.removeItem(SUB_URL_CACHE_KEY);
   } catch {
     // ignore — see writeSubSyncState
+  }
+}
+
+function clearSubSyncTimestamp(): void {
+  try {
+    localStorage.removeItem(SUB_SYNC_AT_KEY);
+  } catch {
+    // ignore — see writeSubSyncState
+  }
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function readPendingPurchaseState(): PendingPurchaseState | null {
+  try {
+    const raw = localStorage.getItem(PENDING_PURCHASE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PendingPurchaseState>;
+    if (typeof parsed.startedAt !== "number") return null;
+    return {
+      startedAt: parsed.startedAt,
+      baselinePlan:
+        parsed.baselinePlan === "PAID" ||
+        parsed.baselinePlan === "ADMIN" ||
+        parsed.baselinePlan === "FREE_TRIAL" ||
+        parsed.baselinePlan === "EXPIRED"
+          ? parsed.baselinePlan
+          : null,
+      baselineExpiresAt:
+        typeof parsed.baselineExpiresAt === "number" ? parsed.baselineExpiresAt : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function markPendingPurchaseStarted(input: {
+  baselinePlan?: UserPlan | null;
+  baselineExpiresAt?: number | null;
+} = {}): void {
+  const state: PendingPurchaseState = {
+    startedAt: Date.now(),
+    baselinePlan: input.baselinePlan ?? null,
+    baselineExpiresAt: input.baselineExpiresAt ?? null,
+  };
+  try {
+    localStorage.setItem(PENDING_PURCHASE_KEY, JSON.stringify(state));
+  } catch {
+    // If persistence fails, the in-session refresh still starts below.
+  }
+}
+
+export function clearPendingPurchase(): void {
+  try {
+    localStorage.removeItem(PENDING_PURCHASE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function getPendingAuthToken(): string | null {
+  try {
+    const token = localStorage.getItem(PENDING_AUTH_TOKEN_KEY);
+    return token && token.trim() ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingAuthToken(): void {
+  try {
+    localStorage.removeItem(PENDING_AUTH_TOKEN_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+function writePendingAuthToken(token: string): void {
+  try {
+    localStorage.setItem(PENDING_AUTH_TOKEN_KEY, token);
+  } catch {
+    // ignore — PairingScreen still keeps the token in memory.
   }
 }
 
@@ -236,11 +335,12 @@ export async function initializeAuthSession(): Promise<void> {
   );
 
   if (getSession().isLinked) {
-    void settleStartupStep(
+    await settleStartupStep(
       "syncSubscription",
-      syncSubscription(),
+      syncSubscription({ force: true }),
       STARTUP_SUBSCRIPTION_TIMEOUT_MS,
     );
+    startPendingPurchaseRefreshIfNeeded();
   }
 }
 
@@ -274,6 +374,7 @@ export async function createPairingCode(): Promise<PairingCode> {
   if (!res.success || !res.data) throw new Error(res.message ?? "Empty auth response");
 
   const authToken = res.data.auth_token;
+  writePendingAuthToken(authToken);
   const qrUrl = getPairingOpenTargets(authToken).browserUrl;
   return { authToken, qrUrl };
 }
@@ -353,8 +454,18 @@ export async function syncSubscription(opts: { force?: boolean } = {}): Promise<
   return syncInFlight;
 }
 
+export function startPendingPurchaseRefreshIfNeeded(): void {
+  if (pendingPurchaseRefresh) return;
+  const pending = readPendingPurchaseState();
+  if (!pending) return;
+
+  pendingPurchaseRefresh = runPendingPurchaseRefresh(pending).finally(() => {
+    pendingPurchaseRefresh = null;
+  });
+}
+
 /**
- * Bare HWID-marker ping — used by the connect path so panel registers
+ * Bare HWID-marker ping — used by the connect path so the panel registers
  * the device on every VPN start. Skips the JSON
  * /api/panel/sub/.../info call entirely; reads the subscription URL
  * from the localStorage cache populated by the most recent
@@ -406,7 +517,16 @@ async function runSyncSubscription(): Promise<void> {
   let subscriptionUrl: string | null = null;
   try {
     const subInfo = (await getSubscriptionInfo(shortUuid)).response;
-    if (!subInfo.is_found || !subInfo.user) return;
+    if (!subInfo.is_found || !subInfo.user) {
+      writeCachedSubscriptionUrl(null);
+      updateSession({
+        userPlan: "EXPIRED",
+        planExpiresAt: null,
+        trafficLimitBytes: 0,
+        trafficUsedBytes: 0,
+      });
+      return;
+    }
     subUser = subInfo.user;
     subscriptionUrl = subInfo.subscription_url ?? panelUser?.subscription_url ?? null;
   } catch {
@@ -414,7 +534,7 @@ async function runSyncSubscription(): Promise<void> {
   }
 
   // Direct hit on the panel's public sub URL with HWID headers — only request
-  // panel actually parses for HWID device tracking. The response also
+  // the panel actually parses for HWID device tracking. The response also
   // carries the panel-recommended auto-refresh cadence (`profile-update-interval`),
   // which we feed back into the throttle window. We await it (rather than
   // fire-and-forget as before) so the throttle bookkeeping below sees the
@@ -474,6 +594,70 @@ async function runSyncSubscription(): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+async function runPendingPurchaseRefresh(initial: PendingPurchaseState): Promise<void> {
+  const maxDeadline = initial.startedAt + PURCHASE_PENDING_MAX_AGE_MS;
+  const now = Date.now();
+  if (now > maxDeadline) {
+    expirePendingPurchase();
+    return;
+  }
+
+  const activeDeadline = Math.min(now + PURCHASE_REFRESH_ACTIVE_WINDOW_MS, maxDeadline);
+  while (Date.now() <= activeDeadline) {
+    await refreshSubscriptionAfterPurchase();
+    if (paymentLooksApplied(initial, getSession())) {
+      clearPendingPurchase();
+      return;
+    }
+    await sleepMs(PURCHASE_REFRESH_INTERVAL_MS);
+  }
+
+  const totalDeadline = Math.min(now + PURCHASE_REFRESH_TOTAL_WINDOW_MS, maxDeadline);
+  while (Date.now() <= totalDeadline) {
+    await sleepMs(PURCHASE_REFRESH_SLOW_INTERVAL_MS);
+    await refreshSubscriptionAfterPurchase();
+    if (paymentLooksApplied(initial, getSession())) {
+      clearPendingPurchase();
+      return;
+    }
+  }
+
+  if (Date.now() > maxDeadline) {
+    expirePendingPurchase();
+  }
+}
+
+function expirePendingPurchase(): void {
+  clearPendingPurchase();
+  clearSubSyncTimestamp();
+}
+
+async function refreshSubscriptionAfterPurchase(): Promise<void> {
+  if (!getSession().isLinked) {
+    clearPendingPurchase();
+    return;
+  }
+  await syncSubscription({ force: true });
+  await fetchVpnServers().catch(() => []);
+}
+
+function paymentLooksApplied(pending: PendingPurchaseState, session: Session): boolean {
+  if (!session.isLinked) return false;
+  const currentIsPaid = session.userPlan === "PAID" || session.userPlan === "ADMIN";
+  const baselineWasPaid =
+    pending.baselinePlan === "PAID" || pending.baselinePlan === "ADMIN";
+
+  if (!baselineWasPaid && currentIsPaid) return true;
+
+  return (
+    baselineWasPaid &&
+    currentIsPaid &&
+    pending.baselineExpiresAt !== null &&
+    session.planExpiresAt !== null &&
+    session.planExpiresAt > pending.baselineExpiresAt
+  );
 }
 
 /**
@@ -557,6 +741,8 @@ export async function logout(): Promise<void> {
     // ignore — local session is cleared regardless
   }
   await clearSecureSession();
+  clearPendingPurchase();
+  clearPendingAuthToken();
   clearDeviceSession();
 }
 
@@ -652,16 +838,17 @@ function parseVlessUrl(url: string): VpnServer | null {
     const port = u.port ? parseInt(u.port, 10) : 443;
     const name = u.hash ? decodeURIComponent(u.hash.slice(1)) : address;
     const p = u.searchParams;
+    const sni = p.get("sni") ?? "";
 
     return {
-      id: uuid,
+      id: `${address}:${port}:${sni || name}`,
       name,
       address,
       port,
       uuid,
       flow: p.get("flow") ?? "",
       security: p.get("security") ?? "none",
-      sni: p.get("sni") ?? "",
+      sni,
       fingerprint: p.get("fp") ?? "chrome",
       public_key: p.get("pbk") ?? "",
       short_id: p.get("sid") ?? "",

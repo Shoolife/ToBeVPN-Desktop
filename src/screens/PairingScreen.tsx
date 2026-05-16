@@ -4,8 +4,10 @@ import { QRCodeSVG } from "qrcode.react";
 import { t } from "../i18n";
 import {
   authenticateWithTelegramId,
+  clearPendingAuthToken,
   getPairingOpenTargets,
   createPairingCode,
+  getPendingAuthToken,
   pollPairing,
 } from "../session/auth";
 
@@ -25,11 +27,19 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
     let pollTimer: number | null = null;
     let retryTimer: number | null = null;
 
-    const begin = async () => {
+    const begin = async (reusePending = true) => {
       if (cancelled) return;
       setError(null);
       setAuthToken(null);
       setQrValue(null);
+      const pendingAuthToken = reusePending ? getPendingAuthToken() : null;
+      if (pendingAuthToken) {
+        const { browserUrl } = getPairingOpenTargets(pendingAuthToken);
+        setAuthToken(pendingAuthToken);
+        setQrValue(browserUrl);
+        scheduleNext(pendingAuthToken);
+        return;
+      }
       try {
         const { authToken: freshAuthToken, qrUrl } = await createPairingCode();
         if (cancelled) return;
@@ -53,7 +63,7 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
       if (retryTimer !== null) clearTimeout(retryTimer);
       retryTimer = window.setTimeout(() => {
         retryTimer = null;
-        void begin();
+        void begin(false);
       }, QR_RETRY_DELAY_MS);
     };
 
@@ -70,6 +80,7 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
               payload.short_uuid ?? null,
               null,
             );
+            clearPendingAuthToken();
             if (!cancelled) onPairedRef.current();
           } catch (e) {
             if (!cancelled) setError(messageOf(e));
@@ -77,7 +88,8 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
           return;
         }
         if (result.status === "expired") {
-          await begin();
+          clearPendingAuthToken();
+          await begin(false);
           return;
         }
         scheduleNext(currentAuthToken);

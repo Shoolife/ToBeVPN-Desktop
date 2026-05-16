@@ -4,7 +4,9 @@ set -e
 case "$1" in
   configure)
     chmod 755 /usr/local/bin/tobevpn-helper.sh 2>/dev/null || true
+    chmod 755 /usr/local/bin/tobevpn-update-helper.sh 2>/dev/null || true
     chmod 644 /usr/share/polkit-1/actions/app.tobevpn.network.policy 2>/dev/null || true
+    chmod 644 /usr/share/polkit-1/actions/app.tobevpn.update.policy 2>/dev/null || true
 
     # Sidecar binaries must be root-owned and not world-writable so the
     # privileged helper accepts them. Without these chown/chmod calls a

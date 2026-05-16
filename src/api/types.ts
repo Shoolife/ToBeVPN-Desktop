@@ -1,4 +1,4 @@
-// Shared DTO types — mirror the backend backend (snake_case) and panel proxy responses.
+// Shared DTO types — mirror the backend (snake_case) and panel proxy responses.
 // Field shapes match Android phone/TV clients exactly.
 
 export interface ApiResponse<T> {

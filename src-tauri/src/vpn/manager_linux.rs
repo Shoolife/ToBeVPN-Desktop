@@ -24,14 +24,18 @@ const FWMARK: &str = "0x1";
 const PKEXEC_TIMEOUT: Duration = Duration::from_secs(60);
 
 // Path of the installed polkit helper. When present, pkexec invocations match
-// the app.tobevpn.network policy and run with a single auth prompt per session.
+// the app.tobevpn.network policy and run without repeated password prompts.
 const POLKIT_HELPER: &str = "/usr/local/bin/tobevpn-helper.sh";
 const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.network.policy";
+const UPDATE_HELPER: &str = "/usr/local/bin/tobevpn-update-helper.sh";
+const UPDATE_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.update.policy";
 
 // Embedded resources — installed lazily on first VPN connect via a single pkexec
-// prompt. After that, the helper handles all start/stop operations.
+// prompt. After that, the helpers handle start/stop and signed updates.
 const HELPER_SH: &str = include_str!("../../../scripts/tobevpn-helper.sh");
 const POLICY_XML: &str = include_str!("../../../scripts/app.tobevpn.network.policy");
+const UPDATE_HELPER_SH: &str = include_str!("../../../scripts/tobevpn-update-helper.sh");
+const UPDATE_POLICY_XML: &str = include_str!("../../../scripts/app.tobevpn.update.policy");
 
 // ── Secure-temp helpers ───────────────────────────────────────────
 //
@@ -435,6 +439,15 @@ impl VpnManager {
         let state = self.state.clone();
         let session_gen = self.session_gen.clone();
         let app = self.app_handle.clone();
+        let manager_clone = VpnManager {
+            state: self.state.clone(),
+            xray_process: self.xray_process.clone(),
+            tun2socks_pid: self.tun2socks_pid.clone(),
+            stats_running: self.stats_running.clone(),
+            session_gen: self.session_gen.clone(),
+            bin_dir: self.bin_dir.clone(),
+            app_handle: self.app_handle.clone(),
+        };
         tauri::async_runtime::spawn(async move {
             loop {
                 sleep(Duration::from_secs(3)).await;
@@ -456,7 +469,8 @@ impl VpnManager {
                     }
                 };
                 if let Some(msg) = dead {
-                    eprintln!("[VPN-WATCHDOG] {msg} — flagging session dead");
+                    eprintln!("[VPN-WATCHDOG] {msg} — running force_stop");
+                    manager_clone.force_stop().await;
                     *state.lock().await = VpnState::Error {
                         message: format!("VPN process stopped unexpectedly: {msg}"),
                     };
@@ -811,34 +825,52 @@ echo "[TUN-SCRIPT] Done!"
         // tarball or the .deb's postinst was skipped) — that's the edge
         // case the manual installer was originally written for.
         let helper_present = std::path::Path::new(POLKIT_HELPER).is_file();
-        let policy_present = std::path::Path::new(POLKIT_POLICY).is_file();
-        if helper_present && policy_present {
+        let update_helper_present = std::path::Path::new(UPDATE_HELPER).is_file();
+        let policy_ready = std::fs::read_to_string(POLKIT_POLICY)
+            .map(|s| s.contains("<allow_active>yes</allow_active>"))
+            .unwrap_or(false);
+        let update_policy_ready = std::fs::read_to_string(UPDATE_POLICY)
+            .map(|s| s.contains("<allow_active>yes</allow_active>"))
+            .unwrap_or(false);
+        if helper_present && update_helper_present && policy_ready && update_policy_ready {
             return Ok(true);
         }
 
-        eprintln!("[INSTALL] Helper missing or outdated — running one-time install via pkexec");
+        eprintln!("[INSTALL] Helper missing/outdated — running one-time install via pkexec");
 
         let dir = cache_dir();
         let staged_helper = dir.join("tobevpn-helper.sh.staged");
+        let staged_update_helper = dir.join("tobevpn-update-helper.sh.staged");
         let staged_policy = dir.join("app.tobevpn.network.policy.staged");
+        let staged_update_policy = dir.join("app.tobevpn.update.policy.staged");
         let staged_install = dir.join("tobevpn-install.sh");
 
         write_secure(&staged_helper, HELPER_SH.as_bytes())
             .map_err(|e| format!("write staged helper: {e}"))?;
+        write_secure(&staged_update_helper, UPDATE_HELPER_SH.as_bytes())
+            .map_err(|e| format!("write staged update helper: {e}"))?;
         write_secure(&staged_policy, POLICY_XML.as_bytes())
             .map_err(|e| format!("write staged policy: {e}"))?;
+        write_secure(&staged_update_policy, UPDATE_POLICY_XML.as_bytes())
+            .map_err(|e| format!("write staged update policy: {e}"))?;
 
         let install_script = format!(
             r#"#!/bin/bash
 set -e
 install -m 755 -o root -g root {staged_helper} {helper_path}
+install -m 755 -o root -g root {staged_update_helper} {update_helper_path}
 install -m 644 -o root -g root {staged_policy} {policy_path}
+install -m 644 -o root -g root {staged_update_policy} {update_policy_path}
 echo "INSTALLED"
 "#,
             staged_helper = shell_escape(&staged_helper.display().to_string()),
+            staged_update_helper = shell_escape(&staged_update_helper.display().to_string()),
             staged_policy = shell_escape(&staged_policy.display().to_string()),
+            staged_update_policy = shell_escape(&staged_update_policy.display().to_string()),
             helper_path = POLKIT_HELPER,
+            update_helper_path = UPDATE_HELPER,
             policy_path = POLKIT_POLICY,
+            update_policy_path = UPDATE_POLICY,
         );
         write_secure(&staged_install, install_script.as_bytes())
             .map_err(|e| format!("write installer: {e}"))?;
@@ -854,7 +886,9 @@ echo "INSTALLED"
 
         let _ = std::fs::remove_file(&staged_install);
         let _ = std::fs::remove_file(&staged_helper);
+        let _ = std::fs::remove_file(&staged_update_helper);
         let _ = std::fs::remove_file(&staged_policy);
+        let _ = std::fs::remove_file(&staged_update_policy);
 
         let output = match output {
             Ok(o) => o,
