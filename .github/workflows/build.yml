@@ -1,4 +1,6 @@
 name: build
+run-name: >-
+  ${{ inputs.run_title || github.event.head_commit.message || github.event_name == 'pull_request' && format('PR #{0}: {1}', github.event.pull_request.number, github.event.pull_request.title) || format('Build {0}', github.ref_name) }}
 
 on:
   # Direct pushes to main don't ship anything — releases live on tags. PRs
@@ -10,6 +12,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      run_title:
+        description: 'Optional display title for manual release reruns'
+        required: false
+        type: string
 
 jobs:
   # Security gate — runs first, blocks builds when a known CVE is in the
