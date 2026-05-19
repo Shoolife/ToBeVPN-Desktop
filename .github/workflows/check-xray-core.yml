@@ -1,0 +1,82 @@
+name: check xray-core
+run-name: Check Xray-core updates
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Compare upstream Xray-core with latest app release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: XTLS/Xray-core
+        run: |
+          set -euo pipefail
+
+          upstream_json=$(gh api "repos/${UPSTREAM_REPO}/releases/latest")
+          upstream_tag=$(jq -r '.tag_name' <<<"$upstream_json")
+          upstream_url=$(jq -r '.html_url' <<<"$upstream_json")
+          upstream_published=$(jq -r '.published_at' <<<"$upstream_json")
+
+          app_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")
+          app_tag=$(jq -r '.tag_name' <<<"$app_json")
+          app_url=$(jq -r '.html_url' <<<"$app_json")
+          app_published=$(jq -r '.published_at' <<<"$app_json")
+
+          upstream_ts=$(date -u -d "$upstream_published" +%s)
+          app_ts=$(date -u -d "$app_published" +%s)
+
+          echo "Upstream Xray-core: ${upstream_tag} (${upstream_published})"
+          echo "Latest app release: ${app_tag} (${app_published})"
+
+          if [ "$upstream_ts" -le "$app_ts" ]; then
+            echo "Latest app release was published after the latest Xray-core release."
+            exit 0
+          fi
+
+          title="Xray-core ${upstream_tag} is newer than desktop ${app_tag}"
+          existing=$(gh issue list \
+            --state open \
+            --search "\"${title}\" in:title" \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            echo "Issue already exists: #${existing}"
+            exit 0
+          fi
+
+          cat > issue-body.md <<EOF
+          Upstream Xray-core ${upstream_tag} was published after the current desktop release ${app_tag}.
+
+          Release rule:
+          - keep Xray updates inside a normal app release;
+          - do not add an in-app Xray-only updater;
+          - ship a small desktop patch release when Xray-core ships a new release or security fix.
+
+          Desktop release steps:
+          1. Bump the desktop app patch version.
+          2. Create and push the new \`v*\` tag.
+          3. Let the release workflow build the app. It downloads the latest Xray-core sidecar during CI.
+          4. Verify Settings shows the bundled Xray version from the sidecar binary.
+          5. Confirm Linux \`.deb\`, Windows installer, signatures, and \`latest.json\` are present.
+
+          Current app release: ${app_url}
+          Upstream Xray-core release: ${upstream_url}
+          EOF
+
+          gh issue create \
+            --title "$title" \
+            --label "xray-core" \
+            --body-file issue-body.md || \
+          gh issue create \
+            --title "$title" \
+            --body-file issue-body.md
