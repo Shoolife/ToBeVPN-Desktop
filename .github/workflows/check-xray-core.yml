@@ -3,7 +3,7 @@ run-name: Check Xray-core updates
 
 on:
   schedule:
-    - cron: '17 6 * * *'
+    - cron: '17 6 * * 1'
   workflow_dispatch:
 
 permissions:

@@ -157,7 +157,7 @@ Release assets:
 - `FALLBACK_BOT_DOMAIN` / `FALLBACK_SUBS_DOMAIN` *(опционально, если включаешь fallback-маршрутизацию)*
 - `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 
-Xray-core обновляется только через обычный app release: release workflow каждый раз скачивает актуальный sidecar. [check-xray-core](.github/workflows/check-xray-core.yml) ежедневно сравнивает upstream Xray-core с последним релизом приложения и создаёт issue, если нужен маленький patch release с обновлённым core.
+Xray-core обновляется только через обычный app release: release workflow каждый раз скачивает актуальный sidecar. [check-xray-core](.github/workflows/check-xray-core.yml) раз в неделю сравнивает upstream Xray-core с последним релизом приложения и создаёт issue, если нужен маленький patch release с обновлённым core.
 
 ## Linux privileges
 
