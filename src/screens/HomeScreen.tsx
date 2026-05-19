@@ -92,7 +92,8 @@ function trafficProgressColor(progress: number): string {
 }
 
 function planHint(plan: UserPlan, expiresAt: number | null): string {
-  if (expiresAt && (plan === "PAID" || plan === "ADMIN")) {
+  if (plan === "ADMIN") return t("plan_unlimited_access");
+  if (expiresAt && plan === "PAID") {
     return tf("plan_until", new Date(expiresAt).toLocaleDateString());
   }
   if (plan === "FREE_TRIAL") return t("free_tier_hint");

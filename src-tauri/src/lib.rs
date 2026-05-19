@@ -11,7 +11,10 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Manager, WindowEvent};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
+
+#[cfg(target_os = "linux")]
+use gtk::prelude::*;
 
 use vpn::config::ServerConfig;
 use vpn::manager::VpnManager;
@@ -36,16 +39,38 @@ fn show_main_window(app: &tauri::AppHandle) {
             window.is_visible(),
             window.is_minimized()
         );
-        restore_window_chrome(&window);
+
         #[cfg(target_os = "linux")]
-        let _ = window.set_skip_taskbar(false);
-        let _ = window.show();
-        if window.is_minimized().unwrap_or(false) {
-            let _ = window.unminimize();
+        {
+            restore_window_chrome(&window);
+            let _ = window.set_skip_taskbar(false);
+            if let Ok(gtk_window) = window.gtk_window() {
+                gtk_window.set_skip_taskbar_hint(false);
+                gtk_window.set_skip_pager_hint(false);
+                gtk_window.deiconify();
+                gtk_window.present();
+            }
+            let _ = window.show();
+            if window.is_minimized().unwrap_or(false) {
+                let _ = window.unminimize();
+            }
+            restore_window_chrome(&window);
+            let _ = window.set_focus();
+            refresh_window_chrome_after_show(window);
+            return;
         }
-        restore_window_chrome(&window);
-        let _ = window.set_focus();
-        refresh_window_chrome_after_show(window);
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            restore_window_chrome(&window);
+            let _ = window.show();
+            if window.is_minimized().unwrap_or(false) {
+                let _ = window.unminimize();
+            }
+            restore_window_chrome(&window);
+            let _ = window.set_focus();
+            refresh_window_chrome_after_show(window);
+        }
     }
 }
 
@@ -58,32 +83,89 @@ fn restore_window_chrome(window: &tauri::WebviewWindow) {
     let _ = window.set_maximizable(false);
 }
 
+#[cfg(target_os = "linux")]
+fn is_wayland_session() -> bool {
+    std::env::var("WAYLAND_DISPLAY")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        || std::env::var("XDG_SESSION_TYPE")
+            .map(|value| value.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn rebuild_wayland_titlebar(window: &tauri::WebviewWindow) {
+    if !is_wayland_session() {
+        return;
+    }
+
+    if let Ok(gtk_window) = window.gtk_window() {
+        let title = gtk_window
+            .title()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "ToBeVPN".into());
+        let layout = if gtk_window.is_resizable() {
+            "menu:minimize,maximize,close"
+        } else {
+            "menu:minimize,close"
+        };
+        let header = gtk::HeaderBar::builder()
+            .show_close_button(true)
+            .decoration_layout(layout)
+            .title(title)
+            .build();
+        let event_box = gtk::EventBox::new();
+        event_box.set_above_child(true);
+        event_box.set_visible(true);
+        event_box.set_can_focus(false);
+        event_box.add(&header);
+
+        let header_weak = header.downgrade();
+        gtk_window.connect_resizable_notify(move |gtk_window| {
+            if let Some(header) = header_weak.upgrade() {
+                let layout = if gtk_window.is_resizable() {
+                    "menu:minimize,maximize,close"
+                } else {
+                    "menu:minimize,close"
+                };
+                header.set_decoration_layout(Some(layout));
+            }
+        });
+
+        gtk_window.set_titlebar(Some(&event_box));
+        gtk_window.set_sensitive(true);
+        gtk_window.set_deletable(true);
+        event_box.show_all();
+        eprintln!("[TRAY] rebuilt Wayland titlebar");
+    }
+}
+
 fn send_window_to_background(window: tauri::WebviewWindow) {
     restore_window_chrome(&window);
+
     #[cfg(target_os = "linux")]
     let _ = window.set_skip_taskbar(true);
 
     match window.hide() {
-        Ok(_) => {
-            eprintln!("[TRAY] window hidden");
-            #[cfg(target_os = "linux")]
-            let _ = window.set_decorations(false);
-        }
+        Ok(_) => eprintln!("[TRAY] window hidden"),
         Err(e) => eprintln!("[TRAY] hide failed: {e:?}"),
     }
 }
 
 fn refresh_window_chrome_after_show(window: tauri::WebviewWindow) {
     #[cfg(target_os = "linux")]
-    tauri::async_runtime::spawn(async move {
-        // WebKitGTK/GTK can restore the window before the window manager has
-        // fully reattached native decorations. A short deferred pass keeps
-        // the titlebar buttons sensitive after hide-to-tray -> show.
-        sleep(Duration::from_millis(120)).await;
+    {
         restore_window_chrome(&window);
-        let _ = window.set_skip_taskbar(false);
-        let _ = window.set_focus();
-    });
+        rebuild_wayland_titlebar(&window);
+
+        let window_for_refresh = window.clone();
+        gtk::glib::timeout_add_local_once(Duration::from_millis(120), move || {
+            restore_window_chrome(&window_for_refresh);
+            rebuild_wayland_titlebar(&window_for_refresh);
+            let _ = window_for_refresh.set_skip_taskbar(false);
+            let _ = window_for_refresh.set_focus();
+        });
+    }
 
     #[cfg(not(target_os = "linux"))]
     let _ = window;
