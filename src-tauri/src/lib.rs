@@ -11,7 +11,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Manager, WindowEvent};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 use vpn::config::ServerConfig;
 use vpn::manager::VpnManager;
@@ -45,6 +45,7 @@ fn show_main_window(app: &tauri::AppHandle) {
         }
         restore_window_chrome(&window);
         let _ = window.set_focus();
+        refresh_window_chrome_after_show(window);
     }
 }
 
@@ -60,24 +61,32 @@ fn restore_window_chrome(window: &tauri::WebviewWindow) {
 fn send_window_to_background(window: tauri::WebviewWindow) {
     restore_window_chrome(&window);
     #[cfg(target_os = "linux")]
-    {
-        // GTK/WebKit can leave native window controls insensitive after a
-        // full set_visible(false) / set_visible(true) cycle. Minimize through
-        // the window manager instead, and remove the taskbar entry so the UX
-        // still behaves like "close to tray".
-        let _ = window.set_skip_taskbar(true);
-        match window.minimize() {
-            Ok(_) => eprintln!("[TRAY] window minimized to tray"),
-            Err(e) => eprintln!("[TRAY] minimize failed: {e:?}"),
-        }
-        return;
-    }
+    let _ = window.set_skip_taskbar(true);
 
-    #[cfg(not(target_os = "linux"))]
     match window.hide() {
-        Ok(_) => eprintln!("[TRAY] window hidden"),
+        Ok(_) => {
+            eprintln!("[TRAY] window hidden");
+            #[cfg(target_os = "linux")]
+            let _ = window.set_decorations(false);
+        }
         Err(e) => eprintln!("[TRAY] hide failed: {e:?}"),
     }
+}
+
+fn refresh_window_chrome_after_show(window: tauri::WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    tauri::async_runtime::spawn(async move {
+        // WebKitGTK/GTK can restore the window before the window manager has
+        // fully reattached native decorations. A short deferred pass keeps
+        // the titlebar buttons sensitive after hide-to-tray -> show.
+        sleep(Duration::from_millis(120)).await;
+        restore_window_chrome(&window);
+        let _ = window.set_skip_taskbar(false);
+        let _ = window.set_focus();
+    });
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = window;
 }
 
 /// Returns the system hostname (e.g. "ivan-pc").
@@ -326,7 +335,7 @@ pub fn run() {
             // of hiding the window. Captured by both closures below.
             let quit_flag = Arc::new(AtomicBool::new(false));
 
-            // System tray, V2rayN-style: closing the window minimizes to tray
+            // System tray, V2rayN-style: closing the window hides it to tray
             // (the tunnel keeps running) and Quit is the only way to fully
             // exit. Left-click on the icon restores the window.
             let show_item = MenuItem::with_id(app, "show", "Показать", true, None::<&str>)?;

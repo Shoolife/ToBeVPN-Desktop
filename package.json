@@ -1,7 +1,7 @@
 {
   "name": "tobevpn-desktop",
   "private": true,
-  "version": "1.0.14",
+  "version": "1.0.15",
   "type": "module",
   "scripts": {
     "inject-host": "bash scripts/inject-backend-host.sh",
