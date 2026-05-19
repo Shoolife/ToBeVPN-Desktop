@@ -848,7 +848,10 @@ echo "[TUN-SCRIPT] Done!"
         let helper_present = std::path::Path::new(POLKIT_HELPER).is_file();
         let update_helper_present = std::path::Path::new(UPDATE_HELPER).is_file();
         let policy_ready = std::fs::read_to_string(POLKIT_POLICY)
-            .map(|s| s.contains("<allow_active>yes</allow_active>"))
+            .map(|s| {
+                s.contains("<allow_active>yes</allow_active>")
+                    && s.contains("<allow_inactive>yes</allow_inactive>")
+            })
             .unwrap_or(false);
         let update_policy_ready = std::fs::read_to_string(UPDATE_POLICY)
             .map(|s| s.contains("<allow_active>yes</allow_active>"))
