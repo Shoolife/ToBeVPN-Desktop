@@ -396,6 +396,26 @@ impl VpnManager {
         })
     }
 
+    /// Read the bundled xray-core version from the sidecar binary itself.
+    /// Keeps Settings honest when CI refreshes the sidecar in a small app
+    /// release.
+    pub async fn xray_version(&self) -> String {
+        let xray_bin = self.resolve_bin("xray");
+        let output = match timeout(
+            Duration::from_secs(2),
+            Command::new(xray_bin)
+                .arg("version")
+                .creation_flags(CREATE_NO_WINDOW)
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(out)) if out.status.success() => out,
+            _ => return "unknown".into(),
+        };
+        parse_xray_version(&String::from_utf8_lossy(&output.stdout))
+    }
+
     // ── private ──────────────────────────────────────────────────
 
     async fn set_state(&self, state: VpnState) {
@@ -1110,4 +1130,14 @@ fn parse_stat_value(text: &str) -> Option<u64> {
         }
     }
     None
+}
+
+fn parse_xray_version(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    let mut parts = first_line.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some("Xray"), Some(version)) => format!("Xray-core v{}", version),
+        _ if !first_line.is_empty() => first_line.to_string(),
+        _ => "unknown".into(),
+    }
 }

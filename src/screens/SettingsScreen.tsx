@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { t, getSavedLang, saveLang, type Lang } from "../i18n";
 import { logout, saveEmail } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
+import { getXrayVersion } from "../session/vpn";
 import UpdateCheckRow from "../components/UpdateCheckRow";
 import "./SettingsScreen.css";
 
@@ -53,6 +54,7 @@ export default function SettingsScreen({
   const currentLang = getSavedLang();
   const [pendingLang, setPendingLang] = useState<Lang | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [xrayVersion, setXrayVersion] = useState("Xray-core ...");
 
   // Email editing
   const [editingEmail, setEditingEmail] = useState(false);
@@ -109,6 +111,20 @@ export default function SettingsScreen({
       onLoggedOut();
     }
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    getXrayVersion()
+      .then((version) => {
+        if (!cancelled) setXrayVersion(version || "unknown");
+      })
+      .catch(() => {
+        if (!cancelled) setXrayVersion("unknown");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="settings-root">
@@ -253,7 +269,7 @@ export default function SettingsScreen({
           <UpdateCheckRow />
           <div className="settings-info-row">
             <span className="settings-info-row__label">{t("xray")}</span>
-            <span className="settings-info-row__value">Xray-core v26.3.27</span>
+            <span className="settings-info-row__value">{xrayVersion}</span>
           </div>
         </div>
 

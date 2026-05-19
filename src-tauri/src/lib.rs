@@ -1,6 +1,6 @@
-mod vpn;
 #[cfg(target_os = "linux")]
 pub mod linux_update;
+mod vpn;
 
 use keyring::{Entry, Error as KeyringError};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,9 +156,16 @@ async fn resolve_host(host: String) -> String {
     tokio::task::spawn_blocking(move || {
         use std::net::ToSocketAddrs;
         let addr = format!("{}:0", host);
-        let mut addrs: Vec<_> = addr.to_socket_addrs().ok().map(|it| it.collect()).unwrap_or_default();
+        let mut addrs: Vec<_> = addr
+            .to_socket_addrs()
+            .ok()
+            .map(|it| it.collect())
+            .unwrap_or_default();
         addrs.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
-        addrs.first().map(|a| a.ip().to_string()).unwrap_or_default()
+        addrs
+            .first()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_default()
     })
     .await
     .unwrap_or_default()
@@ -215,6 +222,16 @@ async fn get_traffic_stats(state: tauri::State<'_, AppVpn>) -> Result<TrafficSta
         Some(mgr) => mgr.query_stats().await.ok_or("Stats unavailable".into()),
         None => Err("VPN manager not initialized".into()),
     }
+}
+
+/// Read xray-core version from the bundled sidecar binary.
+#[tauri::command]
+async fn get_xray_version(state: tauri::State<'_, AppVpn>) -> Result<String, String> {
+    let guard = state.0.lock().await;
+    Ok(match guard.as_ref() {
+        Some(mgr) => mgr.xray_version().await,
+        None => "unknown".into(),
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -373,6 +390,7 @@ pub fn run() {
             stop_vpn,
             get_vpn_state,
             get_traffic_stats,
+            get_xray_version,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

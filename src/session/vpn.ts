@@ -44,3 +44,7 @@ export async function getVpnState(): Promise<VpnState> {
 export async function getTrafficStats(): Promise<TrafficStats> {
   return await invoke<TrafficStats>("get_traffic_stats");
 }
+
+export async function getXrayVersion(): Promise<string> {
+  return await invoke<string>("get_xray_version");
+}
