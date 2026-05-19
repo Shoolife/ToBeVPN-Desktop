@@ -31,6 +31,10 @@ const TUNNEL_HEALTH_TIMEOUT_MS = 7_000;
 const TUNNEL_RECOVERY_RESTART_DELAY_MS = 700;
 const MAX_TUNNEL_RECOVERY_ATTEMPTS = 2;
 const TUNNEL_PROBE_URL = "https://speed.cloudflare.com/__down?bytes=1";
+const SYSTEM_RESUME_GAP_MS = 60_000;
+const SYSTEM_RESUME_NETWORK_SETTLE_MS = 3_000;
+const SYSTEM_RESUME_ONLINE_WAIT_MS = 15_000;
+const SYSTEM_RESUME_ONLINE_POLL_MS = 500;
 
 export interface VpnRuntimeState {
   connected: boolean;
@@ -71,11 +75,21 @@ let healthTimer: number | null = null;
 let connectionGeneration = 0;
 let watchdogRecoveryAttempts = 0;
 let currentServerForRecovery: ServerVpnConfig | null = null;
+let resumeRecoveryInFlight = false;
 
 function startPolling() {
   if (pollTimer !== null) return;
   heartbeatCounter = 0;
+  let lastPollAt = Date.now();
   pollTimer = window.setInterval(async () => {
+    const now = Date.now();
+    const gapMs = now - lastPollAt;
+    lastPollAt = now;
+    if (gapMs >= SYSTEM_RESUME_GAP_MS) {
+      void recoverTunnelAfterSystemResume(gapMs);
+      return;
+    }
+
     let delta = 0;
     try {
       const stats = await getTrafficStats();
@@ -191,6 +205,7 @@ async function connectVpnInternal(
 export async function disconnectVpn(): Promise<void> {
   connectionGeneration++;
   currentServerForRecovery = null;
+  resumeRecoveryInFlight = false;
   stopTunnelHealthCheck();
   stopPolling();
   setState({ connecting: false });
@@ -257,9 +272,48 @@ async function recoverTunnelAfterHealthFailure(gen: number): Promise<void> {
   }
 }
 
+async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
+  if (resumeRecoveryInFlight) return;
+  const server = currentServerForRecovery;
+  if (!server || (!state.connected && !state.connecting)) return;
+
+  resumeRecoveryInFlight = true;
+  const gen = ++connectionGeneration;
+  console.info(`[VPN] system resume detected after ${Math.round(gapMs / 1000)}s, restarting tunnel`);
+  stopTunnelHealthCheck();
+  stopPolling();
+  setState({ connected: false, connecting: true, lastError: null });
+
+  try {
+    await engineStop().catch((e) => {
+      console.warn("[VPN] resume cleanup failed before reconnect:", e);
+    });
+    statsSessionEnd();
+    await waitForNetworkAfterResume();
+    if (gen !== connectionGeneration) return;
+    await connectVpnInternal(server, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (gen === connectionGeneration) {
+      setState({ connected: false, connecting: false, lastError: msg });
+    }
+  } finally {
+    resumeRecoveryInFlight = false;
+  }
+}
+
+async function waitForNetworkAfterResume(): Promise<void> {
+  await sleepMs(SYSTEM_RESUME_NETWORK_SETTLE_MS);
+  const startedAt = Date.now();
+  while (navigator.onLine === false && Date.now() - startedAt < SYSTEM_RESUME_ONLINE_WAIT_MS) {
+    await sleepMs(SYSTEM_RESUME_ONLINE_POLL_MS);
+  }
+}
+
 async function stopVpnWithError(message: string): Promise<void> {
   connectionGeneration++;
   currentServerForRecovery = null;
+  resumeRecoveryInFlight = false;
   stopTunnelHealthCheck();
   stopPolling();
   try {
@@ -315,6 +369,7 @@ function ensureVpnDiedListener() {
   listen<string>("vpn-died", (event) => {
     connectionGeneration++;
     currentServerForRecovery = null;
+    resumeRecoveryInFlight = false;
     stopTunnelHealthCheck();
     stopPolling();
     setState({

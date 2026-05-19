@@ -36,11 +36,47 @@ fn show_main_window(app: &tauri::AppHandle) {
             window.is_visible(),
             window.is_minimized()
         );
+        restore_window_chrome(&window);
+        #[cfg(target_os = "linux")]
+        let _ = window.set_skip_taskbar(false);
         let _ = window.show();
         if window.is_minimized().unwrap_or(false) {
             let _ = window.unminimize();
         }
+        restore_window_chrome(&window);
         let _ = window.set_focus();
+    }
+}
+
+fn restore_window_chrome(window: &tauri::WebviewWindow) {
+    let _ = window.set_enabled(true);
+    let _ = window.set_focusable(true);
+    let _ = window.set_decorations(true);
+    let _ = window.set_minimizable(true);
+    let _ = window.set_closable(true);
+    let _ = window.set_maximizable(false);
+}
+
+fn send_window_to_background(window: tauri::WebviewWindow) {
+    restore_window_chrome(&window);
+    #[cfg(target_os = "linux")]
+    {
+        // GTK/WebKit can leave native window controls insensitive after a
+        // full set_visible(false) / set_visible(true) cycle. Minimize through
+        // the window manager instead, and remove the taskbar entry so the UX
+        // still behaves like "close to tray".
+        let _ = window.set_skip_taskbar(true);
+        match window.minimize() {
+            Ok(_) => eprintln!("[TRAY] window minimized to tray"),
+            Err(e) => eprintln!("[TRAY] minimize failed: {e:?}"),
+        }
+        return;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    match window.hide() {
+        Ok(_) => eprintln!("[TRAY] window hidden"),
+        Err(e) => eprintln!("[TRAY] hide failed: {e:?}"),
     }
 }
 
@@ -328,17 +364,18 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Intercept the [X] button per-window: hide instead of exit so the
-            // tunnel keeps running in the background. The builder-level
+            // Intercept the [X] button per-window: send the window to the tray
+            // instead of exiting so the tunnel keeps running in the background.
+            // The builder-level
             // .on_window_event hook proved unreliable on Linux/GTK — after the
             // first hide()/show() cycle from the tray, subsequent close events
             // weren't routed back to it. Binding directly on the window works
             // every time.
             //
-            // hide() is dispatched via async_runtime::spawn rather than called
-            // inline — invoking GTK from inside its own delete-event callback
-            // is reentrant and on some Wayland/GTK setups the call is silently
-            // dropped, leaving the window stuck on screen.
+            // The background operation is dispatched via async_runtime::spawn
+            // rather than called inline — invoking GTK from inside its own
+            // delete-event callback is reentrant and on some Wayland/GTK setups
+            // the call is silently dropped, leaving the window stuck on screen.
             if let Some(main_window) = app.get_webview_window("main") {
                 let quit_for_window = quit_flag.clone();
                 let window_for_handler = main_window.clone();
@@ -352,10 +389,7 @@ pub fn run() {
                         api.prevent_close();
                         let w = window_for_handler.clone();
                         tauri::async_runtime::spawn(async move {
-                            match w.hide() {
-                                Ok(_) => eprintln!("[TRAY] window hidden"),
-                                Err(e) => eprintln!("[TRAY] hide failed: {e:?}"),
-                            }
+                            send_window_to_background(w);
                         });
                     }
                 });
