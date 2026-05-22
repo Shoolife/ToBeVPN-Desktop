@@ -191,6 +191,7 @@ impl VpnManager {
         match prev_state {
             VpnState::Connected | VpnState::Connecting => {
                 log_win!("[VPN-WIN] Previous session active — stopping first");
+                self.bump_session_gen().await;
                 self.force_stop().await;
             }
             VpnState::Disconnecting => {
@@ -365,10 +366,7 @@ impl VpnManager {
         // Bump generation so any running watchdog from the previous Connected
         // session exits cleanly without firing vpn-died over our intentional
         // teardown.
-        {
-            let mut g = self.session_gen.lock().await;
-            *g = g.wrapping_add(1);
-        }
+        self.bump_session_gen().await;
         self.set_state(VpnState::Disconnecting).await;
         self.force_stop().await;
         self.set_state(VpnState::Disconnected).await;
@@ -420,6 +418,11 @@ impl VpnManager {
 
     async fn set_state(&self, state: VpnState) {
         *self.state.lock().await = state;
+    }
+
+    async fn bump_session_gen(&self) {
+        let mut g = self.session_gen.lock().await;
+        *g = g.wrapping_add(1);
     }
 
     /// Locate a sidecar binary. Tauri renames externalBin to drop the triple
