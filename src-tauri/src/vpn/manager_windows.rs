@@ -134,30 +134,7 @@ impl VpnManager {
         // ends up looping through ourselves.
         if adapter_exists(WINTUN_ADAPTER).await {
             log_win!("[VPN-WIN] Stale wintun adapter detected, resetting");
-            let _ = run_cmd(
-                "netsh",
-                &[
-                    "interface",
-                    "ipv4",
-                    "set",
-                    "address",
-                    &format!("name={}", WINTUN_ADAPTER),
-                    "source=dhcp",
-                ],
-            )
-            .await;
-            // Best-effort: remove any 0.0.0.0/0 route on the wintun adapter.
-            let cmd = format!(
-                "Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias '{}' \
-                 -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false \
-                 -ErrorAction SilentlyContinue",
-                WINTUN_ADAPTER
-            );
-            let _ = run_cmd(
-                "powershell",
-                &["-NoProfile", "-NonInteractive", "-Command", &cmd],
-            )
-            .await;
+            self.reset_wintun_ipv4_config().await;
             self.reset_ipv6_tunnel().await;
         }
     }
@@ -425,6 +402,67 @@ impl VpnManager {
         *g = g.wrapping_add(1);
     }
 
+    async fn reset_wintun_ipv4_config(&self) {
+        let cmd = format!(
+            "Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4 \
+             -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false \
+             -ErrorAction SilentlyContinue; \
+             Get-NetRoute -InterfaceAlias '{}' -AddressFamily IPv4 \
+             -ErrorAction SilentlyContinue | Where-Object {{ $_.DestinationPrefix -in \
+             @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1') }} | \
+             Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue",
+            WINTUN_ADAPTER, WINTUN_ADAPTER
+        );
+        let _ = run_cmd(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &cmd],
+        )
+        .await;
+        let _ = run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "set",
+                "address",
+                &format!("name={}", WINTUN_ADAPTER),
+                "source=dhcp",
+            ],
+        )
+        .await;
+    }
+
+    async fn set_wintun_ipv4_address(&self) -> Result<(), String> {
+        let result = run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "set",
+                "address",
+                &format!("name={}", WINTUN_ADAPTER),
+                "static",
+                WINTUN_IP,
+                WINTUN_MASK,
+                WINTUN_GATEWAY,
+            ],
+        )
+        .await;
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if adapter_has_ipv4_address(WINTUN_ADAPTER, WINTUN_IP).await => {
+                log_win!(
+                    "[TUN-WIN] netsh set address reported error but {} is already assigned: {}",
+                    WINTUN_IP,
+                    e
+                );
+                Ok(())
+            }
+            Err(e) => Err(format!("netsh set address failed: {e}")),
+        }
+    }
+
     /// Locate a sidecar binary. Tauri renames externalBin to drop the triple
     /// suffix in production, but in dev it stays — handle both.
     fn resolve_bin(&self, name: &str) -> PathBuf {
@@ -481,6 +519,7 @@ impl VpnManager {
         // setups Windows reports the default route as "on-link" with no IP
         // gateway, and only the explicit `if <idx>` keeps the route on the
         // right NIC instead of getting picked up by some other adapter.
+        let _ = run_cmd("route", &["delete", server_ip]).await;
         run_cmd(
             "route",
             &[
@@ -552,23 +591,10 @@ impl VpnManager {
         }
         log_win!("[TUN-WIN] wintun adapter ready (after {iter} polls)");
 
+        self.reset_wintun_ipv4_config().await;
+
         // Configure adapter: address + low metric so it's the default route.
-        run_cmd(
-            "netsh",
-            &[
-                "interface",
-                "ipv4",
-                "set",
-                "address",
-                &format!("name={}", WINTUN_ADAPTER),
-                "static",
-                WINTUN_IP,
-                WINTUN_MASK,
-                WINTUN_GATEWAY,
-            ],
-        )
-        .await
-        .map_err(|e| format!("netsh set address failed: {e}"))?;
+        self.set_wintun_ipv4_address().await?;
 
         run_cmd(
             "netsh",
@@ -632,6 +658,8 @@ impl VpnManager {
             "[TUN-WIN] wintun ifIndex={}, installing split-default",
             wintun_idx
         );
+        let _ = run_cmd("route", &["delete", "0.0.0.0", "mask", "128.0.0.0"]).await;
+        let _ = run_cmd("route", &["delete", "128.0.0.0", "mask", "128.0.0.0"]).await;
         run_cmd(
             "route",
             &[
@@ -808,18 +836,7 @@ impl VpnManager {
 
         // Reset wintun adapter address (in case adapter is still listed)
         if adapter_exists(WINTUN_ADAPTER).await {
-            let _ = run_cmd(
-                "netsh",
-                &[
-                    "interface",
-                    "ipv4",
-                    "set",
-                    "address",
-                    &format!("name={}", WINTUN_ADAPTER),
-                    "source=dhcp",
-                ],
-            )
-            .await;
+            self.reset_wintun_ipv4_config().await;
         }
 
         let _ = std::fs::remove_file(app_data_dir().join("xray.json"));
@@ -1039,6 +1056,23 @@ async fn get_adapter_index(name: &str) -> Option<String> {
             }
         }
         _ => None,
+    }
+}
+
+async fn adapter_has_ipv4_address(name: &str, ip: &str) -> bool {
+    let cmd = format!(
+        "if (Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4 \
+         -ErrorAction SilentlyContinue | Where-Object {{ $_.IPAddress -eq '{}' }}) \
+         {{ Write-Host found }}",
+        name, ip
+    );
+    let fut = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match timeout(POLL_TIMEOUT, fut).await {
+        Ok(Ok(o)) => o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "found",
+        _ => false,
     }
 }
 

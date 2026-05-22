@@ -14,7 +14,7 @@
         "maximizable": false,
         "fullscreen": false,
         "center": true,
-        "backgroundColor": "#0a1628"
+        "backgroundColor": "#0d0d0d"
       }
     ]
   },
@@ -26,6 +26,7 @@
     ],
     "windows": {
       "nsis": {
+        "installMode": "both",
         "installerHooks": "./installer.nsh"
       }
     }
