@@ -47,15 +47,12 @@ export async function pingSubscriptionUrl(
     } catch (primaryError) {
       const fallback = buildFallbackUrl(subscriptionUrl);
       if (!fallback) throw primaryError;
-      console.warn(
-        "[pingSubscriptionUrl] primary failed, retrying via fallback:",
-        primaryError,
-      );
+      console.warn("[pingSubscriptionUrl] primary failed, retrying via fallback");
       const res = await timedFetch(fallback, headers, FALLBACK_TIMEOUT_MS);
       return readIntervalMs(res.headers.get("profile-update-interval"));
     }
-  } catch (e) {
-    console.warn("[pingSubscriptionUrl] failed:", e);
+  } catch {
+    console.warn("[pingSubscriptionUrl] failed");
     return null;
   }
 }

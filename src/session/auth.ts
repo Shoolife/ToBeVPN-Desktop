@@ -577,10 +577,6 @@ async function runSyncSubscription(): Promise<void> {
   const trafficLimitBytes = Number(subUser.traffic_limit_bytes) || 0;
   const trafficUsedBytes = Number(subUser.traffic_used_bytes) || 0;
 
-  if (import.meta.env.DEV) {
-    console.log("[syncSubscription] plan:", plan, "trafficUsed:", trafficUsedBytes, "trafficLimit:", trafficLimitBytes, "raw:", subUser.traffic_used_bytes, "/", subUser.traffic_limit_bytes);
-  }
-
   updateSession({
     userPlan: plan,
     planExpiresAt: expiresAtMillis,
@@ -827,12 +823,12 @@ function parseVlessUrl(url: string): VpnServer | null {
     const u = new URL(url);
     const uuid = u.username;
     if (!uuid) {
-      console.warn("[parseVlessUrl] missing uuid in:", url);
+      console.warn("[parseVlessUrl] missing uuid");
       return null;
     }
     const address = u.hostname;
     if (!address) {
-      console.warn("[parseVlessUrl] missing host in:", url);
+      console.warn("[parseVlessUrl] missing host");
       return null;
     }
     const port = u.port ? parseInt(u.port, 10) : 443;
@@ -859,8 +855,8 @@ function parseVlessUrl(url: string): VpnServer | null {
       country: "",
       isOnline: true,
     };
-  } catch (e) {
-    console.warn("[parseVlessUrl] parse error for:", url, e);
+  } catch {
+    console.warn("[parseVlessUrl] parse error");
     return null;
   }
 }
@@ -872,7 +868,6 @@ function parseVlessUrl(url: string): VpnServer | null {
 export async function fetchVpnServers(): Promise<VpnServer[]> {
   const { shortUuid } = getSession();
   const debug = import.meta.env.DEV;
-  if (debug) console.log("[fetchVpnServers] shortUuid:", shortUuid);
   if (!shortUuid) return [];
 
   const subInfo = (await getSubscriptionInfo(shortUuid)).response;
@@ -916,8 +911,8 @@ export async function fetchVpnServers(): Promise<VpnServer[]> {
           !disabledIps.has(server.address) && !disabledIps.has(resolvedIp);
       }),
     );
-  } catch (e) {
-    if (debug) console.warn("[fetchVpnServers] nodes enrichment failed:", e);
+  } catch {
+    if (debug) console.warn("[fetchVpnServers] nodes enrichment failed");
     // Fallback — keep servers without country info
   }
 

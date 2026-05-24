@@ -29,6 +29,14 @@ const strings = {
     // Splash
     splash_tagline: "твоё будущее приватно",
 
+    // Onboarding
+    onboarding_subtitle: "Пробный тариф для первого подключения",
+    onboarding_feature_trial: "Пробный тариф: 3 ГБ трафика на 3 дня",
+    onboarding_feature_device: "Пробный тариф: 1 устройство",
+    onboarding_feature_auth: "Авторизуйтесь через Telegram, чтобы не потерять доступ",
+    onboarding_feature_tools: "Серверы, статистика и тест скорости встроены",
+    onboarding_continue: "Продолжить",
+
     // Pairing
     pairing_title: "Войти через телефон",
     pairing_subtitle: "Отсканируйте QR телефоном и подтвердите вход в Telegram",
@@ -41,6 +49,7 @@ const strings = {
     // Connection states
     state_disconnected: "Отключено",
     state_connecting: "Подключение…",
+    state_disconnecting: "Отключение…",
     state_connected: "Подключено",
 
     // Home
@@ -153,6 +162,8 @@ const strings = {
     plan_devices_unknown: "до XX устройств",
     plan_unlimited_traffic: "Безлимитный трафик",
     available_plans: "Доступные тарифы",
+    loading_data: "Загрузка…",
+    plans_loading: "Загружаем тарифы…",
     payment_via_telegram: "Оплата через Telegram",
     buy_plan: "Купить «{0}» за {1}",
     plan_day: "1 день",
@@ -210,6 +221,14 @@ const strings = {
     // Splash
     splash_tagline: "your future is private",
 
+    // Onboarding
+    onboarding_subtitle: "Trial plan for your first connection",
+    onboarding_feature_trial: "Trial plan: 3 GB of traffic for 3 days",
+    onboarding_feature_device: "Trial plan: 1 device",
+    onboarding_feature_auth: "Sign in via Telegram so you do not lose access",
+    onboarding_feature_tools: "Servers, statistics, and speed test are built in",
+    onboarding_continue: "Continue",
+
     // Pairing
     pairing_title: "Sign in via phone",
     pairing_subtitle: "Scan the QR code with your phone and confirm sign in in Telegram",
@@ -222,6 +241,7 @@ const strings = {
     // Connection states
     state_disconnected: "Disconnected",
     state_connecting: "Connecting…",
+    state_disconnecting: "Disconnecting…",
     state_connected: "Connected",
 
     // Home
@@ -334,6 +354,8 @@ const strings = {
     plan_devices_unknown: "up to XX devices",
     plan_unlimited_traffic: "Unlimited traffic",
     available_plans: "Available plans",
+    loading_data: "Loading…",
+    plans_loading: "Loading plans…",
     payment_via_telegram: "Payment via Telegram",
     buy_plan: "Buy \"{0}\" for {1}",
     plan_day: "1 day",

@@ -171,12 +171,6 @@ export default function ServersScreen({
               className={`server-item ${!server.isOnline ? "server-item--offline" : ""}`}
               onClick={() => {
                 if (server.isOnline) {
-                  console.log("[SERVER] Selected:", server.name, server.address + ":" + server.port);
-                  console.log("[SERVER] uuid:", server.uuid);
-                  console.log("[SERVER] network:", server.network, "security:", server.security, "sni:", server.sni);
-                  console.log("[SERVER] flow:", server.flow, "fp:", server.fingerprint);
-                  console.log("[SERVER] pbk:", server.public_key, "sid:", server.short_id);
-                  console.log("[SERVER] path:", server.path, "mode:", server.mode, "spx:", server.spx);
                   onSelect({
                     name: server.name,
                     country: server.country,

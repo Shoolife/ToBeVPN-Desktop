@@ -3,7 +3,7 @@ pub mod linux_update;
 mod vpn;
 
 use keyring::{Entry, Error as KeyringError};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -19,6 +19,7 @@ use gtk::prelude::*;
 use vpn::config::ServerConfig;
 use vpn::manager::VpnManager;
 use vpn::state::{TrafficStats, VpnState};
+use vpn::ConnectAttempt;
 
 /// Shared VPN manager state.
 struct AppVpn(Arc<Mutex<Option<VpnManager>>>);
@@ -27,7 +28,10 @@ struct AppVpn(Arc<Mutex<Option<VpnManager>>>);
 /// can't fire three concurrent xray spawns. Held for the duration of one
 /// command — the manager's own state lock is too granular for this (it
 /// covers state-field writes only, not the full pipeline).
-struct VpnPipelineLock(Arc<Mutex<()>>);
+struct VpnPipelineLock {
+    gate: Arc<Mutex<()>>,
+    generation: Arc<AtomicU64>,
+}
 
 const SECURE_SESSION_SERVICE: &str = "network.tobevpn.desktop";
 const SECURE_SESSION_ACCOUNT: &str = "device-session-v1";
@@ -305,14 +309,19 @@ async fn start_vpn(
     state: tauri::State<'_, AppVpn>,
     pipeline: tauri::State<'_, VpnPipelineLock>,
 ) -> Result<(), String> {
+    // Signal cancellation before waiting on the gate. Otherwise a rapid
+    // server switch or Stop press can wait behind an obsolete start that
+    // still raises system routes and briefly becomes active.
+    let attempt = ConnectAttempt::begin(&pipeline.generation);
     // Serialize the entire connect pipeline. Without this a user mashing the
     // "Connect" button (or live-switch + manual reconnect) can fire several
     // start() invocations in parallel, racing xray spawns and leaving zombie
     // processes that the second start can't detect via `prev_state`.
-    let _gate = pipeline.0.lock().await;
+    let _gate = pipeline.gate.lock().await;
+    attempt.ensure_active()?;
     let guard = state.0.lock().await;
     match guard.as_ref() {
-        Some(mgr) => mgr.start(server).await,
+        Some(mgr) => mgr.start(server, &attempt).await,
         None => Err("VPN manager not initialized".into()),
     }
 }
@@ -323,7 +332,10 @@ async fn stop_vpn(
     state: tauri::State<'_, AppVpn>,
     pipeline: tauri::State<'_, VpnPipelineLock>,
 ) -> Result<(), String> {
-    let _gate = pipeline.0.lock().await;
+    // Stop invalidates a start immediately, even while that start still owns
+    // the serialized native pipeline.
+    ConnectAttempt::cancel_current(&pipeline.generation);
+    let _gate = pipeline.gate.lock().await;
     let guard = state.0.lock().await;
     match guard.as_ref() {
         Some(mgr) => mgr.stop().await,
@@ -410,7 +422,10 @@ pub fn run() {
             manager.set_app_handle(app.handle().clone());
             let shared = Arc::new(Mutex::new(Some(manager)));
             app.manage(AppVpn(shared.clone()));
-            app.manage(VpnPipelineLock(Arc::new(Mutex::new(()))));
+            app.manage(VpnPipelineLock {
+                gate: Arc::new(Mutex::new(())),
+                generation: Arc::new(AtomicU64::new(0)),
+            });
 
             // Set when the user picks "Выход" in the tray menu so the
             // CloseRequested handler lets the app actually shut down instead

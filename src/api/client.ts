@@ -166,10 +166,7 @@ async function performFetch(
   } catch (primaryError) {
     if (!BOT_API_FALLBACK_URL) throw primaryError;
     if (userSignal?.aborted) throw primaryError;
-    console.warn(
-      `[bot-api] primary request to ${path} failed, retrying via fallback:`,
-      primaryError,
-    );
+    console.warn(`[bot-api] primary request to ${path} failed, retrying via fallback`);
     const fallbackUrl = buildFallbackBotUrl(path, query, BOT_API_FALLBACK_URL);
     if (!fallbackUrl) throw primaryError;
     return await attemptFetch(

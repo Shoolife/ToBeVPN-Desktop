@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
@@ -149,9 +149,12 @@ export default function HomeScreen({
 }) {
   const session = useSession();
   const vpn = useVpnRuntime();
-  const { connected, connecting, sessionBytes, sessionStartTime, lastError } = vpn;
+  const { connected, connecting, disconnecting, sessionBytes, sessionStartTime, lastError } = vpn;
   const [showSubscription, setShowSubscription] = useState(false);
   const [showTrialInfo, setShowTrialInfo] = useState(false);
+  const [preparingConnection, setPreparingConnection] = useState(false);
+  const toggleGeneration = useRef(0);
+  const activating = connecting || preparingConnection;
 
   const elapsed = sessionStartTime
     ? Math.floor((Date.now() - sessionStartTime) / 1000)
@@ -214,7 +217,15 @@ export default function HomeScreen({
   };
 
   const handleToggle = async () => {
-    if (connected) {
+    if (disconnecting) return;
+    if (preparingConnection && !connecting && !connected) {
+      toggleGeneration.current++;
+      setPreparingConnection(false);
+      return;
+    }
+    if (connected || activating) {
+      toggleGeneration.current++;
+      setPreparingConnection(false);
       try {
         await disconnectVpn();
       } catch (e) {
@@ -228,41 +239,52 @@ export default function HomeScreen({
     }
     setLocalError(null);
     clearVpnError();
-    const serverToConnect = await prepareServerForConnect();
-    if (!serverToConnect) {
-      setLocalError(t("servers_empty"));
-      return;
-    }
-    const serverConfig = {
-      address: serverToConnect.address,
-      port: serverToConnect.port,
-      uuid: serverToConnect.uuid,
-      flow: serverToConnect.flow,
-      security: serverToConnect.security,
-      sni: serverToConnect.sni,
-      fingerprint: serverToConnect.fingerprint,
-      public_key: serverToConnect.public_key,
-      short_id: serverToConnect.short_id,
-      network: serverToConnect.network,
-      path: serverToConnect.path,
-      mode: serverToConnect.mode,
-      spx: serverToConnect.spx,
-    };
+    const generation = ++toggleGeneration.current;
+    setPreparingConnection(true);
     try {
+      const serverToConnect = await prepareServerForConnect();
+      if (generation !== toggleGeneration.current) return;
+      if (!serverToConnect) {
+        setLocalError(t("servers_empty"));
+        return;
+      }
+      const serverConfig = {
+        address: serverToConnect.address,
+        port: serverToConnect.port,
+        uuid: serverToConnect.uuid,
+        flow: serverToConnect.flow,
+        security: serverToConnect.security,
+        sni: serverToConnect.sni,
+        fingerprint: serverToConnect.fingerprint,
+        public_key: serverToConnect.public_key,
+        short_id: serverToConnect.short_id,
+        network: serverToConnect.network,
+        path: serverToConnect.path,
+        mode: serverToConnect.mode,
+        spx: serverToConnect.spx,
+      };
       await connectVpn(serverConfig);
     } catch (e) {
       console.error("[VPN-UI] connectVpn() error:", e);
+    } finally {
+      if (generation === toggleGeneration.current) {
+        setPreparingConnection(false);
+      }
     }
   };
 
-  const statusText = connecting
+  const statusText = activating
     ? t("state_connecting")
+    : disconnecting
+      ? t("state_disconnecting")
     : connected
       ? t("state_connected")
       : t("state_disconnected");
 
-  const statusClass = connecting
+  const statusClass = activating
     ? "home__status-label--connecting"
+    : disconnecting
+      ? "home__status-label--disconnecting"
     : connected
       ? "home__status-label--on"
       : "";
@@ -302,7 +324,7 @@ export default function HomeScreen({
       <div className="home-content">
         <div className="home-connect-area">
           <button
-            className={`home-power ${connected ? "home-power--on" : ""} ${connecting ? "home-power--connecting" : ""}`}
+            className={`home-power ${connected ? "home-power--on" : ""} ${activating ? "home-power--connecting" : ""} ${disconnecting ? "home-power--disconnecting" : ""}`}
             onClick={handleToggle}
           >
             <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">

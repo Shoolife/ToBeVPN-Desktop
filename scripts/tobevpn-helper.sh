@@ -124,7 +124,7 @@ case "$1" in
         exit 1
     fi
     if ! echo "$SERVER_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-        echo "ERROR: invalid server IP: $SERVER_IP" >&2
+        echo "ERROR: invalid server IP" >&2
         exit 1
     fi
 

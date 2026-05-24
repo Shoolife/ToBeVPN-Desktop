@@ -20,6 +20,7 @@ use tokio::time::{sleep, timeout, Duration};
 
 use super::config::{self, ServerConfig, SOCKS_PORT, STATS_API_PORT};
 use super::state::{TrafficStats, VpnState};
+use super::{ConnectAttempt, CONNECT_CANCELLED};
 
 // CREATE_NO_WINDOW — suppress flashing console for every spawned helper.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -30,6 +31,7 @@ const SUBPROC_TIMEOUT: Duration = Duration::from_secs(15);
 // Tighter cap for fast-poll commands (adapter_exists) so the surrounding
 // retry loop stays time-bounded even if PowerShell wedges.
 const POLL_TIMEOUT: Duration = Duration::from_secs(3);
+const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Per-user app data dir (e.g. C:\Users\<user>\AppData\Local\ToBeVPN).
 /// %LOCALAPPDATA% is already per-user — by default other local users on
@@ -134,23 +136,22 @@ impl VpnManager {
         // ends up looping through ourselves.
         if adapter_exists(WINTUN_ADAPTER).await {
             log_win!("[VPN-WIN] Stale wintun adapter detected, resetting");
-            self.reset_wintun_ipv4_config().await;
-            self.reset_ipv6_tunnel().await;
+            self.reset_wintun_ipv4_config(None).await;
+            self.reset_ipv6_tunnel(None).await;
         }
     }
 
     /// Start full VPN: xray-core → tun2socks (wintun) → routing.
-    pub async fn start(&self, server: ServerConfig) -> Result<(), String> {
+    pub async fn start(
+        &self,
+        server: ServerConfig,
+        attempt: &ConnectAttempt,
+    ) -> Result<(), String> {
+        attempt.ensure_active()?;
         // Reset the diagnostic log so users sharing it only ship the latest run.
         let _ = std::fs::remove_file(log_path());
         log_win!("══════════════════════════════════════════════════");
-        log_win!(
-            "[VPN-WIN] START called (server={}, port={}, network={})",
-            server.address,
-            server.port,
-            server.network
-        );
-        log_win!("[VPN-WIN] log file: {}", log_path().display());
+        log_win!("[VPN-WIN] START called");
 
         if !is_elevated().await {
             let msg = "ToBeVPN must be run as Administrator on Windows. \
@@ -177,17 +178,22 @@ impl VpnManager {
             _ => {}
         }
 
+        attempt.ensure_active()?;
         self.set_state(VpnState::Connecting).await;
 
         // Pre-resolve server hostname so xray never needs to DNS through itself.
-        let server_ip = match Self::resolve_server_ip(&server.address).await {
+        let server_ip = match Self::resolve_server_ip(&server.address, attempt).await {
             Ok(ip) => ip,
             Err(e) => {
                 self.set_state(VpnState::Error { message: e.clone() }).await;
                 return Err(e);
             }
         };
-        log_win!("[VPN-WIN] Pre-resolved {} -> {}", server.address, server_ip);
+        log_win!("[VPN-WIN] Server address resolved");
+        if attempt.is_cancelled() {
+            self.set_state(VpnState::Disconnected).await;
+            return Err(CONNECT_CANCELLED.into());
+        }
 
         let mut server = server;
         if server.sni.is_empty() && server.address.parse::<std::net::IpAddr>().is_err() {
@@ -204,6 +210,10 @@ impl VpnManager {
         let config_path = app_data_dir().join("xray.json");
         std::fs::write(&config_path, &config_json)
             .map_err(|e| format!("Failed to write xray config: {e}"))?;
+        if attempt.is_cancelled() {
+            self.set_state(VpnState::Disconnected).await;
+            return Err(CONNECT_CANCELLED.into());
+        }
 
         let asset_dir = self.find_asset_dir();
 
@@ -226,27 +236,45 @@ impl VpnManager {
         if let Some(stderr) = xray_child.stderr.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    log_win!("[xray] {}", line);
+                while let Ok(Some(_line)) = lines.next_line().await {
+                    log_win!("[xray] diagnostic output received");
                 }
             });
         }
         *self.xray_process.lock().await = Some(xray_child);
+        if attempt.is_cancelled() {
+            self.force_stop().await;
+            self.set_state(VpnState::Disconnected).await;
+            return Err(CONNECT_CANCELLED.into());
+        }
 
         // 3. wait for SOCKS port
-        if let Err(e) = wait_for_port(SOCKS_PORT, Duration::from_secs(10)).await {
+        if let Err(e) = wait_for_port(SOCKS_PORT, Duration::from_secs(10), attempt).await {
             self.force_stop().await;
-            self.set_state(VpnState::Error { message: e.clone() }).await;
+            if attempt.is_cancelled() {
+                self.set_state(VpnState::Disconnected).await;
+            } else {
+                self.set_state(VpnState::Error { message: e.clone() }).await;
+            }
             return Err(e);
         }
 
         // 4. TUN + routes
-        if let Err(e) = self.start_tun(&server_ip).await {
+        if let Err(e) = self.start_tun(&server_ip, attempt).await {
             self.force_stop().await;
-            self.set_state(VpnState::Error { message: e.clone() }).await;
+            if attempt.is_cancelled() {
+                self.set_state(VpnState::Disconnected).await;
+            } else {
+                self.set_state(VpnState::Error { message: e.clone() }).await;
+            }
             return Err(e);
         }
 
+        if attempt.is_cancelled() {
+            self.force_stop().await;
+            self.set_state(VpnState::Disconnected).await;
+            return Err(CONNECT_CANCELLED.into());
+        }
         self.set_state(VpnState::Connected).await;
         log_win!("[VPN-WIN] State -> Connected");
 
@@ -402,7 +430,7 @@ impl VpnManager {
         *g = g.wrapping_add(1);
     }
 
-    async fn reset_wintun_ipv4_config(&self) {
+    async fn reset_wintun_ipv4_config(&self, attempt: Option<&ConnectAttempt>) {
         let cmd = format!(
             "Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4 \
              -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false \
@@ -416,6 +444,7 @@ impl VpnManager {
         let _ = run_cmd(
             "powershell",
             &["-NoProfile", "-NonInteractive", "-Command", &cmd],
+            attempt,
         )
         .await;
         let _ = run_cmd(
@@ -428,11 +457,12 @@ impl VpnManager {
                 &format!("name={}", WINTUN_ADAPTER),
                 "source=dhcp",
             ],
+            attempt,
         )
         .await;
     }
 
-    async fn set_wintun_ipv4_address(&self) -> Result<(), String> {
+    async fn set_wintun_ipv4_address(&self, attempt: &ConnectAttempt) -> Result<(), String> {
         let result = run_cmd(
             "netsh",
             &[
@@ -446,6 +476,7 @@ impl VpnManager {
                 WINTUN_MASK,
                 WINTUN_GATEWAY,
             ],
+            Some(attempt),
         )
         .await;
 
@@ -486,22 +517,31 @@ impl VpnManager {
         self.bin_dir.clone()
     }
 
-    async fn resolve_server_ip(address: &str) -> Result<String, String> {
+    async fn resolve_server_ip(address: &str, attempt: &ConnectAttempt) -> Result<String, String> {
         if address.parse::<std::net::IpAddr>().is_ok() {
             return Ok(address.to_string());
         }
-        let addrs = tokio::net::lookup_host(format!("{}:0", address))
-            .await
-            .map_err(|e| format!("DNS resolve failed for {}: {}", address, e))?;
+        let lookup = timeout(
+            DNS_RESOLVE_TIMEOUT,
+            tokio::net::lookup_host(format!("{}:0", address)),
+        );
+        tokio::pin!(lookup);
+        let addrs = tokio::select! {
+            result = &mut lookup => result
+                .map_err(|_| "DNS resolve timed out".to_string())?
+                .map_err(|e| format!("DNS resolve failed: {}", e))?,
+            _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
+        };
         for addr in addrs {
             if addr.is_ipv4() {
                 return Ok(addr.ip().to_string());
             }
         }
-        Err(format!("No IPv4 address found for {}", address))
+        Err("No IPv4 address found for server".into())
     }
 
-    async fn start_tun(&self, server_ip: &str) -> Result<(), String> {
+    async fn start_tun(&self, server_ip: &str, attempt: &ConnectAttempt) -> Result<(), String> {
+        attempt.ensure_active()?;
         let tun2socks_bin = self.resolve_bin("tun2socks");
         log_win!("[TUN-WIN] tun2socks binary: {:?}", tun2socks_bin);
 
@@ -512,14 +552,15 @@ impl VpnManager {
         let (gw, idx) = get_default_gateway()
             .await
             .ok_or("Could not detect default IPv4 gateway")?;
-        log_win!("[TUN-WIN] Default gateway: {} (ifIndex {})", gw, idx);
+        attempt.ensure_active()?;
+        log_win!("[TUN-WIN] Default gateway detected");
 
         // Bypass route: VPN server reachable via the original gateway, never
         // via TUN. We pin it to the physical interface index — on cellular
         // setups Windows reports the default route as "on-link" with no IP
         // gateway, and only the explicit `if <idx>` keeps the route on the
         // right NIC instead of getting picked up by some other adapter.
-        let _ = run_cmd("route", &["delete", server_ip]).await;
+        let _ = run_cmd("route", &["delete", server_ip], Some(attempt)).await;
         run_cmd(
             "route",
             &[
@@ -533,9 +574,11 @@ impl VpnManager {
                 "if",
                 &idx,
             ],
+            Some(attempt),
         )
         .await
         .map_err(|e| format!("route add bypass failed: {e}"))?;
+        attempt.ensure_active()?;
 
         // Spawn tun2socks. It creates the wintun adapter on first packet.
         let mut t2s_child = Command::new(&tun2socks_bin)
@@ -561,8 +604,8 @@ impl VpnManager {
         if let Some(stderr) = t2s_child.stderr.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    log_win!("[tun2socks] {}", line);
+                while let Ok(Some(_line)) = lines.next_line().await {
+                    log_win!("[tun2socks] diagnostic output received");
                 }
             });
         }
@@ -575,6 +618,7 @@ impl VpnManager {
         let mut found = false;
         let mut iter = 0;
         while tokio::time::Instant::now() < deadline {
+            attempt.ensure_active()?;
             iter += 1;
             if adapter_exists(WINTUN_ADAPTER).await {
                 found = true;
@@ -590,11 +634,14 @@ impl VpnManager {
             ));
         }
         log_win!("[TUN-WIN] wintun adapter ready (after {iter} polls)");
+        attempt.ensure_active()?;
 
-        self.reset_wintun_ipv4_config().await;
+        self.reset_wintun_ipv4_config(Some(attempt)).await;
+        attempt.ensure_active()?;
 
         // Configure adapter: address + low metric so it's the default route.
-        self.set_wintun_ipv4_address().await?;
+        self.set_wintun_ipv4_address(attempt).await?;
+        attempt.ensure_active()?;
 
         run_cmd(
             "netsh",
@@ -606,6 +653,7 @@ impl VpnManager {
                 WINTUN_ADAPTER,
                 "metric=1",
             ],
+            Some(attempt),
         )
         .await
         .ok(); // non-fatal
@@ -623,6 +671,7 @@ impl VpnManager {
                 "1.1.1.1",
                 "primary",
             ],
+            Some(attempt),
         )
         .await
         .ok();
@@ -637,6 +686,7 @@ impl VpnManager {
                 "8.8.8.8",
                 "index=2",
             ],
+            Some(attempt),
         )
         .await
         .ok();
@@ -658,8 +708,18 @@ impl VpnManager {
             "[TUN-WIN] wintun ifIndex={}, installing split-default",
             wintun_idx
         );
-        let _ = run_cmd("route", &["delete", "0.0.0.0", "mask", "128.0.0.0"]).await;
-        let _ = run_cmd("route", &["delete", "128.0.0.0", "mask", "128.0.0.0"]).await;
+        let _ = run_cmd(
+            "route",
+            &["delete", "0.0.0.0", "mask", "128.0.0.0"],
+            Some(attempt),
+        )
+        .await;
+        let _ = run_cmd(
+            "route",
+            &["delete", "128.0.0.0", "mask", "128.0.0.0"],
+            Some(attempt),
+        )
+        .await;
         run_cmd(
             "route",
             &[
@@ -673,9 +733,11 @@ impl VpnManager {
                 "if",
                 &wintun_idx,
             ],
+            Some(attempt),
         )
         .await
         .map_err(|e| format!("route add 0.0.0.0/1 failed: {e}"))?;
+        attempt.ensure_active()?;
         run_cmd(
             "route",
             &[
@@ -689,17 +751,21 @@ impl VpnManager {
                 "if",
                 &wintun_idx,
             ],
+            Some(attempt),
         )
         .await
         .map_err(|e| format!("route add 128.0.0.0/1 failed: {e}"))?;
+        attempt.ensure_active()?;
 
-        self.configure_ipv6_tunnel().await?;
+        self.configure_ipv6_tunnel(attempt).await?;
 
         Ok(())
     }
 
-    async fn configure_ipv6_tunnel(&self) -> Result<(), String> {
-        self.reset_ipv6_tunnel().await;
+    async fn configure_ipv6_tunnel(&self, attempt: &ConnectAttempt) -> Result<(), String> {
+        attempt.ensure_active()?;
+        self.reset_ipv6_tunnel(Some(attempt)).await;
+        attempt.ensure_active()?;
 
         run_cmd(
             "netsh",
@@ -712,9 +778,11 @@ impl VpnManager {
                 &format!("address={}", WINTUN_IPV6_CIDR),
                 "store=active",
             ],
+            Some(attempt),
         )
         .await
         .map_err(|e| format!("netsh ipv6 add address failed: {e}"))?;
+        attempt.ensure_active()?;
 
         run_cmd(
             "netsh",
@@ -728,6 +796,7 @@ impl VpnManager {
                 "metric=1",
                 "store=active",
             ],
+            Some(attempt),
         )
         .await
         .map_err(|e| format!("netsh ipv6 add route failed: {e}"))?;
@@ -735,7 +804,7 @@ impl VpnManager {
         Ok(())
     }
 
-    async fn reset_ipv6_tunnel(&self) {
+    async fn reset_ipv6_tunnel(&self, attempt: Option<&ConnectAttempt>) {
         let _ = run_cmd(
             "netsh",
             &[
@@ -747,6 +816,7 @@ impl VpnManager {
                 &format!("interface={}", WINTUN_ADAPTER),
                 "store=active",
             ],
+            attempt,
         )
         .await;
 
@@ -761,6 +831,7 @@ impl VpnManager {
                 &format!("address={}", WINTUN_IPV6),
                 "store=active",
             ],
+            attempt,
         )
         .await;
     }
@@ -824,19 +895,19 @@ impl VpnManager {
 
         // Remove bypass route
         if let Some(server_ip) = self.server_ip.lock().await.take() {
-            let _ = run_cmd("route", &["delete", &server_ip]).await;
+            let _ = run_cmd("route", &["delete", &server_ip], None).await;
         }
 
         // Remove split-default routes installed by start_tun (best-effort —
         // they're gone with the wintun adapter anyway, but explicit cleanup
         // avoids stale entries surviving an abnormal shutdown).
-        let _ = run_cmd("route", &["delete", "0.0.0.0", "mask", "128.0.0.0"]).await;
-        let _ = run_cmd("route", &["delete", "128.0.0.0", "mask", "128.0.0.0"]).await;
-        self.reset_ipv6_tunnel().await;
+        let _ = run_cmd("route", &["delete", "0.0.0.0", "mask", "128.0.0.0"], None).await;
+        let _ = run_cmd("route", &["delete", "128.0.0.0", "mask", "128.0.0.0"], None).await;
+        self.reset_ipv6_tunnel(None).await;
 
         // Reset wintun adapter address (in case adapter is still listed)
         if adapter_exists(WINTUN_ADAPTER).await {
-            self.reset_wintun_ipv4_config().await;
+            self.reset_wintun_ipv4_config(None).await;
         }
 
         let _ = std::fs::remove_file(app_data_dir().join("xray.json"));
@@ -868,36 +939,48 @@ async fn is_elevated() -> bool {
     }
 }
 
-async fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {
-    log_win!("[CMD] {} {}", cmd, args.join(" "));
-    let fut = Command::new(cmd)
+async fn run_cmd(cmd: &str, args: &[&str], attempt: Option<&ConnectAttempt>) -> Result<(), String> {
+    log_win!("[CMD] {}", cmd);
+    let mut command = Command::new(cmd);
+    command
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let output = match timeout(SUBPROC_TIMEOUT, fut).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(format!("{} spawn failed: {e}", cmd)),
-        Err(_) => {
+        .kill_on_drop(true);
+    let output = command.output();
+    tokio::pin!(output);
+    let deadline = sleep(SUBPROC_TIMEOUT);
+    tokio::pin!(deadline);
+    let output = tokio::select! {
+        result = &mut output => {
+            result.map_err(|e| format!("{} spawn failed: {e}", cmd))?
+        }
+        _ = &mut deadline => {
             return Err(format!(
                 "{} timed out after {}s",
                 cmd,
                 SUBPROC_TIMEOUT.as_secs()
-            ))
+            ));
+        }
+        _ = async {
+            if let Some(attempt) = attempt {
+                attempt.cancelled().await;
+            }
+        }, if attempt.is_some() => {
+            return Err(CONNECT_CANCELLED.into());
         }
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(format!(
-            "{} {} exit {}: {}{}",
+            "{} exit {}: {}{}",
             cmd,
-            args.join(" "),
             output.status,
             stderr.trim(),
             stdout.trim()
         ));
     }
-    log_win!("[CMD OK] {} {}", cmd, args.join(" "));
+    log_win!("[CMD OK] {}", cmd);
     Ok(())
 }
 
@@ -942,7 +1025,6 @@ async fn get_default_gateway() -> Option<(String, String)> {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             let trimmed = s.trim();
-            log_win!("[get_default_gateway] raw: {:?}", trimmed);
             let mut parts = trimmed.split_whitespace();
             let next_hop = parts.next().unwrap_or("");
             let idx = parts.next().unwrap_or("");
@@ -1011,11 +1093,7 @@ async fn get_default_gateway() -> Option<(String, String)> {
         }
     }
     if let Some((_metric, gw, iface_ip)) = best {
-        log_win!(
-            "[get_default_gateway] route print picked gw={} iface={}",
-            gw,
-            iface_ip
-        );
+        log_win!("[get_default_gateway] route selected");
         let cmd = format!(
             "(Get-NetIPAddress -IPAddress '{}' -ErrorAction SilentlyContinue | Select-Object -First 1).InterfaceIndex",
             iface_ip
@@ -1102,9 +1180,14 @@ async fn adapter_exists(name: &str) -> bool {
     }
 }
 
-async fn wait_for_port(port: u16, timeout: Duration) -> Result<(), String> {
+async fn wait_for_port(
+    port: u16,
+    timeout: Duration,
+    attempt: &ConnectAttempt,
+) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        attempt.ensure_active()?;
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
                 "xray did not start within {}s (port {} not open)",

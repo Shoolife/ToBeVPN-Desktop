@@ -43,16 +43,24 @@ ToBeVPN — нативный desktop-клиент к VPN-сети с защищ�
 <div align="center">
   <table>
     <tr>
-      <td align="center"><b>Home</b></td>
-      <td align="center"><b>Серверы</b></td>
+      <td align="center"><b>Главный экран</b></td>
       <td align="center"><b>Подписка</b></td>
+      <td align="center"><b>Серверы</b></td>
+    </tr>
+    <tr>
+      <td><img src="docs/screenshots/home.png" alt="Главный экран ToBeVPN" width="240" /></td>
+      <td><img src="docs/screenshots/subscription.png" alt="Экран подписки ToBeVPN" width="240" /></td>
+      <td><img src="docs/screenshots/servers.png" alt="Экран выбора сервера ToBeVPN" width="240" /></td>
+    </tr>
+    <tr>
+      <td align="center"><b>Статистика</b></td>
+      <td align="center"><b>Устройства</b></td>
       <td align="center"><b>Настройки</b></td>
     </tr>
     <tr>
-      <td><sub><i>скриншот скоро</i></sub></td>
-      <td><sub><i>скриншот скоро</i></sub></td>
-      <td><sub><i>скриншот скоро</i></sub></td>
-      <td><sub><i>скриншот скоро</i></sub></td>
+      <td><img src="docs/screenshots/statistics.png" alt="Экран статистики ToBeVPN" width="240" /></td>
+      <td><img src="docs/screenshots/devices.png" alt="Экран устройств ToBeVPN" width="240" /></td>
+      <td><img src="docs/screenshots/settings.png" alt="Экран настроек ToBeVPN" width="240" /></td>
     </tr>
   </table>
 </div>
@@ -192,7 +200,6 @@ Xray-core обновляется только через обычный app rele
 - [ ] Auto-server selection по latency
 - [ ] Расширенная статистика по периодам
 - [ ] Более подробные release notes
-- [ ] Скриншоты для README
 
 ## Contributing
 

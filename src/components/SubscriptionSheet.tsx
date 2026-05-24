@@ -189,10 +189,16 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const session = useSession();
   const isRu = getSavedLang() === "ru";
   const lang = getSavedLang();
+  const showLimits = session.userPlan === "PAID" || session.userPlan === "ADMIN";
+  const currentLimitsKey =
+    session.isLinked && session.telegramId !== null
+      ? `${session.telegramId}:${session.userPlan}:${session.planExpiresAt ?? ""}`
+      : null;
 
   const [plansData, setPlansData] = useState<PurchasePlansDto | null>(null);
   const [plansLoading, setPlansLoading] = useState(true);
   const [currentLimits, setCurrentLimits] = useState<CurrentLimits | null>(null);
+  const [loadedLimitsKey, setLoadedLimitsKey] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [qrVisible, setQrVisible] = useState(false);
   const [qrClosing, setQrClosing] = useState(false);
@@ -233,10 +239,12 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   useEffect(() => {
     if (!session.isLinked || session.telegramId === null) {
       setCurrentLimits(null);
+      setLoadedLimitsKey(null);
       return;
     }
     let cancelled = false;
     setCurrentLimits(null);
+    setLoadedLimitsKey(null);
     getUserByTelegramId(session.telegramId)
       .then(({ response }) => {
         if (cancelled) return;
@@ -249,11 +257,14 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       })
       .catch(() => {
         if (!cancelled) setCurrentLimits(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadedLimitsKey(currentLimitsKey);
       });
     return () => {
       cancelled = true;
     };
-  }, [session.isLinked, session.telegramId, session.userPlan, session.planExpiresAt]);
+  }, [currentLimitsKey, session.isLinked, session.telegramId]);
 
   const rows = useMemo(
     () => (plansLoading ? [] : buildRows(plansData, isRu)),
@@ -386,17 +397,18 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
 
   // Limits chip. For PAID/ADMIN we show unknown placeholders immediately when
   // the current user limits request is unavailable.
+  const displayedLimits = loadedLimitsKey === currentLimitsKey ? currentLimits : null;
+  const limitsLoading = showLimits && loadedLimitsKey !== currentLimitsKey;
   const trafficGb =
-    currentLimits && currentLimits.trafficLimitBytes > 0
-      ? Math.floor(currentLimits.trafficLimitBytes / (1024 * 1024 * 1024))
+    displayedLimits && displayedLimits.trafficLimitBytes > 0
+      ? Math.floor(displayedLimits.trafficLimitBytes / (1024 * 1024 * 1024))
       : null;
   const deviceLimit =
-    currentLimits && currentLimits.deviceLimit > 0 ? currentLimits.deviceLimit : null;
-  const showLimits = session.userPlan === "PAID" || session.userPlan === "ADMIN";
+    displayedLimits && displayedLimits.deviceLimit > 0 ? displayedLimits.deviceLimit : null;
   const trafficLimitValue =
     trafficGb !== null
       ? `${trafficGb} ${t("unit_gb")}`
-      : currentLimits && currentLimits.trafficLimitBytes <= 0
+      : displayedLimits && displayedLimits.trafficLimitBytes <= 0
         ? "\u221E"
         : `XXX ${t("unit_gb")}`;
   const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : "XX";
@@ -425,15 +437,24 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
             </div>
             {showLimits && (
               <div className="sub-current__limits">
-                <div className="sub-limit">
-                  <div className="sub-limit__value">{trafficLimitValue}</div>
-                  <div className="sub-limit__label">{t("per_month_short")}</div>
-                </div>
-                <span className="sub-current__sep">·</span>
-                <div className="sub-limit">
-                  <div className="sub-limit__value">{deviceLimitValue}</div>
-                  <div className="sub-limit__label">{t("devices_label")}</div>
-                </div>
+                {limitsLoading ? (
+                  <div className="sub-current__loading">
+                    <Spinner size={18} thickness={2} />
+                    <span>{t("loading_data")}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="sub-limit">
+                      <div className="sub-limit__value">{trafficLimitValue}</div>
+                      <div className="sub-limit__label">{t("per_month_short")}</div>
+                    </div>
+                    <span className="sub-current__sep">·</span>
+                    <div className="sub-limit">
+                      <div className="sub-limit__value">{deviceLimitValue}</div>
+                      <div className="sub-limit__label">{t("devices_label")}</div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -443,8 +464,9 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           <div className="sub-sheet__section-title">{t("available_plans")}</div>
 
           {plansLoading ? (
-            <div className="spinner-center">
-              <Spinner size={32} />
+            <div className="sub-sheet__loading">
+              <Spinner size={18} thickness={2} />
+              <span>{t("plans_loading")}</span>
             </div>
           ) : rows.length === 0 ? (
             <div className="sub-sheet__hint">{t("plans_load_error")}</div>

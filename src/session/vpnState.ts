@@ -39,6 +39,7 @@ const SYSTEM_RESUME_ONLINE_POLL_MS = 500;
 export interface VpnRuntimeState {
   connected: boolean;
   connecting: boolean;
+  disconnecting: boolean;
   /** Epoch ms when the current session started; null when idle. */
   sessionStartTime: number | null;
   /** Bytes transferred since the current session began. */
@@ -52,6 +53,7 @@ export interface VpnRuntimeState {
 let state: VpnRuntimeState = {
   connected: false,
   connecting: false,
+  disconnecting: false,
   sessionStartTime: null,
   sessionBytes: 0,
   lastError: null,
@@ -152,7 +154,7 @@ async function connectVpnInternal(
     server.address === "0.0.0.0"
   ) {
     const msg = "Subscription expired. Renew it to connect.";
-    setState({ connecting: false, connected: false, lastError: msg });
+    setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
     throw new Error(msg);
   }
   // Refuse any connect attempt while the user's plan is EXPIRED. The
@@ -161,32 +163,39 @@ async function connectVpnInternal(
   // won't authorize the session — fail fast with a friendly error.
   if (getSession().userPlan === "EXPIRED") {
     const msg = "Subscription expired. Renew it to connect.";
-    setState({ connecting: false, connected: false, lastError: msg });
+    setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
     throw new Error(msg);
   }
+  const cancelInFlightStart = state.connecting && !state.connected;
   const gen = ++connectionGeneration;
   currentServerForRecovery = server;
   if (resetWatchdogRecovery) {
     watchdogRecoveryAttempts = 0;
   }
-  setState({ connecting: true, lastError: null });
+  setState({ connecting: true, disconnecting: false, lastError: null });
   // Limited/trial access depends on the HWID marker being registered before
   // the first outbound connection. Paid/admin users don't need to wait on
   // this best-effort ping, so keep their connect path fast.
-  if (isPaidOrAdmin()) {
-    pingHwidOnly().catch(() => {});
-  } else {
-    await pingHwidOnly();
-  }
   try {
-    await engineStart(server);
-    if (gen !== connectionGeneration) {
+    // A server can be changed while the previous native start is still
+    // resolving DNS or creating TUN routes. Cancel that obsolete attempt
+    // before doing any preparation for the newly selected server.
+    if (cancelInFlightStart) {
       await engineStop().catch(() => {});
-      return;
+      if (gen !== connectionGeneration) return;
     }
+    if (isPaidOrAdmin()) {
+      pingHwidOnly().catch(() => {});
+    } else {
+      await pingHwidOnly();
+    }
+    if (gen !== connectionGeneration) return;
+    await engineStart(server);
+    if (gen !== connectionGeneration) return;
     statsSessionStart();
     setState({
       connecting: false,
+      disconnecting: false,
       connected: true,
       sessionStartTime: Date.now(),
       sessionBytes: 0,
@@ -196,26 +205,34 @@ async function connectVpnInternal(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (gen === connectionGeneration) {
-      setState({ connecting: false, connected: false, lastError: msg });
+      setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
     }
     throw e;
   }
 }
 
 export async function disconnectVpn(): Promise<void> {
+  if (state.disconnecting) return;
   connectionGeneration++;
   currentServerForRecovery = null;
   resumeRecoveryInFlight = false;
   stopTunnelHealthCheck();
   stopPolling();
-  setState({ connecting: false });
+  statsSessionEnd();
+  setState({
+    connected: false,
+    connecting: false,
+    disconnecting: true,
+    sessionStartTime: null,
+    sessionBytes: 0,
+  });
   try {
     await engineStop();
   } finally {
-    statsSessionEnd();
     setState({
       connected: false,
       connecting: false,
+      disconnecting: false,
       sessionStartTime: null,
       sessionBytes: 0,
     });
@@ -282,7 +299,7 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
   console.info(`[VPN] system resume detected after ${Math.round(gapMs / 1000)}s, restarting tunnel`);
   stopTunnelHealthCheck();
   stopPolling();
-  setState({ connected: false, connecting: true, lastError: null });
+  setState({ connected: false, connecting: true, disconnecting: false, lastError: null });
 
   try {
     await engineStop().catch((e) => {
@@ -295,7 +312,7 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (gen === connectionGeneration) {
-      setState({ connected: false, connecting: false, lastError: msg });
+      setState({ connected: false, connecting: false, disconnecting: false, lastError: msg });
     }
   } finally {
     resumeRecoveryInFlight = false;
@@ -323,6 +340,7 @@ async function stopVpnWithError(message: string): Promise<void> {
     setState({
       connected: false,
       connecting: false,
+      disconnecting: false,
       sessionStartTime: null,
       sessionBytes: 0,
       lastError: message,
@@ -375,6 +393,7 @@ function ensureVpnDiedListener() {
     setState({
       connected: false,
       connecting: false,
+      disconnecting: false,
       sessionStartTime: null,
       sessionBytes: 0,
       lastError: event.payload || "VPN process stopped unexpectedly",

@@ -9,6 +9,7 @@ use tokio::time::{sleep, timeout, Duration};
 
 use super::config::{self, ServerConfig, SOCKS_PORT, STATS_API_PORT};
 use super::state::{TrafficStats, VpnState};
+use super::{ConnectAttempt, CONNECT_CANCELLED};
 
 // ── TUN / routing constants (Linux) ───────────────────────────────
 const TUN_NAME: &str = "tobe0";
@@ -22,6 +23,7 @@ const FWMARK: &str = "0x1";
 // or a user dismissing the prompt by ignoring it can pin the UI in
 // "Connecting" indefinitely.
 const PKEXEC_TIMEOUT: Duration = Duration::from_secs(60);
+const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
 
 // Path of the installed polkit helper. When present, pkexec invocations match
 // the app.tobevpn.network policy and run without repeated password prompts.
@@ -100,6 +102,7 @@ fn shell_escape(s: &str) -> String {
 async fn run_with_timeout_and_env(
     mut cmd: Command,
     timeout_dur: Duration,
+    attempt: Option<&ConnectAttempt>,
 ) -> Result<std::process::Output, String> {
     for var in &[
         "DISPLAY",
@@ -111,14 +114,34 @@ async fn run_with_timeout_and_env(
             cmd.env(var, val);
         }
     }
-    let fut = cmd.output();
-    match timeout(timeout_dur, fut).await {
-        Ok(Ok(out)) => Ok(out),
-        Ok(Err(e)) => Err(format!("spawn failed: {e}")),
-        Err(_) => Err(format!(
-            "command timed out after {}s (polkit agent unresponsive?)",
-            timeout_dur.as_secs()
-        )),
+    // Dropping an output future normally leaves the spawned child running.
+    // For a cancelled/expired privileged start that can later install routes
+    // after the UI already says it is off, so require drop to kill the child.
+    cmd.kill_on_drop(true);
+    let output = cmd.output();
+    tokio::pin!(output);
+    let deadline = sleep(timeout_dur);
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            result = &mut output => {
+                return result.map_err(|e| format!("spawn failed: {e}"));
+            }
+            _ = &mut deadline => {
+                return Err(format!(
+                    "command timed out after {}s (polkit agent unresponsive?)",
+                    timeout_dur.as_secs()
+                ));
+            }
+            _ = async {
+                if let Some(attempt) = attempt {
+                    attempt.cancelled().await;
+                }
+            }, if attempt.is_some() => {
+                return Err(CONNECT_CANCELLED.into());
+            }
+        }
     }
 }
 
@@ -212,32 +235,15 @@ impl VpnManager {
     }
 
     /// Start full VPN: xray-core → tun2socks → routing.
-    pub async fn start(&self, server: ServerConfig) -> Result<(), String> {
+    pub async fn start(
+        &self,
+        server: ServerConfig,
+        attempt: &ConnectAttempt,
+    ) -> Result<(), String> {
+        attempt.ensure_active()?;
         eprintln!("══════════════════════════════════════════════════");
         eprintln!("[VPN] START called");
-        eprintln!(
-            "[VPN] Server: {}:{} uuid={}",
-            server.address,
-            server.port,
-            &server.uuid[..8]
-        );
-        eprintln!(
-            "[VPN] Network: {} | Security: {} | SNI: {}",
-            server.network, server.security, server.sni
-        );
-        eprintln!(
-            "[VPN] Flow: {} | Fingerprint: {}",
-            server.flow, server.fingerprint
-        );
-        eprintln!(
-            "[VPN] PublicKey: {} | ShortId: {}",
-            server.public_key, server.short_id
-        );
-        eprintln!(
-            "[VPN] Path: {} | Mode: {} | SpX: {}",
-            server.path, server.mode, server.spx
-        );
-        eprintln!("[VPN] bin_dir: {:?}", self.bin_dir);
+        eprintln!("[VPN] Server configuration loaded");
 
         // If a previous session is still active or stuck in Connecting,
         // tear it down first so server-switching works seamlessly (matches phone).
@@ -259,12 +265,13 @@ impl VpnManager {
             _ => {}
         }
 
+        attempt.ensure_active()?;
         self.set_state(VpnState::Connecting).await;
         eprintln!("[VPN] State -> Connecting");
 
         // Pre-resolve server domain to IPv4 BEFORE TUN goes up, so xray never
         // has to do DNS through its own tunnel (which would loop via TUN).
-        let server_ip = match Self::resolve_server_ip(&server.address).await {
+        let server_ip = match Self::resolve_server_ip(&server.address, attempt).await {
             Ok(ip) => ip,
             Err(e) => {
                 eprintln!("[VPN] ERROR: pre-resolve failed: {e}");
@@ -272,13 +279,17 @@ impl VpnManager {
                 return Err(e);
             }
         };
-        eprintln!("[VPN] Pre-resolved {} -> {}", server.address, server_ip);
+        eprintln!("[VPN] Server address resolved");
+        if attempt.is_cancelled() {
+            self.set_state(VpnState::Disconnected).await;
+            return Err(CONNECT_CANCELLED.into());
+        }
 
         // Rewrite address to IP. SNI (server.sni) keeps the domain for Reality/TLS.
         let mut server = server;
         if server.sni.is_empty() && server.address.parse::<std::net::IpAddr>().is_err() {
             server.sni = server.address.clone();
-            eprintln!("[VPN] SNI was empty, using domain '{}' as SNI", server.sni);
+            eprintln!("[VPN] Filled missing SNI from server address");
         }
         server.address = server_ip.clone();
 
@@ -288,14 +299,14 @@ impl VpnManager {
         // the subscription.
         let config_json = config::build_xray_config(&server);
         let config_path = cache_dir().join("xray.json");
-        eprintln!(
-            "[VPN] Writing xray config to {:?} ({} bytes)",
-            config_path,
-            config_json.len()
-        );
+        eprintln!("[VPN] Writing xray config ({} bytes)", config_json.len());
         write_secure(&config_path, config_json.as_bytes())
             .map_err(|e| format!("Failed to write xray config: {e}"))?;
         eprintln!("[VPN] Config written OK (mode 0600)");
+        if attempt.is_cancelled() {
+            self.set_state(VpnState::Disconnected).await;
+            return Err(CONNECT_CANCELLED.into());
+        }
 
         // xray needs geoip.dat/geosite.dat
         let asset_dir = {
@@ -347,20 +358,29 @@ impl VpnManager {
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("[xray-stderr] {}", line);
+                while let Ok(Some(_line)) = lines.next_line().await {
+                    eprintln!("[xray] diagnostic output received");
                 }
             });
         }
 
         *self.xray_process.lock().await = Some(xray_child);
+        if attempt.is_cancelled() {
+            self.force_stop().await;
+            self.set_state(VpnState::Disconnected).await;
+            return Err(CONNECT_CANCELLED.into());
+        }
 
         // 3. Wait for SOCKS port to be ready
         eprintln!("[VPN] Waiting for SOCKS port {} ...", SOCKS_PORT);
-        if let Err(e) = wait_for_port(SOCKS_PORT, Duration::from_secs(10)).await {
+        if let Err(e) = wait_for_port(SOCKS_PORT, Duration::from_secs(10), attempt).await {
             eprintln!("[VPN] ERROR: SOCKS port not ready: {e}");
             self.force_stop().await;
-            self.set_state(VpnState::Error { message: e.clone() }).await;
+            if attempt.is_cancelled() {
+                self.set_state(VpnState::Disconnected).await;
+            } else {
+                self.set_state(VpnState::Error { message: e.clone() }).await;
+            }
             return Err(e);
         }
         eprintln!("[VPN] SOCKS port {} is open", SOCKS_PORT);
@@ -403,14 +423,23 @@ impl VpnManager {
 
         // 4. Start tun2socks + routing via pkexec helper
         eprintln!("[VPN] Starting TUN setup (pkexec) ...");
-        if let Err(e) = self.start_tun(&server).await {
+        if let Err(e) = self.start_tun(&server, attempt).await {
             eprintln!("[VPN] ERROR: TUN setup failed: {e}");
             self.force_stop().await;
-            self.set_state(VpnState::Error { message: e.clone() }).await;
+            if attempt.is_cancelled() {
+                self.set_state(VpnState::Disconnected).await;
+            } else {
+                self.set_state(VpnState::Error { message: e.clone() }).await;
+            }
             return Err(e);
         }
         eprintln!("[VPN] TUN setup OK");
 
+        if attempt.is_cancelled() {
+            self.force_stop().await;
+            self.set_state(VpnState::Disconnected).await;
+            return Err(CONNECT_CANCELLED.into());
+        }
         self.set_state(VpnState::Connected).await;
         eprintln!("[VPN] State -> Connected");
 
@@ -558,23 +587,36 @@ impl VpnManager {
     }
 
     /// Resolve server hostname to IP (needed for bypass route).
-    async fn resolve_server_ip(address: &str) -> Result<String, String> {
+    async fn resolve_server_ip(address: &str, attempt: &ConnectAttempt) -> Result<String, String> {
         if address.parse::<std::net::IpAddr>().is_ok() {
             return Ok(address.to_string());
         }
-        let addrs = tokio::net::lookup_host(format!("{}:0", address))
-            .await
-            .map_err(|e| format!("DNS resolve failed for {}: {}", address, e))?;
+        let lookup = timeout(
+            DNS_RESOLVE_TIMEOUT,
+            tokio::net::lookup_host(format!("{}:0", address)),
+        );
+        tokio::pin!(lookup);
+        let addrs = tokio::select! {
+            result = &mut lookup => result
+                .map_err(|_| "DNS resolve timed out".to_string())?
+                .map_err(|e| format!("DNS resolve failed: {}", e))?,
+            _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
+        };
         for addr in addrs {
             if addr.is_ipv4() {
                 return Ok(addr.ip().to_string());
             }
         }
-        Err(format!("No IPv4 address found for {}", address))
+        Err("No IPv4 address found for server".into())
     }
 
     /// Start tun2socks and configure routing.
-    async fn start_tun(&self, server: &ServerConfig) -> Result<(), String> {
+    async fn start_tun(
+        &self,
+        server: &ServerConfig,
+        attempt: &ConnectAttempt,
+    ) -> Result<(), String> {
+        attempt.ensure_active()?;
         let tun2socks_bin = self.resolve_bin("tun2socks");
         eprintln!(
             "[TUN] tun2socks binary: {:?} (exists: {})",
@@ -584,7 +626,7 @@ impl VpnManager {
 
         // server.address is already the pre-resolved IP (set in start()).
         let server_ip = server.address.clone();
-        eprintln!("[TUN] Using pre-resolved server IP: {}", server_ip);
+        eprintln!("[TUN] Using resolved bypass address");
 
         // Detect dev builds: cargo lays sidecars under target/{debug,release}/,
         // never under one of the helper's allowed production prefixes
@@ -602,7 +644,7 @@ impl VpnManager {
             // Auto-install the polkit helper on first run (one pkexec prompt, ever).
             // Also re-installs if the embedded helper differs from what's on disk
             // (e.g. after an app update).
-            match Self::ensure_helper_installed().await {
+            match Self::ensure_helper_installed(attempt).await {
                 Ok(true) => eprintln!("[TUN] Polkit helper ready (installed/up-to-date)"),
                 Ok(false) => eprintln!(
                     "[TUN] Polkit helper install was skipped/failed — falling back to inline pkexec"
@@ -611,11 +653,15 @@ impl VpnManager {
                     eprintln!("[TUN] Helper install error: {e} — falling back to inline pkexec")
                 }
             }
+            attempt.ensure_active()?;
 
             // Prefer the installed polkit helper — passwordless via app.tobevpn.network policy.
             if std::path::Path::new(POLKIT_HELPER).exists() {
                 eprintln!("[TUN] Using polkit helper at {}", POLKIT_HELPER);
-                match self.start_tun_via_helper(&tun2socks_bin, &server_ip).await {
+                match self
+                    .start_tun_via_helper(&tun2socks_bin, &server_ip, attempt)
+                    .await
+                {
                     Ok(()) => return Ok(()),
                     Err(e) if e.contains("path not in allowed prefix") => {
                         // Helper installed by a different (production) build
@@ -645,10 +691,8 @@ impl VpnManager {
 set -e
 
 echo "[TUN-SCRIPT] Starting..."
-echo "[TUN-SCRIPT] tun2socks: {tun2socks}"
 echo "[TUN-SCRIPT] TUN device: {tun}"
 echo "[TUN-SCRIPT] SOCKS port: {socks_port}"
-echo "[TUN-SCRIPT] Server IP: {server_ip}"
 
 # 0. Clean up leftovers from previous run
 echo "[TUN-SCRIPT] Cleaning up leftovers..."
@@ -679,7 +723,7 @@ echo "[TUN-SCRIPT] Cleanup done"
 DEFAULT_LINE=$(ip route show default | head -1)
 DEFAULT_GW=$(echo "$DEFAULT_LINE" | awk '{{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}}')
 DEFAULT_DEV=$(echo "$DEFAULT_LINE" | awk '{{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}}')
-echo "[TUN-SCRIPT] Default route: gw='$DEFAULT_GW' dev='$DEFAULT_DEV'"
+echo "[TUN-SCRIPT] Default route detected"
 echo "${{DEFAULT_GW:-on-link}} $DEFAULT_DEV" > /tmp/tobevpn_orig_route
 
 if [ -z "$DEFAULT_DEV" ]; then
@@ -726,10 +770,10 @@ echo "[TUN-SCRIPT] TUN is UP"
 
 # 4. Bypass route for VPN server IP in table 100
 if [ -n "$DEFAULT_GW" ]; then
-    echo "[TUN-SCRIPT] Adding bypass route: {server_ip}/32 via $DEFAULT_GW dev $DEFAULT_DEV table {table}"
+    echo "[TUN-SCRIPT] Adding bypass route"
     ip route add {server_ip}/32 via $DEFAULT_GW dev $DEFAULT_DEV table {table}
 else
-    echo "[TUN-SCRIPT] Adding on-link bypass route: {server_ip}/32 dev $DEFAULT_DEV scope link table {table}"
+    echo "[TUN-SCRIPT] Adding on-link bypass route"
     ip route add {server_ip}/32 dev $DEFAULT_DEV scope link table {table}
 fi
 echo "[TUN-SCRIPT] Bypass route added"
@@ -778,25 +822,23 @@ echo "[TUN-SCRIPT] Done!"
         let script_path = cache_dir().join("start_tun.sh");
         write_secure(&script_path, script.as_bytes())
             .map_err(|e| format!("Failed to write TUN script: {e}"))?;
-        eprintln!("[TUN] Script written to {:?} (mode 0600)", script_path);
+        eprintln!("[TUN] Privileged setup script written (mode 0600)");
 
-        eprintln!("[TUN] Running pkexec bash {:?} ...", script_path);
+        eprintln!("[TUN] Running privileged setup");
+        attempt.ensure_active()?;
         let mut cmd = Command::new("pkexec");
         cmd.arg("bash").arg(&script_path);
-        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT)
+        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, Some(attempt))
             .await
             .map_err(|e| {
                 eprintln!("[TUN] ERROR: pkexec failed: {e}");
                 e
             })?;
+        attempt.ensure_active()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!("[TUN] pkexec exit code: {}", output.status);
-        eprintln!("[TUN] pkexec stdout:\n{}", stdout);
-        if !stderr.is_empty() {
-            eprintln!("[TUN] pkexec stderr:\n{}", stderr);
-        }
 
         if !output.status.success() {
             return Err(format!(
@@ -830,7 +872,7 @@ echo "[TUN-SCRIPT] Done!"
     /// where another local user can swap the staged file's contents and end
     /// up with their own script installed at /usr/local/bin/tobevpn-helper.sh
     /// — passwordlessly callable as root forever after.
-    async fn ensure_helper_installed() -> Result<bool, String> {
+    async fn ensure_helper_installed(attempt: &ConnectAttempt) -> Result<bool, String> {
         // The .deb postinst (and the NSIS installer on Windows) drops both
         // files in their final locations as part of installing the app, so
         // by the time the user starts a session the helper is already on
@@ -906,7 +948,7 @@ echo "INSTALLED"
 
         let mut cmd = Command::new("pkexec");
         cmd.arg("bash").arg(&staged_install);
-        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT).await;
+        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, Some(attempt)).await;
 
         let _ = std::fs::remove_file(&staged_install);
         let _ = std::fs::remove_file(&staged_helper);
@@ -937,21 +979,20 @@ echo "INSTALLED"
         &self,
         tun2socks_bin: &PathBuf,
         server_ip: &str,
+        attempt: &ConnectAttempt,
     ) -> Result<(), String> {
+        attempt.ensure_active()?;
         let mut cmd = Command::new("pkexec");
         cmd.arg(POLKIT_HELPER)
             .arg("start")
             .arg(tun2socks_bin)
             .arg(server_ip);
-        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT).await?;
+        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, Some(attempt)).await?;
+        attempt.ensure_active()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!("[TUN] helper exit: {}", output.status);
-        eprintln!("[TUN] helper stdout:\n{}", stdout);
-        if !stderr.is_empty() {
-            eprintln!("[TUN] helper stderr:\n{}", stderr);
-        }
 
         if !output.status.success() {
             return Err(format!(
@@ -984,14 +1025,20 @@ echo "INSTALLED"
             eprintln!("[VPN] Using polkit helper for cleanup");
             let mut cmd = Command::new("pkexec");
             cmd.arg(POLKIT_HELPER).arg("stop");
-            match run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT).await {
-                Ok(out) => eprintln!(
-                    "[VPN] helper cleanup exit: {}, stdout: {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stdout).trim()
-                ),
-                Err(e) => eprintln!("[VPN] helper cleanup error: {e}"),
-            }
+            let helper_stopped = match run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, None).await {
+                Ok(out) => {
+                    eprintln!(
+                        "[VPN] helper cleanup exit: {}, stdout: {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stdout).trim()
+                    );
+                    out.status.success()
+                }
+                Err(e) => {
+                    eprintln!("[VPN] helper cleanup error: {e}");
+                    false
+                }
+            };
 
             // Kill xray
             if let Some(mut child) = self.xray_process.lock().await.take() {
@@ -999,10 +1046,14 @@ echo "INSTALLED"
                 let _ = child.wait().await;
             }
             let _ = std::fs::remove_file(cache_dir().join("xray.json"));
-            eprintln!("[VPN] force_stop done (helper)");
-            return;
+            if helper_stopped {
+                eprintln!("[VPN] force_stop done (helper)");
+                return;
+            }
+            eprintln!("[VPN] Helper cleanup failed; trying inline cleanup");
+        } else {
+            eprintln!("[VPN] Helper not installed; falling back to inline pkexec cleanup");
         }
-        eprintln!("[VPN] Helper not installed — falling back to inline pkexec cleanup");
 
         let cleanup_script = format!(
             r#"#!/bin/bash
@@ -1071,13 +1122,9 @@ echo "STOPPED"
 
         let mut cleanup_cmd = Command::new("pkexec");
         cleanup_cmd.arg("bash").arg(&script_path);
-        let result = run_with_timeout_and_env(cleanup_cmd, PKEXEC_TIMEOUT).await;
+        let result = run_with_timeout_and_env(cleanup_cmd, PKEXEC_TIMEOUT, None).await;
         match &result {
-            Ok(out) => eprintln!(
-                "[VPN] cleanup pkexec exit: {}, stdout: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stdout).trim()
-            ),
+            Ok(out) => eprintln!("[VPN] cleanup pkexec exit: {}", out.status),
             Err(e) => eprintln!("[VPN] cleanup pkexec error: {e}"),
         }
 
@@ -1097,10 +1144,15 @@ echo "STOPPED"
 }
 
 /// Wait until a TCP port becomes reachable.
-async fn wait_for_port(port: u16, timeout: Duration) -> Result<(), String> {
+async fn wait_for_port(
+    port: u16,
+    timeout: Duration,
+    attempt: &ConnectAttempt,
+) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut attempts = 0u32;
     loop {
+        attempt.ensure_active()?;
         attempts += 1;
         if tokio::time::Instant::now() >= deadline {
             eprintln!("[VPN] wait_for_port: timeout after {} attempts", attempts);

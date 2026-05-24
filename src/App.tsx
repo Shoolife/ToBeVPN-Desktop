@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { getCurrentWindow, LogicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
+import OnboardingScreen from "./screens/OnboardingScreen";
 import PairingScreen from "./screens/PairingScreen";
 import HomeScreen from "./screens/HomeScreen";
 import SettingsScreen from "./screens/SettingsScreen";
@@ -17,7 +18,25 @@ import { connectVpn, getVpnRuntime } from "./session/vpnState";
 import { clearLastServer, loadLastServer, saveLastServer } from "./session/lastServer";
 import "./App.css";
 
-export type Screen = "splash" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices";
+export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices";
+
+const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
+
+function hasSeenOnboarding(): boolean {
+  try {
+    return localStorage.getItem(ONBOARDING_SEEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markOnboardingSeen(): void {
+  try {
+    localStorage.setItem(ONBOARDING_SEEN_KEY, "1");
+  } catch {
+    // Unavailable storage only means onboarding may be shown again next start.
+  }
+}
 
 export interface SelectedServer {
   name: string;
@@ -83,10 +102,21 @@ export default function App() {
   navigateRef.current = navigate;
 
   const handleSplashDone = useCallback(() => {
-    navigateRef.current(isPaired() ? "home" : "pairing", "none");
+    if (isPaired()) {
+      markOnboardingSeen();
+      navigateRef.current("home", "none");
+    } else {
+      navigateRef.current(hasSeenOnboarding() ? "pairing" : "onboarding", "none");
+    }
+  }, []);
+
+  const handleOnboardingComplete = useCallback(() => {
+    markOnboardingSeen();
+    navigateRef.current("pairing", "forward");
   }, []);
 
   const handlePaired = useCallback(() => {
+    markOnboardingSeen();
     navigateRef.current("home", "forward");
     startDeviceLinkPolling();
   }, []);
@@ -206,6 +236,8 @@ export default function App() {
     switch (screen) {
       case "splash":
         return <SplashScreen onDone={handleSplashDone} />;
+      case "onboarding":
+        return <OnboardingScreen onContinue={handleOnboardingComplete} />;
       case "pairing":
         return <PairingScreen onPaired={handlePaired} />;
       case "home":
@@ -321,7 +353,7 @@ export default function App() {
             sits outside the .app container's overflow:hidden and the
             screen-transition transforms — both create new containing
             blocks that break position:fixed under WebKitGTK on Linux. */}
-        {currentScreen !== "splash" && currentScreen !== "pairing" &&
+        {currentScreen !== "splash" && currentScreen !== "onboarding" && currentScreen !== "pairing" &&
           (() => {
             const target = document.getElementById("overlay-root") ?? document.body;
             return createPortal(

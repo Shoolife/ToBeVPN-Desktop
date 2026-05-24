@@ -117,6 +117,20 @@
   flex-shrink: 0;
 }
 
+.sub-current__loading,
+.sub-sheet__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #A8A8AE;
+  font-size: 12px;
+}
+
+.sub-sheet__loading {
+  height: 76px;
+}
+
 .sub-current__sep {
   font-size: 22px;
   font-weight: 700;

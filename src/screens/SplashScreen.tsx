@@ -6,6 +6,7 @@ import "./SplashScreen.css";
 export default function SplashScreen({ onDone }: { onDone: () => void }) {
   const onDoneRef = useRef(onDone);
   const [slowStart, setSlowStart] = useState(false);
+  const [leaving, setLeaving] = useState(false);
 
   useEffect(() => {
     onDoneRef.current = onDone;
@@ -13,6 +14,8 @@ export default function SplashScreen({ onDone }: { onDone: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
+    let leaveTimer: number | null = null;
+    let doneTimer: number | null = null;
     const slowStartTimer = window.setTimeout(() => {
       if (!cancelled) setSlowStart(true);
     }, 2200);
@@ -24,20 +27,26 @@ export default function SplashScreen({ onDone }: { onDone: () => void }) {
       } catch (error) {
         console.error("[splash] initializeAuthSession failed:", error);
       }
-      const remainingDelay = Math.max(0, 900 - (Date.now() - startedAt));
-      window.setTimeout(() => {
-        if (!cancelled) onDoneRef.current();
+      const remainingDelay = Math.max(0, SPLASH_HOLD_MS - (Date.now() - startedAt));
+      leaveTimer = window.setTimeout(() => {
+        if (cancelled) return;
+        setLeaving(true);
+        doneTimer = window.setTimeout(() => {
+          if (!cancelled) onDoneRef.current();
+        }, SPLASH_EXIT_MS);
       }, remainingDelay);
     })();
 
     return () => {
       cancelled = true;
       window.clearTimeout(slowStartTimer);
+      if (leaveTimer !== null) window.clearTimeout(leaveTimer);
+      if (doneTimer !== null) window.clearTimeout(doneTimer);
     };
   }, []);
 
   return (
-    <div className="splash-root">
+    <div className={`splash-root ${leaving ? "splash-root--leaving" : ""}`}>
       <div className="splash-content">
         <div className="splash-shield-wrap">
           <div className="splash-glow" />
@@ -97,3 +106,6 @@ export default function SplashScreen({ onDone }: { onDone: () => void }) {
     </div>
   );
 }
+
+const SPLASH_HOLD_MS = 1600;
+const SPLASH_EXIT_MS = 400;
