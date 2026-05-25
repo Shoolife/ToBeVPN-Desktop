@@ -465,6 +465,7 @@ impl VpnManager {
     /// over a tunnel that quietly stopped forwarding traffic.
     async fn spawn_xray_watchdog(&self, gen: u64) {
         let xray_proc = self.xray_process.clone();
+        let tun2socks_pid = self.tun2socks_pid.clone();
         let state = self.state.clone();
         let session_gen = self.session_gen.clone();
         let app = self.app_handle.clone();
@@ -488,14 +489,23 @@ impl VpnManager {
                 }
                 let dead = {
                     let mut p = xray_proc.lock().await;
-                    match p.as_mut() {
+                    let xray_dead = match p.as_mut() {
                         Some(child) => match child.try_wait() {
                             Ok(Some(status)) => Some(format!("xray exited: {status}")),
                             Ok(None) => None,
                             Err(e) => Some(format!("xray probe failed: {e}")),
                         },
                         None => Some("xray child handle gone".to_string()),
-                    }
+                    };
+                    let t2s_dead = {
+                        let pid = *tun2socks_pid.lock().await;
+                        match pid {
+                            Some(pid) if tun2socks_process_alive(pid) => None,
+                            Some(pid) => Some(format!("tun2socks exited: pid {pid}")),
+                            None => Some("tun2socks pid missing".to_string()),
+                        }
+                    };
+                    xray_dead.or(t2s_dead)
                 };
                 if let Some(msg) = dead {
                     eprintln!("[VPN-WATCHDOG] {msg} — running force_stop");
@@ -853,13 +863,12 @@ echo "[TUN-SCRIPT] Done!"
                 if let Ok(pid) = pid_str.trim().parse::<u32>() {
                     eprintln!("[TUN] tun2socks PID saved: {}", pid);
                     *self.tun2socks_pid.lock().await = Some(pid);
+                    return Ok(());
                 }
             }
-        } else {
-            eprintln!("[TUN] WARNING: 'OK <pid>' line not found in stdout");
         }
 
-        Ok(())
+        Err("TUN setup did not return tun2socks PID".into())
     }
 
     /// Install (or refresh) the polkit helper + policy so subsequent runs are
@@ -1006,10 +1015,11 @@ echo "INSTALLED"
             if let Some(pid_str) = line.strip_prefix("OK ") {
                 if let Ok(pid) = pid_str.trim().parse::<u32>() {
                     *self.tun2socks_pid.lock().await = Some(pid);
+                    return Ok(());
                 }
             }
         }
-        Ok(())
+        Err("TUN helper did not return tun2socks PID".into())
     }
 
     /// Force-stop everything: kill processes, restore routing.
@@ -1140,6 +1150,24 @@ echo "STOPPED"
         let _ = std::fs::remove_file(dir.join("start_tun.sh"));
         let _ = std::fs::remove_file(dir.join("stop_tun.sh"));
         eprintln!("[VPN] force_stop done");
+    }
+}
+
+fn tun2socks_process_alive(pid: u32) -> bool {
+    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+    if !proc_dir.exists() {
+        return false;
+    }
+
+    match std::fs::read(proc_dir.join("cmdline")) {
+        Ok(bytes) if !bytes.is_empty() => {
+            let cmdline = String::from_utf8_lossy(&bytes).replace('\0', " ");
+            cmdline.contains("tun2socks") && cmdline.contains(TUN_NAME)
+        }
+        // Some hardened systems mount /proc with hidepid. If the process dir
+        // exists but cmdline is unreadable, treat it as alive to avoid a false
+        // disconnect loop; the HTTP tunnel health check still catches stalls.
+        Ok(_) | Err(_) => true,
     }
 }
 

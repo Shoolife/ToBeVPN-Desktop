@@ -6,24 +6,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ToBeVPN</title>
     <style>
-      html, body { background: #0d0d0d; margin: 0; height: 100%; overflow: hidden; }
-      /* Centre the fixed-layout app frame inside whatever window size the
-         user has dragged us to. body is the flex container; #scale-frame is
-         the fixed 494×895 design surface we transform-scale to fit. */
-      body { display: flex; justify-content: center; align-items: flex-start; }
-      /* The design surface is fixed at 494×895 so every screen, modal and
-         absolute-positioned element keeps its hand-tuned coordinates. We
-         only ever scale this whole box — never reflow its children. The
-         var is set by App.tsx based on window.innerHeight; defaults to 1
-         so the first paint on a normal-size monitor is correct. */
+      html, body {
+        background: #0d0d0d;
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+      body { display: block; }
+      /* The app is designed around 494x895, but the outer frame expands in
+         unscaled CSS pixels so that after transform scaling it covers the
+         whole native window. This avoids side gutters on short Windows
+         viewports instead of hiding them with a matching background color. */
       #scale-frame {
-        width: 494px;
-        height: 895px;
+        width: var(--app-frame-width, 100vw);
+        height: var(--app-frame-height, 100vh);
         background: #0d0d0d;
         transform: scale(var(--app-scale, 1));
-        transform-origin: top center;
+        transform-origin: top left;
         position: relative;
-        flex-shrink: 0;
       }
       #root { width: 100%; height: 100%; }
       /* Dedicated overlay layer for the in-app updater banner. Lives as a

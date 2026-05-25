@@ -29,9 +29,14 @@ const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
 const TUNNEL_HEALTH_RETRY_MS = 3_000;
 const TUNNEL_HEALTH_ATTEMPTS = 4;
 const TUNNEL_HEALTH_TIMEOUT_MS = 7_000;
+const TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY = 2;
 const TUNNEL_RECOVERY_RESTART_DELAY_MS = 700;
 const MAX_TUNNEL_RECOVERY_ATTEMPTS = 2;
-const TUNNEL_PROBE_URL = "https://speed.cloudflare.com/__down?bytes=1";
+const RECENT_TUNNEL_TRAFFIC_GRACE_MS = 60_000;
+const TUNNEL_PROBE_URLS = [
+  "https://speed.cloudflare.com/__down?bytes=1",
+  "https://api.github.com/zen",
+] as const;
 const SYSTEM_RESUME_GAP_MS = 60_000;
 const SYSTEM_RESUME_NETWORK_SETTLE_MS = 3_000;
 const SYSTEM_RESUME_ONLINE_WAIT_MS = 15_000;
@@ -79,6 +84,8 @@ let heartbeatCounter = 0;
 let healthTimer: number | null = null;
 let connectionGeneration = 0;
 let watchdogRecoveryAttempts = 0;
+let tunnelHealthFailedCycles = 0;
+let lastTunnelTrafficAt: number | null = null;
 let currentServerForRecovery: ServerVpnConfig | null = null;
 let resumeRecoveryInFlight = false;
 
@@ -100,6 +107,9 @@ function startPolling() {
     try {
       const stats = await getTrafficStats();
       delta = stats.uplink + stats.downlink;
+      if (delta > 0) {
+        lastTunnelTrafficAt = now;
+      }
     } catch {
       // Stats API may still be warming up after connect.
     }
@@ -217,6 +227,8 @@ async function connectVpnInternal(
       sessionStartTime: Date.now(),
       sessionBytes: 0,
     });
+    tunnelHealthFailedCycles = 0;
+    lastTunnelTrafficAt = null;
     startPolling();
     startTunnelHealthCheck(gen);
   } catch (e) {
@@ -233,6 +245,8 @@ export async function disconnectVpn(): Promise<void> {
   connectionGeneration++;
   currentServerForRecovery = null;
   resumeRecoveryInFlight = false;
+  tunnelHealthFailedCycles = 0;
+  lastTunnelTrafficAt = null;
   stopTunnelHealthCheck();
   stopPolling();
   statsSessionEnd();
@@ -278,9 +292,18 @@ async function runTunnelHealthLoop(gen: number): Promise<void> {
     if (gen !== connectionGeneration || !state.connected) return;
     if (healthy) {
       watchdogRecoveryAttempts = 0;
+      tunnelHealthFailedCycles = 0;
+    } else if (hasRecentTunnelTraffic()) {
+      tunnelHealthFailedCycles = 0;
     } else {
-      await recoverTunnelAfterHealthFailure(gen);
-      return;
+      tunnelHealthFailedCycles++;
+      if (tunnelHealthFailedCycles < TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY) {
+        console.warn("[VPN] tunnel health probe failed; waiting for a second failed cycle");
+      } else {
+        tunnelHealthFailedCycles = 0;
+        await recoverTunnelAfterHealthFailure(gen);
+        return;
+      }
     }
   }
 
@@ -312,6 +335,7 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
   if (!server || (!state.connected && !state.connecting)) return;
 
   resumeRecoveryInFlight = true;
+  tunnelHealthFailedCycles = 0;
   const gen = ++connectionGeneration;
   console.info(`[VPN] system resume detected after ${Math.round(gapMs / 1000)}s, restarting tunnel`);
   stopTunnelHealthCheck();
@@ -348,6 +372,8 @@ async function stopVpnWithError(message: string): Promise<void> {
   connectionGeneration++;
   currentServerForRecovery = null;
   resumeRecoveryInFlight = false;
+  tunnelHealthFailedCycles = 0;
+  lastTunnelTrafficAt = null;
   stopTunnelHealthCheck();
   stopPolling();
   try {
@@ -374,19 +400,47 @@ async function probeTunnelWithRetries(attempts: number): Promise<boolean> {
 }
 
 async function probeTunnelOnce(): Promise<boolean> {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), TUNNEL_HEALTH_TIMEOUT_MS);
+  const controllers = TUNNEL_PROBE_URLS.map(() => new AbortController());
+  const timeoutId = window.setTimeout(() => {
+    controllers.forEach((controller) => controller.abort());
+  }, TUNNEL_HEALTH_TIMEOUT_MS);
   try {
-    const response = await fetch(TUNNEL_PROBE_URL, {
-      cache: "no-store",
-      signal: controller.signal,
+    return await new Promise<boolean>((resolve) => {
+      let pending = TUNNEL_PROBE_URLS.length;
+      let settled = false;
+
+      const finish = (healthy: boolean) => {
+        if (settled) return;
+        settled = true;
+        controllers.forEach((controller) => controller.abort());
+        resolve(healthy);
+      };
+
+      TUNNEL_PROBE_URLS.forEach((url, index) => {
+        fetch(url, {
+          cache: "no-store",
+          signal: controllers[index].signal,
+        })
+          // Any HTTP response means routing, DNS and TLS reached the internet.
+          .then(() => finish(true))
+          .catch(() => {
+            pending--;
+            if (pending <= 0) finish(false);
+          });
+      });
     });
-    return response.ok;
   } catch {
     return false;
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function hasRecentTunnelTraffic(): boolean {
+  return (
+    lastTunnelTrafficAt !== null &&
+    Date.now() - lastTunnelTrafficAt <= RECENT_TUNNEL_TRAFFIC_GRACE_MS
+  );
 }
 
 export function clearVpnError() {
@@ -405,6 +459,8 @@ function ensureVpnDiedListener() {
     connectionGeneration++;
     currentServerForRecovery = null;
     resumeRecoveryInFlight = false;
+    tunnelHealthFailedCycles = 0;
+    lastTunnelTrafficAt = null;
     stopTunnelHealthCheck();
     stopPolling();
     setState({

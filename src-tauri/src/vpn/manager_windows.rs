@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -59,8 +59,8 @@ fn log_path() -> PathBuf {
 fn write_log_line(msg: &str) {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
+        .unwrap_or_else(|_| "0.000".into());
     // Plain eprintln, NOT log_win! — calling the macro here would recurse.
     eprintln!("{}", msg);
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -259,6 +259,37 @@ impl VpnManager {
             return Err(e);
         }
 
+        {
+            let mut proc = self.xray_process.lock().await;
+            if let Some(ref mut child) = *proc {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        *proc = None;
+                        drop(proc);
+                        self.force_stop().await;
+                        let msg = format!("xray exited immediately with {status}");
+                        self.set_state(VpnState::Error {
+                            message: msg.clone(),
+                        })
+                        .await;
+                        return Err(msg);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        *proc = None;
+                        drop(proc);
+                        self.force_stop().await;
+                        let msg = format!("xray process check failed: {e}");
+                        self.set_state(VpnState::Error {
+                            message: msg.clone(),
+                        })
+                        .await;
+                        return Err(msg);
+                    }
+                }
+            }
+        }
+
         // 4. TUN + routes
         if let Err(e) = self.start_tun(&server_ip, attempt).await {
             self.force_stop().await;
@@ -447,19 +478,9 @@ impl VpnManager {
             attempt,
         )
         .await;
-        let _ = run_cmd(
-            "netsh",
-            &[
-                "interface",
-                "ipv4",
-                "set",
-                "address",
-                &format!("name={}", WINTUN_ADAPTER),
-                "source=dhcp",
-            ],
-            attempt,
-        )
-        .await;
+        // Do not switch Wintun to DHCP here: there is no DHCP server behind
+        // this adapter, and Windows can spend seconds probing before we set
+        // the static tunnel address immediately below.
     }
 
     async fn set_wintun_ipv4_address(&self, attempt: &ConnectAttempt) -> Result<(), String> {
@@ -615,24 +636,24 @@ impl VpnManager {
         // a flaky adapter_exists never extends the loop past the deadline.
         let adapter_deadline_secs = 15u64;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(adapter_deadline_secs);
-        let mut found = false;
+        let mut wintun_idx: Option<String> = None;
         let mut iter = 0;
         while tokio::time::Instant::now() < deadline {
             attempt.ensure_active()?;
             iter += 1;
-            if adapter_exists(WINTUN_ADAPTER).await {
-                found = true;
+            if let Some(idx) = get_adapter_index(WINTUN_ADAPTER).await {
+                wintun_idx = Some(idx);
                 break;
             }
             log_win!("[TUN-WIN] adapter not ready yet (iter {iter})");
             sleep(Duration::from_millis(500)).await;
         }
-        if !found {
+        let Some(wintun_idx) = wintun_idx else {
             return Err(format!(
                 "Wintun adapter '{}' did not appear within {}s",
                 WINTUN_ADAPTER, adapter_deadline_secs
             ));
-        }
+        };
         log_win!("[TUN-WIN] wintun adapter ready (after {iter} polls)");
         attempt.ensure_active()?;
 
@@ -697,13 +718,6 @@ impl VpnManager {
         // `netsh set address ... 198.18.0.1` may install a default route
         // whose effective metric is higher than the real adapter's, leaving
         // browser traffic on the LAN interface.
-        let wintun_idx = match get_adapter_index(WINTUN_ADAPTER).await {
-            Some(i) => i,
-            None => {
-                log_win!("[TUN-WIN] could not resolve wintun ifIndex; skipping split-default");
-                return Ok(());
-            }
-        };
         log_win!(
             "[TUN-WIN] wintun ifIndex={}, installing split-default",
             wintun_idx
@@ -941,6 +955,7 @@ async fn is_elevated() -> bool {
 
 async fn run_cmd(cmd: &str, args: &[&str], attempt: Option<&ConnectAttempt>) -> Result<(), String> {
     log_win!("[CMD] {}", cmd);
+    let started = Instant::now();
     let mut command = Command::new(cmd);
     command
         .args(args)
@@ -969,18 +984,20 @@ async fn run_cmd(cmd: &str, args: &[&str], attempt: Option<&ConnectAttempt>) -> 
             return Err(CONNECT_CANCELLED.into());
         }
     };
+    let elapsed_ms = started.elapsed().as_millis();
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(format!(
-            "{} exit {}: {}{}",
+            "{} exit {} after {}ms: {}{}",
             cmd,
             output.status,
+            elapsed_ms,
             stderr.trim(),
             stdout.trim()
         ));
     }
-    log_win!("[CMD OK] {}", cmd);
+    log_win!("[CMD OK] {} ({}ms)", cmd, elapsed_ms);
     Ok(())
 }
 
@@ -1124,7 +1141,7 @@ async fn get_adapter_index(name: &str) -> Option<String> {
         .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
         .creation_flags(CREATE_NO_WINDOW)
         .output();
-    match timeout(SUBPROC_TIMEOUT, fut).await {
+    match timeout(POLL_TIMEOUT, fut).await {
         Ok(Ok(o)) if o.status.success() => {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if s.is_empty() {
@@ -1155,29 +1172,7 @@ async fn adapter_has_ipv4_address(name: &str, ip: &str) -> bool {
 }
 
 async fn adapter_exists(name: &str) -> bool {
-    let fut = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!(
-                "if (Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue) {{ Write-Host found }}",
-                name
-            ),
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    match timeout(POLL_TIMEOUT, fut).await {
-        Ok(Ok(o)) => o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "found",
-        Ok(Err(e)) => {
-            log_win!("[adapter_exists] spawn err: {e}");
-            false
-        }
-        Err(_) => {
-            log_win!("[adapter_exists] timed out");
-            false
-        }
-    }
+    get_adapter_index(name).await.is_some()
 }
 
 async fn wait_for_port(

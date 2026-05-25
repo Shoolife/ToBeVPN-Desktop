@@ -156,31 +156,25 @@ export default function App() {
   }, []);
 
   // Adaptive scaling for laptops whose screen height is below the design
-  // target of 895px (1366×768 / 1280×720 / netbooks). On those screens
-  // a fixed 494×895 window would clip past the bottom of the desktop.
-  // We do two things on mount:
-  //   1. Shrink the window itself proportionally so it fits in the
-  //      monitor's working area (minus a 80px allowance for the taskbar
-  //      and chrome).
-  //   2. Set the CSS `--app-scale` variable on :root so the
-  //      #scale-frame in index.html visually shrinks the design surface
-  //      to match. We also subscribe to the window's resize event so a
-  //      manual drag updates the scale live.
+  // target of 895px (1366x768 / 1280x720 / netbooks). The CSS frame is
+  // deliberately larger in unscaled pixels when needed, so after transform
+  // scaling it covers the whole native window instead of leaving side gutters.
   useEffect(() => {
     const DESIGN_W = 494;
     const DESIGN_H = 895;
     const MIN_SCALE = 0.55;
     const SCREEN_MARGIN_PX = 80;
 
-    const apply = (scale: number) => {
+    const applyFrameLayout = () => {
+      const viewportW = Math.max(1, window.innerWidth);
+      const viewportH = Math.max(1, window.innerHeight);
+      const wScale = viewportW / DESIGN_W;
+      const hScale = viewportH / DESIGN_H;
+      const scale = Math.min(wScale, hScale);
       const clamped = Math.min(1, Math.max(MIN_SCALE, scale));
       document.documentElement.style.setProperty("--app-scale", String(clamped));
-    };
-
-    const recomputeFromInnerSize = () => {
-      const wScale = window.innerWidth / DESIGN_W;
-      const hScale = window.innerHeight / DESIGN_H;
-      apply(Math.min(wScale, hScale));
+      document.documentElement.style.setProperty("--app-frame-width", `${viewportW / clamped}px`);
+      document.documentElement.style.setProperty("--app-frame-height", `${viewportH / clamped}px`);
     };
 
     let unlisten: (() => void) | undefined;
@@ -205,20 +199,20 @@ export default function App() {
         }
       } catch {
         // primaryMonitor() can fail on headless / unusual setups —
-        // recomputeFromInnerSize below still produces a sensible scale
+        // applyFrameLayout below still produces a sensible scale
         // from whatever size the window ended up at.
       }
       if (cancelled) return;
-      recomputeFromInnerSize();
+      applyFrameLayout();
       // Fire a second pass on the next frame: setSize() resolves before
       // the webview has finished reflowing, so window.innerHeight isn't
       // yet the new value and our first scale computation would lag by
       // one paint.
-      requestAnimationFrame(() => { if (!cancelled) recomputeFromInnerSize(); });
+      requestAnimationFrame(() => { if (!cancelled) applyFrameLayout(); });
 
       try {
         const win = getCurrentWindow();
-        const handle = await win.onResized(() => recomputeFromInnerSize());
+        const handle = await win.onResized(() => applyFrameLayout());
         if (cancelled) handle();
         else unlisten = handle;
       } catch {

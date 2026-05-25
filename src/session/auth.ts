@@ -508,18 +508,17 @@ export function startPendingPurchaseRefreshIfNeeded(): void {
 
 /**
  * Bare HWID-marker ping — used by the connect path so the panel registers
- * the device on every VPN start. Skips the JSON
- * /api/panel/sub/.../info call entirely; reads the subscription URL
- * from the localStorage cache populated by the most recent
- * syncSubscription. If the cache is empty (very first connect on a fresh
- * install before any sync has completed) we silently no-op — the next
- * ambient sync will populate it.
+ * the device on every VPN start. It prefers the subscription URL cached by
+ * syncSubscription, but resolves it through the JSON panel endpoint when the
+ * cache is empty. Otherwise a fresh install / startup race could connect
+ * before the access-block header is ever checked.
  */
 export async function pingHwidOnly(): Promise<boolean> {
   const shortUuid = getSession().shortUuid;
   const wasBlocked = isSubscriptionUsageBlocked(shortUuid);
-  const url = readCachedSubscriptionUrl();
-  if (!shortUuid || !url) return wasBlocked;
+  if (!shortUuid) return wasBlocked;
+  const url = await readOrFetchSubscriptionUrl(shortUuid);
+  if (!url) return wasBlocked;
   try {
     const result = await pingSubscriptionUrl(url);
     if (!result) return wasBlocked;
@@ -527,6 +526,30 @@ export async function pingHwidOnly(): Promise<boolean> {
     return result.isUsageBlocked;
   } catch {
     return wasBlocked;
+  }
+}
+
+async function readOrFetchSubscriptionUrl(shortUuid: string): Promise<string | null> {
+  const cached = readCachedSubscriptionUrl();
+  if (cached) return cached;
+  try {
+    const subInfo = (await getSubscriptionInfo(shortUuid)).response;
+    if (!subInfo.is_found || !subInfo.user) {
+      writeCachedSubscriptionUrl(null);
+      if (getSession().shortUuid === shortUuid) {
+        updateSession({
+          userPlan: "EXPIRED",
+          planExpiresAt: null,
+          trafficLimitBytes: 0,
+          trafficUsedBytes: 0,
+        });
+      }
+      return null;
+    }
+    writeCachedSubscriptionUrl(subInfo.subscription_url);
+    return subInfo.subscription_url;
+  } catch {
+    return null;
   }
 }
 
@@ -595,8 +618,10 @@ async function runSyncSubscription(): Promise<void> {
   }
   if (pingResult) {
     setSubscriptionUsageBlocked(shortUuid, pingResult.isUsageBlocked);
+    writeSubSyncState(pingResult.intervalMs);
+  } else {
+    clearSubSyncTimestamp();
   }
-  writeSubSyncState(pingResult?.intervalMs ?? null);
 
   const isActive = subUser.is_active && subUser.user_status === "ACTIVE";
   const cachedPlan = session.userPlan;
@@ -824,6 +849,7 @@ export async function saveEmail(email: string): Promise<void> {
 export async function fetchPurchasePlans(): Promise<PurchasePlansDto | null> {
   const { isLinked } = getSession();
   if (!isLinked) return null;
+  if (await pingHwidOnly().catch(() => getSubscriptionUsageBlocked())) return null;
   const res = await apiGetPurchasePlans();
   if (!res.success || !res.data) return null;
   return res.data;
@@ -919,6 +945,7 @@ export async function fetchVpnServers(): Promise<VpnServer[]> {
   const { shortUuid } = getSession();
   const debug = import.meta.env.DEV;
   if (!shortUuid) return [];
+  if (await pingHwidOnly().catch(() => getSubscriptionUsageBlocked())) return [];
 
   const subInfo = (await getSubscriptionInfo(shortUuid)).response;
   if (debug) console.log("[fetchVpnServers] is_found:", subInfo.is_found, "links count:", subInfo.links?.length ?? 0);
