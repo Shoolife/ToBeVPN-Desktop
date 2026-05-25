@@ -5,6 +5,7 @@ import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import {
   fetchPurchasePlans,
   markPendingPurchaseStarted,
+  pingHwidOnly,
   startPendingPurchaseRefreshIfNeeded,
 } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
@@ -348,12 +349,16 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     }
   };
   const canPurchase = session.isLinked && session.telegramId !== null;
-  const handleShowQr = () => {
+  const handleShowQr = async () => {
     if (!canPurchase) {
       setOpenError(t("not_authorized"));
       return;
     }
     if (!selectedRow) return;
+    if (await pingHwidOnly().catch(() => false)) {
+      onDismiss();
+      return;
+    }
     markPendingPurchaseStarted({
       baselinePlan: session.userPlan,
       baselineExpiresAt: session.planExpiresAt,

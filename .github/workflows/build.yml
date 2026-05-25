@@ -109,6 +109,8 @@ jobs:
         env:
           BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
           PANEL_HOST: ${{ secrets.PANEL_HOST }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: bash scripts/inject-backend-host.sh
 
       - name: Build Linux .deb
@@ -195,6 +197,8 @@ jobs:
         env:
           BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
           PANEL_HOST: ${{ secrets.PANEL_HOST }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: bash scripts/inject-backend-host.sh
 
       - name: Build Windows .exe (NSIS)

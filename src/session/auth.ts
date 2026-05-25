@@ -29,6 +29,7 @@ import {
   getSession,
   getSessionSecrets,
   markLinkedIdentity,
+  subscribeSession,
   updateSession,
   type Session,
   type UserPlan,
@@ -57,6 +58,7 @@ const SUB_SYNC_AT_KEY = "tobevpn_sub_sync_at_v1";
 const SUB_INTERVAL_KEY = "tobevpn_sub_interval_ms_v1";
 const SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v1";
 const BLOCKED_SUBSCRIPTION_KEY = "tobevpn_blocked_subscription_v1";
+const SUBSCRIPTION_ACCESS_EVENT = "tobevpn:subscription-access-changed";
 const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
 const PENDING_AUTH_TOKEN_KEY = "tobevpn_pending_auth_token_v1";
 // 12h matches the default surfaced in the panel's "subscription
@@ -131,6 +133,7 @@ function writeCachedSubscriptionUrl(url: string | null): void {
 }
 
 function setSubscriptionUsageBlocked(shortUuid: string, blocked: boolean): void {
+  const wasBlocked = isSubscriptionUsageBlocked(shortUuid);
   try {
     if (blocked) {
       localStorage.setItem(BLOCKED_SUBSCRIPTION_KEY, shortUuid);
@@ -139,6 +142,9 @@ function setSubscriptionUsageBlocked(shortUuid: string, blocked: boolean): void 
     }
   } catch {
     // Keep connection handling functional in webviews without persistence.
+  }
+  if (wasBlocked !== isSubscriptionUsageBlocked(shortUuid)) {
+    window.dispatchEvent(new Event(SUBSCRIPTION_ACCESS_EVENT));
   }
 }
 
@@ -149,6 +155,20 @@ function isSubscriptionUsageBlocked(shortUuid: string | null): boolean {
   } catch {
     return false;
   }
+}
+
+export function getSubscriptionUsageBlocked(): boolean {
+  return isSubscriptionUsageBlocked(getSession().shortUuid);
+}
+
+export function subscribeSubscriptionUsageBlocked(listener: () => void): () => void {
+  const onAccessChanged = () => listener();
+  window.addEventListener(SUBSCRIPTION_ACCESS_EVENT, onAccessChanged);
+  const unsubscribeSession = subscribeSession(() => listener());
+  return () => {
+    window.removeEventListener(SUBSCRIPTION_ACCESS_EVENT, onAccessChanged);
+    unsubscribeSession();
+  };
 }
 
 function clearSubSyncTimestamp(): void {

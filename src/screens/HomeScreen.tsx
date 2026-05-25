@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
@@ -12,7 +12,10 @@ import {
 import { isSameServerSelection } from "../session/serverSelection";
 import {
   fetchVpnServers,
+  getSubscriptionUsageBlocked,
+  pingHwidOnly,
   startPendingPurchaseRefreshIfNeeded,
+  subscribeSubscriptionUsageBlocked,
   syncSubscription,
   type VpnServer,
 } from "../session/auth";
@@ -140,10 +143,16 @@ export default function HomeScreen({
   onServerChange: (server: SelectedServer) => void;
 }) {
   const session = useSession();
+  const subscriptionUsageBlocked = useSyncExternalStore(
+    subscribeSubscriptionUsageBlocked,
+    getSubscriptionUsageBlocked,
+    getSubscriptionUsageBlocked,
+  );
   const vpn = useVpnRuntime();
   const { connected, connecting, disconnecting, sessionBytes, sessionStartTime, lastError } = vpn;
   const [showSubscription, setShowSubscription] = useState(false);
   const [showTrialInfo, setShowTrialInfo] = useState(false);
+  const [checkingSubscriptionAccess, setCheckingSubscriptionAccess] = useState(false);
   const [preparingConnection, setPreparingConnection] = useState(false);
   const toggleGeneration = useRef(0);
   const activating = connecting || preparingConnection;
@@ -161,6 +170,25 @@ export default function HomeScreen({
     void syncSubscription();
     startPendingPurchaseRefreshIfNeeded();
   }, []);
+
+  useEffect(() => {
+    if (subscriptionUsageBlocked) {
+      setShowSubscription(false);
+      setShowTrialInfo(false);
+    }
+  }, [subscriptionUsageBlocked]);
+
+  const openSubscription = async () => {
+    if (checkingSubscriptionAccess || subscriptionUsageBlocked) return;
+    setCheckingSubscriptionAccess(true);
+    try {
+      if (!(await pingHwidOnly().catch(() => false))) {
+        setShowSubscription(true);
+      }
+    } finally {
+      setCheckingSubscriptionAccess(false);
+    }
+  };
 
   // Ping the selected server so the home card mirrors phone (latency on the right).
   useEffect(() => {
@@ -296,7 +324,7 @@ export default function HomeScreen({
         </button>
       </div>
 
-      {session.userPlan === "FREE_TRIAL" && (
+      {!subscriptionUsageBlocked && session.userPlan === "FREE_TRIAL" && (
         <button
           className="home-trial-banner"
           type="button"
@@ -447,24 +475,46 @@ export default function HomeScreen({
         </div>
 
         {/* Subscription card */}
-        <div
-          className="home-card home-card--clickable home-card--sub"
-          onClick={() => setShowSubscription(true)}
-        >
-          <div className="home-card__row">
-            <div className="home-card__info">
-              <div className="home-sub__label">{t("subscription")}</div>
-              <div className={planBadgeClass(session.userPlan)}>{planLabel(session.userPlan)}</div>
-              <div className="home-sub__hint">{planHint(session.userPlan, session.planExpiresAt)}</div>
+        {subscriptionUsageBlocked ? (
+          <div className="home-card home-card--sub home-card--blocked">
+            <div className="home-card__row">
+              <span className="home-card__blocked-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+              </span>
+              <div className="home-card__info">
+                <div className="home-sub__label">{t("subscription")}</div>
+                <div className="home-sub__blocked-text">{t("usage_blocked")}</div>
+              </div>
             </div>
-            <svg className="home-card__arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="9 18 15 12 9 6"/>
-            </svg>
           </div>
-        </div>
+        ) : (
+          <div
+            className="home-card home-card--clickable home-card--sub"
+            onClick={() => void openSubscription()}
+          >
+            <div className="home-card__row">
+              <div className="home-card__info">
+                <div className="home-sub__label">{t("subscription")}</div>
+                <div className={planBadgeClass(session.userPlan)}>{planLabel(session.userPlan)}</div>
+                <div className="home-sub__hint">
+                  {checkingSubscriptionAccess
+                    ? t("loading_data")
+                    : planHint(session.userPlan, session.planExpiresAt)}
+                </div>
+              </div>
+              <svg className="home-card__arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </div>
+          </div>
+        )}
       </div>
 
-      {showSubscription && (
+      {showSubscription && !subscriptionUsageBlocked && (
         <SubscriptionSheet onDismiss={() => setShowSubscription(false)} />
       )}
 
@@ -493,7 +543,7 @@ export default function HomeScreen({
                 className="home-trial-dialog__btn home-trial-dialog__btn--primary"
                 onClick={() => {
                   setShowTrialInfo(false);
-                  setShowSubscription(true);
+                  void openSubscription();
                 }}
               >
                 {t("trial_access_open_plans")}

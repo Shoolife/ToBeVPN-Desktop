@@ -6,10 +6,13 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { SUBS_FALLBACK_URL } from "../api/config";
 import { getDeviceFingerprint } from "./fingerprint";
 
-// Panel sets `access-control-allow-origin: *`, so window.fetch would also work
-// from a webview. We use tauriFetch in production for consistency with the rest
-// of the API client (avoids any platform CORS quirks).
-const httpFetch: typeof fetch = import.meta.env.DEV ? window.fetch.bind(window) : tauriFetch;
+// Response access headers are not browser-safelisted. Use the Rust-side HTTP
+// plugin whenever the app runs inside Tauri, including development builds, so
+// block detection does not depend on browser CORS exposure policy.
+const httpFetch: typeof fetch =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
+    ? tauriFetch
+    : window.fetch.bind(window);
 
 const PRIMARY_TIMEOUT_MS = 8_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
@@ -80,7 +83,7 @@ const MAX_INTERVAL_HOURS = 24 * 7;
 function readResult(response: Response): SubscriptionPingResult {
   return {
     intervalMs: readIntervalMs(response.headers.get("profile-update-interval")),
-    isUsageBlocked: response.headers.get(BLOCK_HEADER)?.trim() === BLOCK_VALUE,
+    isUsageBlocked: response.headers.get(BLOCK_HEADER)?.trim().toLowerCase() === BLOCK_VALUE,
   };
 }
 

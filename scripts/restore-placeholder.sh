@@ -40,9 +40,9 @@ resolve() {
 BOT=$(resolve BOT_API_HOST VITE_BOT_API_URL)
 PANEL=$(resolve PANEL_HOST VITE_PANEL_URL)
 
-# Fallback hosts are pulled from the same .env entries the inject script
-# uses. Both store full URLs (https://host/path?...), but we only need the
-# bare hostname here because that's what got substituted into capabilities.
+# Fallback hosts are pulled from the same environment/.env entries the inject
+# script uses. We keep separate placeholders because the two routes need not
+# be hosted together.
 extract_host_for_restore() {
     local raw=$1
     raw="${raw#https://}"
@@ -51,18 +51,20 @@ extract_host_for_restore() {
     raw="${raw%%\?*}"
     echo "$raw"
 }
-FALLBACK_HOST_VAL=""
-if [ -n "${FALLBACK_HOST:-}" ]; then
-    FALLBACK_HOST_VAL="${FALLBACK_HOST}"
-elif [ -f .env ]; then
-    line=$(grep -E '^VITE_FALLBACK_BOT_DOMAIN=' .env || true)
-    if [ -z "$line" ]; then
-        line=$(grep -E '^VITE_FALLBACK_SUBS_DOMAIN=' .env || true)
-        [ -n "$line" ] && FALLBACK_HOST_VAL=$(extract_host_for_restore "${line#VITE_FALLBACK_SUBS_DOMAIN=}")
-    else
-        FALLBACK_HOST_VAL=$(extract_host_for_restore "${line#VITE_FALLBACK_BOT_DOMAIN=}")
+resolve_fallback() {
+    local host_env=$1 url_env=$2 dotenv_key=$3
+    local raw="${!host_env:-}"
+    if [ -n "$raw" ]; then echo "$raw"; return 0; fi
+    raw="${!url_env:-}"
+    if [ -z "$raw" ] && [ -f .env ]; then
+        local line
+        line=$(grep -E "^${dotenv_key}=" .env || true)
+        [ -n "$line" ] && raw="${line#${dotenv_key}=}"
     fi
-fi
+    [ -n "$raw" ] && extract_host_for_restore "$raw"
+}
+FALLBACK_BOT_HOST_VAL=$(resolve_fallback FALLBACK_BOT_HOST VITE_FALLBACK_BOT_DOMAIN VITE_FALLBACK_BOT_DOMAIN || true)
+FALLBACK_SUBS_HOST_VAL=$(resolve_fallback FALLBACK_SUBS_HOST VITE_FALLBACK_SUBS_DOMAIN VITE_FALLBACK_SUBS_DOMAIN || true)
 
 if [ -z "$BOT" ] || [ -z "$PANEL" ]; then
     # Nothing to restore — the placeholders are probably already in place.
@@ -89,15 +91,24 @@ restore_in() {
 }
 
 restore_fallback_in() {
-    local file=$1
+    local file=$1 value=$2 placeholder=$3
     [ -f "$file" ] || return 0
-    [ -z "$FALLBACK_HOST_VAL" ] && return 0
-    sed -i.bak "s|${FALLBACK_HOST_VAL}|__FALLBACK_HOST__|g" "$file"
+    [ -z "$value" ] && return 0
+    sed -i.bak "s|${value}|${placeholder}|g" "$file"
     rm -f "${file}.bak"
 }
 
 restore_in src-tauri/tauri.conf.json
 restore_in src-tauri/capabilities/default.json
-restore_fallback_in src-tauri/capabilities/default.json
+restore_fallback_in src-tauri/capabilities/default.json "$FALLBACK_BOT_HOST_VAL" __FALLBACK_BOT_HOST__
+restore_fallback_in src-tauri/capabilities/default.json "$FALLBACK_SUBS_HOST_VAL" __FALLBACK_SUBS_HOST__
+if [ -n "$FALLBACK_BOT_HOST_VAL" ] && [ "$FALLBACK_BOT_HOST_VAL" = "$FALLBACK_SUBS_HOST_VAL" ]; then
+    # A global substitution cannot distinguish two equal hosts; restore the
+    # second allowlist entry to its dedicated placeholder.
+    sed -i.bak \
+        '/__FALLBACK_BOT_HOST__/{n;s|__FALLBACK_BOT_HOST__|__FALLBACK_SUBS_HOST__|;}' \
+        src-tauri/capabilities/default.json
+    rm -f src-tauri/capabilities/default.json.bak
+fi
 
 echo "✓ restored __BOT_API_HOST__ / __PANEL_HOST__ placeholders"

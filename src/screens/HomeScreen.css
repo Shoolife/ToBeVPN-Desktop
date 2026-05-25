@@ -200,6 +200,24 @@
   background: var(--surface-2);
 }
 
+.home-card--blocked {
+  background: rgba(244, 67, 54, 0.13);
+}
+
+.home-card__blocked-icon {
+  color: var(--danger);
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-right: 12px;
+}
+
+.home-sub__blocked-text {
+  color: var(--danger);
+  font-size: 14px;
+  font-weight: 500;
+  margin-top: 3px;
+}
+
 .home-card--clickable {
   cursor: pointer;
   transition: background 120ms;

@@ -19,11 +19,11 @@ import { getSession, subscribeSession } from "./store";
 import { pingHwidOnly, registerCurrentDevice } from "./auth";
 import { t } from "../i18n";
 
-// Bumps server-side `last_seen_at` every HEARTBEAT_TICKS seconds while VPN is
-// connected. /api/device/register is the only client-callable endpoint that
-// touches that column — without this the device's "Last active" row in the
-// account's device list freezes at the moment of the last app launch.
-const HEARTBEAT_TICKS = 60;
+// Poll access blocking frequently while keeping the device `last_seen_at`
+// heartbeat at its normal cadence. /api/device/register is the only
+// client-callable endpoint that touches the latter column.
+const ACCESS_BLOCK_POLL_TICKS = 10;
+const DEVICE_HEARTBEAT_TICKS = 60;
 const TUNNEL_HEALTH_INITIAL_DELAY_MS = 2_500;
 const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
 const TUNNEL_HEALTH_RETRY_MS = 3_000;
@@ -73,6 +73,8 @@ export function getVpnRuntime(): VpnRuntimeState {
 }
 
 let pollTimer: number | null = null;
+let accessBlockCounter = 0;
+let accessBlockCheckInFlight = false;
 let heartbeatCounter = 0;
 let healthTimer: number | null = null;
 let connectionGeneration = 0;
@@ -82,6 +84,7 @@ let resumeRecoveryInFlight = false;
 
 function startPolling() {
   if (pollTimer !== null) return;
+  accessBlockCounter = 0;
   heartbeatCounter = 0;
   let lastPollAt = Date.now();
   pollTimer = window.setInterval(async () => {
@@ -109,13 +112,28 @@ function startPolling() {
       tick: state.tick + 1,
     });
 
-    heartbeatCounter++;
-    if (heartbeatCounter >= HEARTBEAT_TICKS) {
-      heartbeatCounter = 0;
-      if (await pingHwidOnly().catch(() => false)) {
-        await stopVpnWithError(t("usage_blocked"));
-        return;
+    if (!accessBlockCheckInFlight) accessBlockCounter++;
+    if (!accessBlockCheckInFlight && accessBlockCounter >= ACCESS_BLOCK_POLL_TICKS) {
+      accessBlockCounter = 0;
+      accessBlockCheckInFlight = true;
+      const checkedOwner = getSession().shortUuid;
+      try {
+        const blocked = await pingHwidOnly().catch(() => false);
+        if (
+          blocked &&
+          checkedOwner === getSession().shortUuid &&
+          state.connected
+        ) {
+          await stopVpnWithError(t("usage_blocked"));
+          return;
+        }
+      } finally {
+        accessBlockCheckInFlight = false;
       }
+    }
+    heartbeatCounter++;
+    if (heartbeatCounter >= DEVICE_HEARTBEAT_TICKS) {
+      heartbeatCounter = 0;
       const { isLinked } = getSession();
       if (isLinked) {
         registerCurrentDevice().catch(() => {});
@@ -129,6 +147,8 @@ function stopPolling() {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  accessBlockCounter = 0;
+  accessBlockCheckInFlight = false;
   heartbeatCounter = 0;
 }
 
