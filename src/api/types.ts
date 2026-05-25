@@ -18,6 +18,11 @@ export interface BootstrapRequestDto {
   device_id: string;
   platform: string;
   integrity_token?: string | null;
+  hwid?: string | null;
+  device_os?: string | null;
+  ver_os?: string | null;
+  device_model?: string | null;
+  user_agent?: string | null;
 }
 
 export interface RefreshRequestDto {

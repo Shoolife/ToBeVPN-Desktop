@@ -7,6 +7,7 @@ import {
   getSession,
   hasValidAccessToken,
   hasValidRefreshToken,
+  updateSession,
   updateSessionFromTokens,
 } from "../session/store";
 import {
@@ -41,6 +42,7 @@ import type {
 const httpFetch: typeof fetch = import.meta.env.DEV ? window.fetch.bind(window) : tauriFetch;
 
 type AuthMode = "access" | "none";
+const DEVICE_ID_NAMESPACE = "tobevpn:desktop:device-id:v1";
 
 function resolveBase(base: string = BOT_API_BASE_URL): string {
   if (base === "/" || base === "") return window.location.origin + "/";
@@ -209,11 +211,59 @@ async function expectJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
+async function stableDeviceIdFromHwid(hwid: string): Promise<string | null> {
+  const normalized = hwid.trim().toLocaleLowerCase("en-US");
+  if (!normalized) return null;
+
+  const input = new TextEncoder().encode(`${DEVICE_ID_NAMESPACE}:${normalized}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+
+  const hex = Array.from(digest.slice(0, 16), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join("-");
+}
+
+async function resolveBootstrapDeviceId(): Promise<string> {
   const session = getSession();
+  if (session.isLinked || hasValidAccessToken(session) || hasValidRefreshToken(session)) {
+    return session.deviceId;
+  }
+
+  try {
+    const fingerprint = await getDeviceFingerprint();
+    const stableDeviceId = await stableDeviceIdFromHwid(fingerprint.hwid);
+    if (stableDeviceId && stableDeviceId !== session.deviceId) {
+      return updateSession({ deviceId: stableDeviceId }).deviceId;
+    }
+  } catch {
+    // Fall back to the current install-scoped id if the platform HWID is
+    // temporarily unavailable. Existing sessions are still preserved above.
+  }
+
+  return getSession().deviceId;
+}
+
+async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
+  const deviceId = await resolveBootstrapDeviceId();
+  const fingerprint = await getDeviceFingerprint();
   const requestBody: BootstrapRequestDto = {
-    device_id: session.deviceId,
+    device_id: deviceId,
     platform: "desktop",
+    hwid: fingerprint.hwid,
+    device_os: fingerprint.platform,
+    ver_os: fingerprint.osVersion,
+    device_model: fingerprint.model,
+    user_agent: fingerprint.userAgent,
   };
   const response = await performFetch("api/device/bootstrap", {
     method: "POST",

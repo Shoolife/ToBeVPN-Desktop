@@ -64,6 +64,7 @@ const strings = {
     trial_access_title: "Временный доступ",
     trial_access_description: "Пробный доступ выдаётся один раз и быстро заканчивается. Оформите тариф, чтобы сохранить доступ к серверам и не потерять подключение после окончания пробного периода.",
     trial_access_open_plans: "К тарифам",
+    usage_blocked: "Доступ заблокирован из-за нарушения правил использования.",
 
     // Servers
     server_select: "Выберите сервер",
@@ -256,6 +257,7 @@ const strings = {
     trial_access_title: "Temporary access",
     trial_access_description: "Trial access is issued once and ends quickly. Choose a plan to keep server access and avoid losing the connection after the trial expires.",
     trial_access_open_plans: "Plans",
+    usage_blocked: "Access blocked due to a violation of the usage rules.",
 
     // Servers
     server_select: "Select a server",

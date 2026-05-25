@@ -13,6 +13,13 @@ const httpFetch: typeof fetch = import.meta.env.DEV ? window.fetch.bind(window) 
 
 const PRIMARY_TIMEOUT_MS = 8_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
+const BLOCK_HEADER = "is_hack";
+const BLOCK_VALUE = "yes";
+
+export interface SubscriptionPingResult {
+  intervalMs: number | null;
+  isUsageBlocked: boolean;
+}
 
 /**
  * Best-effort HWID ping against the subscription URL. Tries the original
@@ -20,16 +27,13 @@ const FALLBACK_TIMEOUT_MS = 7_000;
  * against the configured fallback endpoint so the HWID record still
  * lands even when the panel is unreachable (network block, partner outage).
  *
- * Returns the panel-recommended auto-refresh cadence in milliseconds,
- * parsed from the `profile-update-interval` response header (an integer
- * number of hours, the V2Ray subscription convention also honoured by
- * Happ / V2RayN). Returns `null` when the URL is missing, both legs
- * fail, or the panel didn't include a usable header — callers fall
- * back to the cached / default interval.
+ * Returns the panel-recommended auto-refresh cadence and the access state
+ * from the response. Returns `null` when the URL is missing or both legs
+ * fail; callers keep any previously recorded access state in that case.
  */
 export async function pingSubscriptionUrl(
   subscriptionUrl: string | null | undefined,
-): Promise<number | null> {
+): Promise<SubscriptionPingResult | null> {
   if (!subscriptionUrl) return null;
   try {
     const fp = await getDeviceFingerprint();
@@ -43,13 +47,13 @@ export async function pingSubscriptionUrl(
 
     try {
       const res = await timedFetch(subscriptionUrl, headers, PRIMARY_TIMEOUT_MS);
-      return readIntervalMs(res.headers.get("profile-update-interval"));
+      return readResult(res);
     } catch (primaryError) {
       const fallback = buildFallbackUrl(subscriptionUrl);
       if (!fallback) throw primaryError;
       console.warn("[pingSubscriptionUrl] primary failed, retrying via fallback");
       const res = await timedFetch(fallback, headers, FALLBACK_TIMEOUT_MS);
-      return readIntervalMs(res.headers.get("profile-update-interval"));
+      return readResult(res);
     }
   } catch {
     console.warn("[pingSubscriptionUrl] failed");
@@ -72,6 +76,13 @@ async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number):
 // foreseeable future.
 const MIN_INTERVAL_HOURS = 1;
 const MAX_INTERVAL_HOURS = 24 * 7;
+
+function readResult(response: Response): SubscriptionPingResult {
+  return {
+    intervalMs: readIntervalMs(response.headers.get("profile-update-interval")),
+    isUsageBlocked: response.headers.get(BLOCK_HEADER)?.trim() === BLOCK_VALUE,
+  };
+}
 
 function readIntervalMs(raw: string | null): number | null {
   if (!raw) return null;

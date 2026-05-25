@@ -39,7 +39,7 @@ import {
   saveSecureSession,
 } from "./secureSession";
 import { disconnectVpn } from "./vpnState";
-import { pingSubscriptionUrl } from "./subscriptionPinger";
+import { pingSubscriptionUrl, type SubscriptionPingResult } from "./subscriptionPinger";
 
 const DEVICE_TYPE = "desktop";
 const PLATFORM = "Desktop";
@@ -56,6 +56,7 @@ let cachedHostname: string | null = null;
 const SUB_SYNC_AT_KEY = "tobevpn_sub_sync_at_v1";
 const SUB_INTERVAL_KEY = "tobevpn_sub_interval_ms_v1";
 const SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v1";
+const BLOCKED_SUBSCRIPTION_KEY = "tobevpn_blocked_subscription_v1";
 const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
 const PENDING_AUTH_TOKEN_KEY = "tobevpn_pending_auth_token_v1";
 // 12h matches the default surfaced in the panel's "subscription
@@ -126,6 +127,27 @@ function writeCachedSubscriptionUrl(url: string | null): void {
     else localStorage.removeItem(SUB_URL_CACHE_KEY);
   } catch {
     // ignore — see writeSubSyncState
+  }
+}
+
+function setSubscriptionUsageBlocked(shortUuid: string, blocked: boolean): void {
+  try {
+    if (blocked) {
+      localStorage.setItem(BLOCKED_SUBSCRIPTION_KEY, shortUuid);
+    } else if (localStorage.getItem(BLOCKED_SUBSCRIPTION_KEY) === shortUuid) {
+      localStorage.removeItem(BLOCKED_SUBSCRIPTION_KEY);
+    }
+  } catch {
+    // Keep connection handling functional in webviews without persistence.
+  }
+}
+
+function isSubscriptionUsageBlocked(shortUuid: string | null): boolean {
+  if (!shortUuid) return false;
+  try {
+    return localStorage.getItem(BLOCKED_SUBSCRIPTION_KEY) === shortUuid;
+  } catch {
+    return false;
   }
 }
 
@@ -473,13 +495,18 @@ export function startPendingPurchaseRefreshIfNeeded(): void {
  * install before any sync has completed) we silently no-op — the next
  * ambient sync will populate it.
  */
-export async function pingHwidOnly(): Promise<void> {
+export async function pingHwidOnly(): Promise<boolean> {
+  const shortUuid = getSession().shortUuid;
+  const wasBlocked = isSubscriptionUsageBlocked(shortUuid);
   const url = readCachedSubscriptionUrl();
-  if (!url) return;
+  if (!shortUuid || !url) return wasBlocked;
   try {
-    await pingSubscriptionUrl(url);
+    const result = await pingSubscriptionUrl(url);
+    if (!result) return wasBlocked;
+    setSubscriptionUsageBlocked(shortUuid, result.isUsageBlocked);
+    return result.isUsageBlocked;
   } catch {
-    // best-effort — connect proceeds regardless
+    return wasBlocked;
   }
 }
 
@@ -540,13 +567,16 @@ async function runSyncSubscription(): Promise<void> {
   // fire-and-forget as before) so the throttle bookkeeping below sees the
   // fresh interval — pingSubscriptionUrl already enforces its own timeout.
   writeCachedSubscriptionUrl(subscriptionUrl);
-  let intervalMs: number | null = null;
+  let pingResult: SubscriptionPingResult | null = null;
   try {
-    intervalMs = await pingSubscriptionUrl(subscriptionUrl);
+    pingResult = await pingSubscriptionUrl(subscriptionUrl);
   } catch {
     // ignore — pingSubscriptionUrl swallows its own errors and returns null
   }
-  writeSubSyncState(intervalMs);
+  if (pingResult) {
+    setSubscriptionUsageBlocked(shortUuid, pingResult.isUsageBlocked);
+  }
+  writeSubSyncState(pingResult?.intervalMs ?? null);
 
   const isActive = subUser.is_active && subUser.user_status === "ACTIVE";
   const cachedPlan = session.userPlan;

@@ -17,6 +17,7 @@ import {
 } from "./stats";
 import { getSession, subscribeSession } from "./store";
 import { pingHwidOnly, registerCurrentDevice } from "./auth";
+import { t } from "../i18n";
 
 // Bumps server-side `last_seen_at` every HEARTBEAT_TICKS seconds while VPN is
 // connected. /api/device/register is the only client-callable endpoint that
@@ -111,6 +112,10 @@ function startPolling() {
     heartbeatCounter++;
     if (heartbeatCounter >= HEARTBEAT_TICKS) {
       heartbeatCounter = 0;
+      if (await pingHwidOnly().catch(() => false)) {
+        await stopVpnWithError(t("usage_blocked"));
+        return;
+      }
       const { isLinked } = getSession();
       if (isLinked) {
         registerCurrentDevice().catch(() => {});
@@ -125,11 +130,6 @@ function stopPolling() {
     pollTimer = null;
   }
   heartbeatCounter = 0;
-}
-
-function isPaidOrAdmin(): boolean {
-  const { userPlan } = getSession();
-  return userPlan === "PAID" || userPlan === "ADMIN";
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -173,9 +173,8 @@ async function connectVpnInternal(
     watchdogRecoveryAttempts = 0;
   }
   setState({ connecting: true, disconnecting: false, lastError: null });
-  // Limited/trial access depends on the HWID marker being registered before
-  // the first outbound connection. Paid/admin users don't need to wait on
-  // this best-effort ping, so keep their connect path fast.
+  // The subscription response may carry a server-side access block, so this
+  // check has to finish before any new tunnel starts.
   try {
     // A server can be changed while the previous native start is still
     // resolving DNS or creating TUN routes. Cancel that obsolete attempt
@@ -184,10 +183,8 @@ async function connectVpnInternal(
       await engineStop().catch(() => {});
       if (gen !== connectionGeneration) return;
     }
-    if (isPaidOrAdmin()) {
-      pingHwidOnly().catch(() => {});
-    } else {
-      await pingHwidOnly();
+    if (await pingHwidOnly()) {
+      throw new Error(t("usage_blocked"));
     }
     if (gen !== connectionGeneration) return;
     await engineStart(server);
