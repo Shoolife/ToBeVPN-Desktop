@@ -13,7 +13,7 @@ const httpFetch: typeof fetch = import.meta.env.DEV ? window.fetch.bind(window) 
 
 const PRIMARY_TIMEOUT_MS = 8_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
-const BLOCK_HEADER = "is_hack";
+const BLOCK_HEADER = "is-hack";
 const BLOCK_VALUE = "yes";
 
 export interface SubscriptionPingResult {
