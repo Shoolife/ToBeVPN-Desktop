@@ -77,11 +77,21 @@
   padding: 16px;
   margin-bottom: 8px;
   cursor: pointer;
-  transition: background 120ms;
+  transition: background 120ms, border-color 120ms, box-shadow 120ms;
 }
 
 .server-item:hover {
   background: var(--surface-2);
+}
+
+.server-item--selected {
+  background: rgba(67, 211, 158, 0.14);
+  border-color: rgba(67, 211, 158, 0.72);
+}
+
+.server-item--selected:hover {
+  background: rgba(67, 211, 158, 0.18);
+  border-color: rgba(67, 211, 158, 0.82);
 }
 
 .server-item--offline {

@@ -9,6 +9,7 @@ import {
   serverCountryCodeForUi,
   serverDisplayName,
 } from "../components/serverDisplay";
+import { isSameServerSelection } from "../session/serverSelection";
 import {
   fetchVpnServers,
   startPendingPurchaseRefreshIfNeeded,
@@ -121,15 +122,6 @@ function toSelectedServer(server: VpnServer): SelectedServer {
   };
 }
 
-function sameServer(a: SelectedServer, b: VpnServer): boolean {
-  return (
-    a.address === b.address &&
-    a.port === b.port &&
-    a.uuid === b.uuid &&
-    a.sni === b.sni
-  );
-}
-
 export default function HomeScreen({
   onLogout: _onLogout,
   onSettings,
@@ -204,13 +196,13 @@ export default function HomeScreen({
     await syncSubscription({ force: true }).catch(() => {});
     const freshServers = await fetchVpnServers().catch(() => []);
     const fresh =
-      freshServers.find((server) => sameServer(selectedServer, server)) ??
+      freshServers.find((server) => isSameServerSelection(selectedServer, server)) ??
       freshServers[0] ??
       null;
     if (!fresh) return null;
 
     const resolved = toSelectedServer(fresh);
-    if (!sameServer(selectedServer, fresh)) {
+    if (!isSameServerSelection(selectedServer, fresh)) {
       onServerChange(resolved);
     }
     return resolved;

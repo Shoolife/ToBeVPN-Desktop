@@ -1,6 +1,7 @@
 const GLOBE_FLAG = "\u{1F310}";
 const REGIONAL_INDICATOR_START = 0x1f1e6;
 const REGIONAL_INDICATOR_END = 0x1f1ff;
+const EDGE_DECORATION = new Set(["-", "|", "/", "\\", ":"]);
 const LETTER_OR_NUMBER = /[\p{L}\p{N}]/u;
 const WHITESPACE = /\s/u;
 const DECORATIVE = /[\p{S}\p{M}\p{Cf}]/u;
@@ -33,18 +34,15 @@ export function serverCountryCodeForUi(
 
 export function serverDisplayName(
   name: string,
-  countryCode: string | null | undefined,
+  _countryCode: string | null | undefined,
 ): string {
   const trimmedName = name.trim();
   if (!trimmedName) return name;
 
   const prefix = parseLeadingPrefix(trimmedName);
-  const countryFlag = countryFlagOrNull(countryCode?.trim().toUpperCase() ?? "");
-  if (countryFlag && prefix.flag && prefix.flag !== countryFlag) {
-    return trimmedName;
-  }
-
-  const cleanedName = trimmedName.slice(prefix.endIndex).trimStart();
+  const cleanedName = trimDecorativeEdges(
+    removeFlagEmojis(trimmedName.slice(prefix.endIndex)),
+  );
   return cleanedName || trimmedName;
 }
 
@@ -118,6 +116,49 @@ function countryCodeFromFlag(flag: string | null): string | null {
     second - REGIONAL_INDICATOR_START + 65,
   );
   return `${firstChar}${secondChar}`;
+}
+
+function removeFlagEmojis(text: string): string {
+  let output = "";
+  let index = 0;
+
+  while (index < text.length) {
+    const codePoint = text.codePointAt(index);
+    if (codePoint === undefined) break;
+
+    const symbol = String.fromCodePoint(codePoint);
+    const nextIndex = index + symbol.length;
+    if (isRegionalIndicator(codePoint) && nextIndex < text.length) {
+      const nextCodePoint = text.codePointAt(nextIndex);
+      if (
+        nextCodePoint !== undefined &&
+        isRegionalIndicator(nextCodePoint)
+      ) {
+        index = nextIndex + String.fromCodePoint(nextCodePoint).length;
+        continue;
+      }
+    }
+
+    output += symbol;
+    index = nextIndex;
+  }
+
+  return output;
+}
+
+function trimDecorativeEdges(text: string): string {
+  const trimmedText = text.trim();
+  let start = 0;
+  let end = trimmedText.length;
+
+  while (start < end && EDGE_DECORATION.has(trimmedText[start])) {
+    start += 1;
+  }
+  while (end > start && EDGE_DECORATION.has(trimmedText[end - 1])) {
+    end -= 1;
+  }
+
+  return trimmedText.slice(start, end).trim();
 }
 
 function isRegionalIndicator(codePoint: number): boolean {

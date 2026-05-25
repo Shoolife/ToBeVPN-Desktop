@@ -837,7 +837,7 @@ function parseVlessUrl(url: string): VpnServer | null {
     const sni = p.get("sni") ?? "";
 
     return {
-      id: `${address}:${port}:${sni || name}`,
+      id: `${address}:${port}:${sni}`,
       name,
       address,
       port,

@@ -14,6 +14,7 @@ import AppErrorBoundary from "./components/AppErrorBoundary";
 import UpdateBanner from "./components/UpdateBanner";
 import { isPaired, useSession } from "./session/store";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
+import { isSameServerSelection } from "./session/serverSelection";
 import { connectVpn, getVpnRuntime } from "./session/vpnState";
 import { clearLastServer, loadLastServer, saveLastServer } from "./session/lastServer";
 import "./App.css";
@@ -269,6 +270,7 @@ export default function App() {
         return (
           <ServersScreen
             onBack={() => goBack("home")}
+            selectedServer={selectedServer}
             onSelect={(server) => {
               const prev = selectedServer;
               setSelectedServer(server);
@@ -277,11 +279,7 @@ export default function App() {
               // Live-switch: if a session is already up (or in flight) and the
               // user picked a different server, reconnect to the new one. The
               // backend's start() tears down the previous session itself.
-              const sameAsPrev =
-                prev &&
-                prev.address === server.address &&
-                prev.port === server.port &&
-                prev.uuid === server.uuid;
+              const sameAsPrev = isSameServerSelection(prev, server);
               // Skip the live-switch entirely when the user picked the
               // panel's "subscription expired" sentinel. ServersScreen
               // already filters it out of the list, but a stale cache

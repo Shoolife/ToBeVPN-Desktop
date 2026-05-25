@@ -7,6 +7,7 @@ import {
   serverDisplayName,
 } from "../components/serverDisplay";
 import { fetchVpnServers, syncSubscription, type VpnServer } from "../session/auth";
+import { isSameServerSelection } from "../session/serverSelection";
 import Spinner from "../components/Spinner";
 import type { SelectedServer } from "../App";
 import "./ServersScreen.css";
@@ -34,9 +35,11 @@ function pingColor(ping: number): string {
 export default function ServersScreen({
   onBack,
   onSelect,
+  selectedServer,
 }: {
   onBack: () => void;
   onSelect: (server: SelectedServer) => void;
+  selectedServer: SelectedServer | null;
 }) {
   const [servers, setServers] = useState<ServerItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -165,59 +168,69 @@ export default function ServersScreen({
         </div>
       ) : (
         <div className="servers-list">
-          {servers.map((server) => (
-            <div
-              key={server.id}
-              className={`server-item ${!server.isOnline ? "server-item--offline" : ""}`}
-              onClick={() => {
-                if (server.isOnline) {
-                  onSelect({
-                    name: server.name,
-                    country: server.country,
-                    address: server.address,
-                    port: server.port,
-                    uuid: server.uuid,
-                    flow: server.flow,
-                    security: server.security,
-                    sni: server.sni,
-                    fingerprint: server.fingerprint,
-                    public_key: server.public_key,
-                    short_id: server.short_id,
-                    network: server.network,
-                    path: server.path,
-                    mode: server.mode,
-                    spx: server.spx,
-                  });
-                }
-              }}
-            >
-              <span className="server-item__flag">
-                {countryFlagForUi(server.country, server.name)}
-              </span>
-              <div className="server-item__info">
-                <div className="server-item__name">
-                  {serverDisplayName(server.name, server.country)}
+          {servers.map((server) => {
+            const selected = isSameServerSelection(selectedServer, server);
+            const className = [
+              "server-item",
+              selected ? "server-item--selected" : "",
+              !server.isOnline ? "server-item--offline" : "",
+            ].filter(Boolean).join(" ");
+
+            return (
+              <div
+                key={server.id}
+                className={className}
+                aria-current={selected ? "true" : undefined}
+                onClick={() => {
+                  if (server.isOnline) {
+                    onSelect({
+                      name: server.name,
+                      country: server.country,
+                      address: server.address,
+                      port: server.port,
+                      uuid: server.uuid,
+                      flow: server.flow,
+                      security: server.security,
+                      sni: server.sni,
+                      fingerprint: server.fingerprint,
+                      public_key: server.public_key,
+                      short_id: server.short_id,
+                      network: server.network,
+                      path: server.path,
+                      mode: server.mode,
+                      spx: server.spx,
+                    });
+                  }
+                }}
+              >
+                <span className="server-item__flag">
+                  {countryFlagForUi(server.country, server.name)}
+                </span>
+                <div className="server-item__info">
+                  <div className="server-item__name">
+                    {serverDisplayName(server.name, server.country)}
+                  </div>
+                  <div className={`server-item__country ${!server.isOnline ? "server-item__country--red" : ""}`}>
+                    {server.isOnline
+                      ? countryName(serverCountryCodeForUi(server.country, server.name))
+                      : t("server_unavailable")}
+                  </div>
                 </div>
-                <div className={`server-item__country ${!server.isOnline ? "server-item__country--red" : ""}`}>
-                  {server.isOnline
-                    ? countryName(serverCountryCodeForUi(server.country, server.name))
-                    : t("server_unavailable")}
-                </div>
+                {!server.isOnline ? (
+                  <span className="server-item__offline-badge">{t("server_offline")}</span>
+                ) : server.ping < 0 ? (
+                  <span className="server-item__ping-unavailable">{t("server_unavailable")}</span>
+                ) : server.ping > 0 ? (
+                  <div className="server-item__ping">
+                    <span className="server-item__ping-value" style={{ color: pingColor(server.ping) }}>
+                      {server.ping}
+                    </span>
+                    <span className="server-item__ping-unit">ms</span>
+                  </div>
+                ) : null}
               </div>
-              {!server.isOnline ? (
-                <span className="server-item__offline-badge">{t("server_offline")}</span>
-              ) : server.ping < 0 ? (
-                <span className="server-item__ping-unavailable">{t("server_unavailable")}</span>
-              ) : server.ping > 0 ? (
-                <div className="server-item__ping">
-                  <span className="server-item__ping-value" style={{ color: pingColor(server.ping) }}>
-                    {server.ping}
-                  </span>
-                  <span className="server-item__ping-unit">ms</span>
-                </div>
-              ) : null}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
