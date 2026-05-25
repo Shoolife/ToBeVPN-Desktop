@@ -56,7 +56,8 @@ let cachedHostname: string | null = null;
 // of the home/server screens don't each trigger their own panel hit.
 const SUB_SYNC_AT_KEY = "tobevpn_sub_sync_at_v1";
 const SUB_INTERVAL_KEY = "tobevpn_sub_interval_ms_v1";
-const SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v1";
+const LEGACY_SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v1";
+const SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v2";
 const BLOCKED_SUBSCRIPTION_KEY = "tobevpn_blocked_subscription_v1";
 const SUBSCRIPTION_ACCESS_EVENT = "tobevpn:subscription-access-changed";
 const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
@@ -115,18 +116,39 @@ function writeSubSyncState(intervalMs: number | null): void {
   }
 }
 
-function readCachedSubscriptionUrl(): string | null {
+function readCachedSubscriptionUrl(shortUuid: string): string | null {
   try {
-    return localStorage.getItem(SUB_URL_CACHE_KEY);
+    // v1 stored only a URL. It can belong to a previous account after
+    // auth/logout and must never be used to decide access for this session.
+    localStorage.removeItem(LEGACY_SUB_URL_CACHE_KEY);
+    const raw = localStorage.getItem(SUB_URL_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as { shortUuid?: unknown; url?: unknown };
+    return cached.shortUuid === shortUuid && typeof cached.url === "string" && cached.url
+      ? cached.url
+      : null;
   } catch {
     return null;
   }
 }
 
-function writeCachedSubscriptionUrl(url: string | null): void {
+function writeCachedSubscriptionUrl(shortUuid: string, url: string | null): void {
   try {
-    if (url) localStorage.setItem(SUB_URL_CACHE_KEY, url);
-    else localStorage.removeItem(SUB_URL_CACHE_KEY);
+    localStorage.removeItem(LEGACY_SUB_URL_CACHE_KEY);
+    if (url) {
+      localStorage.setItem(SUB_URL_CACHE_KEY, JSON.stringify({ shortUuid, url }));
+      return;
+    }
+    const raw = localStorage.getItem(SUB_URL_CACHE_KEY);
+    if (!raw) return;
+    try {
+      const cached = JSON.parse(raw) as { shortUuid?: unknown };
+      if (cached.shortUuid === shortUuid) {
+        localStorage.removeItem(SUB_URL_CACHE_KEY);
+      }
+    } catch {
+      localStorage.removeItem(SUB_URL_CACHE_KEY);
+    }
   } catch {
     // ignore — see writeSubSyncState
   }
@@ -530,12 +552,12 @@ export async function pingHwidOnly(): Promise<boolean> {
 }
 
 async function readOrFetchSubscriptionUrl(shortUuid: string): Promise<string | null> {
-  const cached = readCachedSubscriptionUrl();
+  const cached = readCachedSubscriptionUrl(shortUuid);
   if (cached) return cached;
   try {
     const subInfo = (await getSubscriptionInfo(shortUuid)).response;
     if (!subInfo.is_found || !subInfo.user) {
-      writeCachedSubscriptionUrl(null);
+      writeCachedSubscriptionUrl(shortUuid, null);
       if (getSession().shortUuid === shortUuid) {
         updateSession({
           userPlan: "EXPIRED",
@@ -546,7 +568,7 @@ async function readOrFetchSubscriptionUrl(shortUuid: string): Promise<string | n
       }
       return null;
     }
-    writeCachedSubscriptionUrl(subInfo.subscription_url);
+    writeCachedSubscriptionUrl(shortUuid, subInfo.subscription_url);
     return subInfo.subscription_url;
   } catch {
     return null;
@@ -588,7 +610,7 @@ async function runSyncSubscription(): Promise<void> {
   try {
     const subInfo = (await getSubscriptionInfo(shortUuid)).response;
     if (!subInfo.is_found || !subInfo.user) {
-      writeCachedSubscriptionUrl(null);
+      writeCachedSubscriptionUrl(shortUuid, null);
       updateSession({
         userPlan: "EXPIRED",
         planExpiresAt: null,
@@ -609,7 +631,7 @@ async function runSyncSubscription(): Promise<void> {
   // which we feed back into the throttle window. We await it (rather than
   // fire-and-forget as before) so the throttle bookkeeping below sees the
   // fresh interval — pingSubscriptionUrl already enforces its own timeout.
-  writeCachedSubscriptionUrl(subscriptionUrl);
+  writeCachedSubscriptionUrl(shortUuid, subscriptionUrl);
   let pingResult: SubscriptionPingResult | null = null;
   try {
     pingResult = await pingSubscriptionUrl(subscriptionUrl);

@@ -27,6 +27,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Require fallback endpoints for tagged releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
+          FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
+        run: |
+          if [ -z "${FALLBACK_BOT_DOMAIN:-}" ]; then
+            echo "::error::FALLBACK_BOT_DOMAIN is required for a release build"
+            exit 1
+          fi
+          if [ -z "${FALLBACK_SUBS_DOMAIN:-}" ]; then
+            echo "::error::FALLBACK_SUBS_DOMAIN is required for a release build"
+            exit 1
+          fi
+
       - uses: actions/setup-node@v5
         with:
           node-version: 22
