@@ -300,7 +300,15 @@ export default function App() {
                   path: server.path,
                   mode: server.mode,
                   spx: server.spx,
-                }).catch((e) => console.error("[VPN] live-switch failed:", e));
+                }).catch((e) => {
+                  console.error("[VPN] live-switch failed:", e);
+                  if (!prev || !getVpnRuntime().connected) return;
+                  setSelectedServer((current) => {
+                    if (!current || !isSameServerSelection(current, server)) return current;
+                    saveLastServer(prev);
+                    return prev;
+                  });
+                });
               }
             }}
           />

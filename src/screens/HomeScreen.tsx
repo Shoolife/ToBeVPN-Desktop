@@ -21,6 +21,7 @@ import {
 } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { connectVpn, disconnectVpn, useVpnRuntime, clearVpnError } from "../session/vpnState";
+import { preparePingBypass } from "../session/vpn";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
 
@@ -198,17 +199,20 @@ export default function HomeScreen({
     }
     let cancelled = false;
     setPing(0);
-    invoke<number>("tcp_ping", {
-      host: selectedServer.address,
-      port: selectedServer.port,
-      timeoutMs: 3000,
-    })
-      .then((ms) => {
+    void (async () => {
+      await preparePingBypass([selectedServer.address]).catch(() => {});
+      if (cancelled) return;
+      try {
+        const ms = await invoke<number>("tcp_ping", {
+          host: selectedServer.address,
+          port: selectedServer.port,
+          timeoutMs: 3000,
+        });
         if (!cancelled) setPing(ms >= 0 ? ms : -1);
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setPing(-1);
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };

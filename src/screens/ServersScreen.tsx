@@ -8,6 +8,7 @@ import {
 } from "../components/serverDisplay";
 import { fetchVpnServers, syncSubscription, type VpnServer } from "../session/auth";
 import { isSameServerSelection } from "../session/serverSelection";
+import { preparePingBypass } from "../session/vpn";
 import Spinner from "../components/Spinner";
 import type { SelectedServer } from "../App";
 import "./ServersScreen.css";
@@ -62,24 +63,36 @@ export default function ServersScreen({
       .catch(() => setFlagsReady(true)); // fail open: better letters than a stuck spinner
   }, []);
 
-  const runPings = useCallback((items: ServerItem[], gen: number) => {
-    for (const s of items) {
-      if (!s.isOnline) continue;
-      invoke<number>("tcp_ping", { host: s.address, port: s.port, timeoutMs: 3000 })
-        .then((ms) => {
-          if (pingGenRef.current !== gen) return;
-          setServers((prev) =>
-            prev.map((srv) => (srv.id === s.id ? { ...srv, ping: ms >= 0 ? ms : -1 } : srv)),
-          );
-        })
-        .catch(() => {
-          if (pingGenRef.current !== gen) return;
-          setServers((prev) =>
-            prev.map((srv) => (srv.id === s.id ? { ...srv, ping: -1 } : srv)),
-          );
-        });
-    }
-  }, []);
+  const runPings = useCallback(
+    (items: ServerItem[], gen: number, pingMap: Map<string, string>) => {
+      for (const s of items) {
+        if (!s.isOnline) continue;
+        // Pin tcp_ping to the IP that prepare_ping_bypass installed a route
+        // for. If we passed the hostname instead, tcp_ping would resolve a
+        // second time and could land on a different IP that isn't in the
+        // bypass set — that probe would then be tunnelled, returning the
+        // misleading "Недоступен" / inflated-RTT readings shown when the
+        // VPN is on.
+        const target = pingMap.get(s.address) ?? s.address;
+        invoke<number>("tcp_ping", { host: target, port: s.port, timeoutMs: 3000 })
+          .then((ms) => {
+            if (pingGenRef.current !== gen) return;
+            setServers((prev) =>
+              prev.map((srv) =>
+                srv.id === s.id ? { ...srv, ping: ms >= 0 ? ms : -1 } : srv,
+              ),
+            );
+          })
+          .catch(() => {
+            if (pingGenRef.current !== gen) return;
+            setServers((prev) =>
+              prev.map((srv) => (srv.id === s.id ? { ...srv, ping: -1 } : srv)),
+            );
+          });
+      }
+    },
+    [],
+  );
 
   const load = useCallback(async (opts: { force?: boolean } = {}) => {
     setLoading(true);
@@ -98,7 +111,14 @@ export default function ServersScreen({
       }));
       setServers(items);
       const gen = ++pingGenRef.current;
-      runPings(items, gen);
+      const pingHosts = items.filter((s) => s.isOnline).map((s) => s.address);
+      void preparePingBypass(pingHosts)
+        .then((pingMap) => {
+          if (pingGenRef.current === gen) runPings(items, gen, pingMap);
+        })
+        .catch(() => {
+          if (pingGenRef.current === gen) runPings(items, gen, new Map());
+        });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setServers([]);
@@ -170,10 +190,18 @@ export default function ServersScreen({
         <div className="servers-list">
           {servers.map((server) => {
             const selected = isSameServerSelection(selectedServer, server);
+            // ping === 0 means "not measured yet" (initial state before the
+            // probe lands). ping < 0 means the probe completed and failed —
+            // the server is genuinely unreachable from this network. Block
+            // the click in that case so the user can't kick off a VPN
+            // switch that will tear down the current tunnel and then fail
+            // to establish a new one (the "DNS resolve failed" cascade).
+            const probeFailed = server.ping < 0;
+            const clickable = server.isOnline && !probeFailed;
             const className = [
               "server-item",
               selected ? "server-item--selected" : "",
-              !server.isOnline ? "server-item--offline" : "",
+              !clickable ? "server-item--offline" : "",
             ].filter(Boolean).join(" ");
 
             return (
@@ -182,7 +210,7 @@ export default function ServersScreen({
                 className={className}
                 aria-current={selected ? "true" : undefined}
                 onClick={() => {
-                  if (server.isOnline) {
+                  if (clickable) {
                     onSelect({
                       name: server.name,
                       country: server.country,

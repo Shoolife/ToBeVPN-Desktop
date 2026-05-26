@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 
 use super::config::{self, ServerConfig, SOCKS_PORT, STATS_API_PORT};
-use super::state::{TrafficStats, VpnState};
+use super::state::{PingHostMapping, TrafficStats, VpnState};
 use super::{ConnectAttempt, CONNECT_CANCELLED};
 
 // ── TUN / routing constants (Linux) ───────────────────────────────
@@ -25,6 +25,7 @@ const FWMARK: &str = "0x1";
 // "Connecting" indefinitely.
 const PKEXEC_TIMEOUT: Duration = Duration::from_secs(60);
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
+const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 
 // Path of the installed polkit helper. When present, pkexec invocations match
 // the app.tobevpn.network policy and run without repeated password prompts.
@@ -205,6 +206,51 @@ impl VpnManager {
         eprintln!("[VPN] Stale state cleanup complete");
     }
 
+    pub async fn prepare_ping_bypass(
+        &self,
+        hosts: Vec<String>,
+    ) -> Result<Vec<PingHostMapping>, String> {
+        // Always resolve host → IPv4 so the caller can pin tcp_ping to a
+        // fixed IP regardless of VPN state. When the tunnel is up we also
+        // install per-IP bypass routes; otherwise OS routing is fine on
+        // its own and we skip the privileged step.
+        let mapping = Self::resolve_hosts_to_ipv4_pairs(&hosts).await;
+        if !matches!(self.get_state().await, VpnState::Connected) {
+            return Ok(mapping);
+        }
+
+        let unique_ips: Vec<String> = {
+            let mut seen = BTreeSet::new();
+            for entry in &mapping {
+                seen.insert(entry.ip.clone());
+            }
+            seen.into_iter().collect()
+        };
+        if unique_ips.is_empty() {
+            return Ok(mapping);
+        }
+        eprintln!("[VPN] Preparing {} direct ping routes", unique_ips.len());
+
+        if Path::new(POLKIT_HELPER).exists() {
+            let mut cmd = Command::new("pkexec");
+            cmd.arg(POLKIT_HELPER).arg("bypass");
+            for ip in &unique_ips {
+                cmd.arg(ip);
+            }
+            let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, None).await?;
+            if output.status.success() {
+                return Ok(mapping);
+            }
+            return Err(format!(
+                "direct ping route setup failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        Self::prepare_ping_bypass_inline(&unique_ips).await?;
+        Ok(mapping)
+    }
+
     /// Probe for leftover VPN artefacts using non-privileged commands.
     fn has_stale_artefacts() -> bool {
         // The helper writes the tun2socks PID file under /tmp because it runs
@@ -246,10 +292,43 @@ impl VpnManager {
         eprintln!("[VPN] START called");
         eprintln!("[VPN] Server configuration loaded");
 
-        // If a previous session is still active or stuck in Connecting,
-        // tear it down first so server-switching works seamlessly (matches phone).
         let prev_state = self.state.lock().await.clone();
         eprintln!("[VPN] Current state: {:?}", prev_state);
+        if matches!(&prev_state, VpnState::Disconnecting) {
+            eprintln!("[VPN] ERROR: previous Disconnecting in progress, aborting");
+            return Err("Disconnecting in progress, try again in a moment".into());
+        }
+
+        // Resolve the next endpoint while an existing tunnel is still alive.
+        // On restricted networks it may be the only route that can resolve a
+        // different VPN endpoint during a live switch.
+        let server_ip = match Self::resolve_server_ip(&server.address, attempt).await {
+            Ok(ip) => ip,
+            Err(e) => {
+                eprintln!("[VPN] ERROR: pre-resolve failed: {e}");
+                if !matches!(&prev_state, VpnState::Connected) {
+                    self.set_state(VpnState::Error { message: e.clone() }).await;
+                }
+                return Err(e);
+            }
+        };
+        eprintln!("[VPN] Server address resolved");
+        let mut control_bypass_ips =
+            match Self::resolve_bypass_ips(&server.bypass_hosts, attempt).await {
+                Ok(ips) => ips,
+                Err(e) => return Err(e),
+            };
+        control_bypass_ips.retain(|ip| ip != &server_ip);
+        eprintln!(
+            "[VPN] Resolved {} configured direct-access destinations",
+            control_bypass_ips.len()
+        );
+        if attempt.is_cancelled() {
+            return Err(CONNECT_CANCELLED.into());
+        }
+
+        // Only tear down the currently usable transport after every address
+        // needed to build the replacement route has been prepared.
         match prev_state {
             VpnState::Connected => {
                 eprintln!("[VPN] Previous session active — stopping before reconnect");
@@ -259,49 +338,15 @@ impl VpnManager {
                 eprintln!("[VPN] Previous attempt stuck in Connecting — running cleanup");
                 self.force_stop().await;
             }
-            VpnState::Disconnecting => {
-                eprintln!("[VPN] ERROR: previous Disconnecting in progress, aborting");
-                return Err("Disconnecting in progress, try again in a moment".into());
-            }
             _ => {}
         }
 
-        attempt.ensure_active()?;
-        self.set_state(VpnState::Connecting).await;
-        eprintln!("[VPN] State -> Connecting");
-
-        // Pre-resolve server domain to IPv4 BEFORE TUN goes up, so xray never
-        // has to do DNS through its own tunnel (which would loop via TUN).
-        let server_ip = match Self::resolve_server_ip(&server.address, attempt).await {
-            Ok(ip) => ip,
-            Err(e) => {
-                eprintln!("[VPN] ERROR: pre-resolve failed: {e}");
-                self.set_state(VpnState::Error { message: e.clone() }).await;
-                return Err(e);
-            }
-        };
-        eprintln!("[VPN] Server address resolved");
-        let mut control_bypass_ips =
-            match Self::resolve_bypass_ips(&server.bypass_hosts, attempt).await {
-                Ok(ips) => ips,
-                Err(e) => {
-                    if attempt.is_cancelled() {
-                        self.set_state(VpnState::Disconnected).await;
-                    } else {
-                        self.set_state(VpnState::Error { message: e.clone() }).await;
-                    }
-                    return Err(e);
-                }
-            };
-        control_bypass_ips.retain(|ip| ip != &server_ip);
-        eprintln!(
-            "[VPN] Resolved {} configured direct-access destinations",
-            control_bypass_ips.len()
-        );
         if attempt.is_cancelled() {
             self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
         }
+        self.set_state(VpnState::Connecting).await;
+        eprintln!("[VPN] State -> Connecting");
 
         // Rewrite address to IP. SNI (server.sni) keeps the domain for Reality/TLS.
         let mut server = server;
@@ -670,6 +715,101 @@ impl VpnManager {
             }
         }
         Ok(ips.into_iter().collect())
+    }
+
+    /// Resolve each host to its first IPv4 address, preserving the input
+    /// host string. Hosts that fail to resolve or that are IPv6-only are
+    /// omitted — the caller falls back to the original hostname for ping.
+    async fn resolve_hosts_to_ipv4_pairs(hosts: &[String]) -> Vec<PingHostMapping> {
+        let mut out = Vec::new();
+        let mut seen_hosts = BTreeSet::new();
+        for host in hosts {
+            let trimmed = host.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !seen_hosts.insert(trimmed.to_string()) {
+                continue;
+            }
+            if trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
+                out.push(PingHostMapping {
+                    host: trimmed.to_string(),
+                    ip: trimmed.to_string(),
+                });
+                continue;
+            }
+            match timeout(
+                DNS_RESOLVE_TIMEOUT,
+                tokio::net::lookup_host(format!("{}:443", trimmed)),
+            )
+            .await
+            {
+                Ok(Ok(addrs)) => {
+                    if let Some(addr) = addrs.into_iter().find(|a| a.is_ipv4()) {
+                        out.push(PingHostMapping {
+                            host: trimmed.to_string(),
+                            ip: addr.ip().to_string(),
+                        });
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {
+                    eprintln!("[VPN] Ping destination DNS lookup failed");
+                }
+            }
+        }
+        out
+    }
+
+    async fn prepare_ping_bypass_inline(ips: &[String]) -> Result<(), String> {
+        let route_ip_args = ips
+            .iter()
+            .map(|ip| shell_escape(ip))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let script = format!(
+            r#"#!/bin/bash
+set -e
+
+if [ ! -f /tmp/tobevpn_orig_route ]; then
+    echo "OK"
+    exit 0
+fi
+
+read -r DEFAULT_GW DEFAULT_DEV < /tmp/tobevpn_orig_route
+if [ -z "$DEFAULT_DEV" ]; then
+    echo "ERROR: original route is missing interface" >&2
+    exit 1
+fi
+
+for BYPASS_IP in {route_ip_args}; do
+    if [ "$DEFAULT_GW" = "on-link" ] || [ -z "$DEFAULT_GW" ]; then
+        ip route replace "${{BYPASS_IP}}/32" dev "$DEFAULT_DEV" scope link table {table}
+    else
+        ip route replace "${{BYPASS_IP}}/32" via "$DEFAULT_GW" dev "$DEFAULT_DEV" table {table}
+    fi
+done
+echo "OK"
+"#,
+            table = TUN_TABLE,
+            route_ip_args = route_ip_args,
+        );
+        let staged = cache_dir().join("ping-bypass.sh");
+        write_secure(&staged, script.as_bytes()).map_err(|e| format!("write ping bypass: {e}"))?;
+
+        let mut cmd = Command::new("pkexec");
+        cmd.arg("bash").arg(&staged);
+        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, None).await;
+        let _ = std::fs::remove_file(&staged);
+
+        let output = output?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "direct ping route setup failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
     }
 
     /// Start tun2socks and configure routing.
@@ -1276,7 +1416,8 @@ async fn wait_for_port(
 ///   - `value: 123` / `value:123` (protobuf text)
 ///   - `"value": "123"` / `"value": 123` (JSON, when -json passed)
 async fn query_stat_value(xray_bin: &PathBuf, server: &str, name: &str) -> u64 {
-    let output = Command::new(xray_bin)
+    let mut command = Command::new(xray_bin);
+    command
         .arg("api")
         .arg("statsquery")
         .arg("-s")
@@ -1284,12 +1425,11 @@ async fn query_stat_value(xray_bin: &PathBuf, server: &str, name: &str) -> u64 {
         .arg("-pattern")
         .arg(name)
         .arg("-reset")
-        .output()
-        .await;
-
-    let out = match output {
-        Ok(out) => out,
+        .kill_on_drop(true);
+    let out = match timeout(STATS_QUERY_TIMEOUT, command.output()).await {
+        Ok(Ok(out)) => out,
         Err(_) => return 0,
+        Ok(Err(_)) => return 0,
     };
     if !out.status.success() {
         return 0;

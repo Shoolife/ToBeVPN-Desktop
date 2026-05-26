@@ -7,6 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   startVpn as engineStart,
   stopVpn as engineStop,
+  getVpnState as engineGetState,
   getTrafficStats,
   type ServerVpnConfig,
 } from "./vpn";
@@ -197,6 +198,8 @@ async function connectVpnInternal(
     throw new Error(msg);
   }
   const cancelInFlightStart = state.connecting && !state.connected;
+  const hadConnectedTunnel = state.connected;
+  const previousServerForRecovery = currentServerForRecovery;
   const gen = ++connectionGeneration;
   currentServerForRecovery = server;
   if (resetWatchdogRecovery) {
@@ -214,11 +217,15 @@ async function connectVpnInternal(
       if (gen !== connectionGeneration) return;
     }
     if (await pingHwidOnly()) {
+      if (hadConnectedTunnel) {
+        await engineStop().catch(() => {});
+      }
       throw new Error(t("usage_blocked"));
     }
     if (gen !== connectionGeneration) return;
     await engineStart(server);
     if (gen !== connectionGeneration) return;
+    if (hadConnectedTunnel) statsSessionEnd();
     statsSessionStart();
     setState({
       connecting: false,
@@ -234,7 +241,20 @@ async function connectVpnInternal(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (gen === connectionGeneration) {
-      setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
+      const nativeState = await engineGetState().catch(() => null);
+      const oldTunnelPreserved =
+        hadConnectedTunnel && nativeState?.status === "Connected";
+      if (oldTunnelPreserved) {
+        currentServerForRecovery = previousServerForRecovery;
+        setState({ connecting: false, disconnecting: false, connected: true, lastError: msg });
+        startTunnelHealthCheck(gen);
+      } else {
+        currentServerForRecovery = null;
+        stopTunnelHealthCheck();
+        stopPolling();
+        if (hadConnectedTunnel) statsSessionEnd();
+        setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
+      }
     }
     throw e;
   }
