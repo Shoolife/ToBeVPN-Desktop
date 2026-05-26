@@ -27,6 +27,8 @@ pub struct ServerConfig {
     pub mode: String,
     #[serde(default)]
     pub spx: String,
+    #[serde(default)]
+    pub bypass_hosts: Vec<String>,
 }
 
 fn default_security() -> String {

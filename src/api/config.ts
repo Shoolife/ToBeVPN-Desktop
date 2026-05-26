@@ -36,3 +36,25 @@ export const BOT_API_FALLBACK_URL: string | null =
 // which case we skip the retry path.
 const fallbackSubs = (import.meta.env.VITE_FALLBACK_SUBS_DOMAIN ?? "").trim();
 export const SUBS_FALLBACK_URL: string | null = fallbackSubs ? fallbackSubs : null;
+
+function readHostname(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+// Control-plane requests must leave through the original network interface,
+// not through a tunnel whose server list/access state they are refreshing.
+// Pass hostnames only; Rust never needs endpoint paths or query values.
+export const CONTROL_PLANE_BYPASS_HOSTS = Array.from(
+  new Set(
+    [
+      readHostname(isDev ? null : BOT_API_BASE_URL),
+      readHostname(BOT_API_FALLBACK_URL),
+      readHostname(SUBS_FALLBACK_URL),
+    ].filter((host): host is string => host !== null),
+  ),
+);

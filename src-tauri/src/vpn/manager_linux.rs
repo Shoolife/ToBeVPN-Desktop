@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -280,6 +281,23 @@ impl VpnManager {
             }
         };
         eprintln!("[VPN] Server address resolved");
+        let mut control_bypass_ips =
+            match Self::resolve_bypass_ips(&server.bypass_hosts, attempt).await {
+                Ok(ips) => ips,
+                Err(e) => {
+                    if attempt.is_cancelled() {
+                        self.set_state(VpnState::Disconnected).await;
+                    } else {
+                        self.set_state(VpnState::Error { message: e.clone() }).await;
+                    }
+                    return Err(e);
+                }
+            };
+        control_bypass_ips.retain(|ip| ip != &server_ip);
+        eprintln!(
+            "[VPN] Resolved {} configured direct-access destinations",
+            control_bypass_ips.len()
+        );
         if attempt.is_cancelled() {
             self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
@@ -423,7 +441,7 @@ impl VpnManager {
 
         // 4. Start tun2socks + routing via pkexec helper
         eprintln!("[VPN] Starting TUN setup (pkexec) ...");
-        if let Err(e) = self.start_tun(&server, attempt).await {
+        if let Err(e) = self.start_tun(&server, &control_bypass_ips, attempt).await {
             eprintln!("[VPN] ERROR: TUN setup failed: {e}");
             self.force_stop().await;
             if attempt.is_cancelled() {
@@ -620,10 +638,45 @@ impl VpnManager {
         Err("No IPv4 address found for server".into())
     }
 
+    async fn resolve_bypass_ips(
+        hosts: &[String],
+        attempt: &ConnectAttempt,
+    ) -> Result<Vec<String>, String> {
+        let mut ips = BTreeSet::new();
+        for host in hosts {
+            if host.trim().is_empty() {
+                continue;
+            }
+            let lookup = timeout(
+                DNS_RESOLVE_TIMEOUT,
+                tokio::net::lookup_host(format!("{}:443", host)),
+            );
+            tokio::pin!(lookup);
+            let result = tokio::select! {
+                result = &mut lookup => result,
+                _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
+            };
+            match result {
+                Ok(Ok(addrs)) => {
+                    for addr in addrs {
+                        if addr.is_ipv4() {
+                            ips.insert(addr.ip().to_string());
+                        }
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {
+                    eprintln!("[VPN] Direct-access destination DNS lookup failed");
+                }
+            }
+        }
+        Ok(ips.into_iter().collect())
+    }
+
     /// Start tun2socks and configure routing.
     async fn start_tun(
         &self,
         server: &ServerConfig,
+        control_bypass_ips: &[String],
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
@@ -669,7 +722,7 @@ impl VpnManager {
             if std::path::Path::new(POLKIT_HELPER).exists() {
                 eprintln!("[TUN] Using polkit helper at {}", POLKIT_HELPER);
                 match self
-                    .start_tun_via_helper(&tun2socks_bin, &server_ip, attempt)
+                    .start_tun_via_helper(&tun2socks_bin, &server_ip, control_bypass_ips, attempt)
                     .await
                 {
                     Ok(()) => return Ok(()),
@@ -695,6 +748,16 @@ impl VpnManager {
                 self.bin_dir
             );
         }
+
+        let mut route_ips = vec![server_ip.clone()];
+        route_ips.extend(control_bypass_ips.iter().cloned());
+        route_ips.sort();
+        route_ips.dedup();
+        let route_ip_args = route_ips
+            .iter()
+            .map(|ip| shell_escape(ip))
+            .collect::<Vec<_>>()
+            .join(" ");
 
         let script = format!(
             r#"#!/bin/bash
@@ -778,15 +841,15 @@ ip -6 addr add {tun_addr6} dev {tun} 2>/dev/null || echo "[TUN-SCRIPT] ipv6 addr
 ip link set {tun} up
 echo "[TUN-SCRIPT] TUN is UP"
 
-# 4. Bypass route for VPN server IP in table 100
-if [ -n "$DEFAULT_GW" ]; then
-    echo "[TUN-SCRIPT] Adding bypass route"
-    ip route add {server_ip}/32 via $DEFAULT_GW dev $DEFAULT_DEV table {table}
-else
-    echo "[TUN-SCRIPT] Adding on-link bypass route"
-    ip route add {server_ip}/32 dev $DEFAULT_DEV scope link table {table}
-fi
-echo "[TUN-SCRIPT] Bypass route added"
+# 4. Bypass routes for the VPN server and configured direct-access endpoints.
+for BYPASS_IP in {route_ip_args}; do
+    if [ -n "$DEFAULT_GW" ]; then
+        ip route add "${{BYPASS_IP}}/32" via "$DEFAULT_GW" dev "$DEFAULT_DEV" table {table}
+    else
+        ip route add "${{BYPASS_IP}}/32" dev "$DEFAULT_DEV" scope link table {table}
+    fi
+done
+echo "[TUN-SCRIPT] Direct-access routes added"
 
 # 5. Default route via TUN in table 100
 echo "[TUN-SCRIPT] Adding default route via {tun} table {table}"
@@ -826,6 +889,7 @@ echo "[TUN-SCRIPT] Done!"
             tun_addr6 = TUN_ADDR6,
             tun_v6_prefix = TUN_PUBLIC_V6_PREFIX,
             server_ip = server_ip,
+            route_ip_args = route_ip_args,
             table = TUN_TABLE,
         );
 
@@ -988,6 +1052,7 @@ echo "INSTALLED"
         &self,
         tun2socks_bin: &PathBuf,
         server_ip: &str,
+        control_bypass_ips: &[String],
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
@@ -996,6 +1061,9 @@ echo "INSTALLED"
             .arg("start")
             .arg(tun2socks_bin)
             .arg(server_ip);
+        for ip in control_bypass_ips {
+            cmd.arg(ip);
+        }
         let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, Some(attempt)).await?;
         attempt.ensure_active()?;
 

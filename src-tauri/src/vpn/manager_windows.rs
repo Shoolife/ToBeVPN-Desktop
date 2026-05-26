@@ -8,6 +8,7 @@
 // If the user somehow launches the binary unelevated, `start()` returns a
 // human-readable error so the UI can prompt them to "Run as administrator".
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -95,6 +96,7 @@ pub struct VpnManager {
     xray_process: Arc<Mutex<Option<Child>>>,
     tun2socks_process: Arc<Mutex<Option<Child>>>,
     server_ip: Arc<Mutex<Option<String>>>,
+    control_bypass_ips: Arc<Mutex<Vec<String>>>,
     /// Bumps every time start() reaches Connected. Watchdog tasks compare
     /// against the snapshot they captured at spawn time and exit when the
     /// generation changes — so a watchdog from a previous session doesn't
@@ -111,6 +113,7 @@ impl VpnManager {
             xray_process: Arc::new(Mutex::new(None)),
             tun2socks_process: Arc::new(Mutex::new(None)),
             server_ip: Arc::new(Mutex::new(None)),
+            control_bypass_ips: Arc::new(Mutex::new(Vec::new())),
             session_gen: Arc::new(Mutex::new(0)),
             bin_dir,
             app_handle: Arc::new(Mutex::new(None)),
@@ -190,6 +193,23 @@ impl VpnManager {
             }
         };
         log_win!("[VPN-WIN] Server address resolved");
+        let mut control_bypass_ips =
+            match Self::resolve_bypass_ips(&server.bypass_hosts, attempt).await {
+                Ok(ips) => ips,
+                Err(e) => {
+                    if attempt.is_cancelled() {
+                        self.set_state(VpnState::Disconnected).await;
+                    } else {
+                        self.set_state(VpnState::Error { message: e.clone() }).await;
+                    }
+                    return Err(e);
+                }
+            };
+        control_bypass_ips.retain(|ip| ip != &server_ip);
+        log_win!(
+            "[VPN-WIN] Resolved {} configured direct-access destinations",
+            control_bypass_ips.len()
+        );
         if attempt.is_cancelled() {
             self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
@@ -201,6 +221,7 @@ impl VpnManager {
         }
         server.address = server_ip.clone();
         *self.server_ip.lock().await = Some(server_ip.clone());
+        *self.control_bypass_ips.lock().await = control_bypass_ips.clone();
 
         // 1. xray config — written under per-user %LOCALAPPDATA%\ToBeVPN\
         // (NOT %TEMP%). Contains the user's UUID; %TEMP% is per-user but is
@@ -291,7 +312,10 @@ impl VpnManager {
         }
 
         // 4. TUN + routes
-        if let Err(e) = self.start_tun(&server_ip, attempt).await {
+        if let Err(e) = self
+            .start_tun(&server_ip, &control_bypass_ips, attempt)
+            .await
+        {
             self.force_stop().await;
             if attempt.is_cancelled() {
                 self.set_state(VpnState::Disconnected).await;
@@ -345,6 +369,7 @@ impl VpnManager {
             xray_process: self.xray_process.clone(),
             tun2socks_process: self.tun2socks_process.clone(),
             server_ip: self.server_ip.clone(),
+            control_bypass_ips: self.control_bypass_ips.clone(),
             session_gen: self.session_gen.clone(),
             bin_dir: self.bin_dir.clone(),
             app_handle: self.app_handle.clone(),
@@ -561,7 +586,46 @@ impl VpnManager {
         Err("No IPv4 address found for server".into())
     }
 
-    async fn start_tun(&self, server_ip: &str, attempt: &ConnectAttempt) -> Result<(), String> {
+    async fn resolve_bypass_ips(
+        hosts: &[String],
+        attempt: &ConnectAttempt,
+    ) -> Result<Vec<String>, String> {
+        let mut ips = BTreeSet::new();
+        for host in hosts {
+            if host.trim().is_empty() {
+                continue;
+            }
+            let lookup = timeout(
+                DNS_RESOLVE_TIMEOUT,
+                tokio::net::lookup_host(format!("{}:443", host)),
+            );
+            tokio::pin!(lookup);
+            let result = tokio::select! {
+                result = &mut lookup => result,
+                _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
+            };
+            match result {
+                Ok(Ok(addrs)) => {
+                    for addr in addrs {
+                        if addr.is_ipv4() {
+                            ips.insert(addr.ip().to_string());
+                        }
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {
+                    log_win!("[VPN-WIN] Direct-access destination DNS lookup failed");
+                }
+            }
+        }
+        Ok(ips.into_iter().collect())
+    }
+
+    async fn start_tun(
+        &self,
+        server_ip: &str,
+        control_bypass_ips: &[String],
+        attempt: &ConnectAttempt,
+    ) -> Result<(), String> {
         attempt.ensure_active()?;
         let tun2socks_bin = self.resolve_bin("tun2socks");
         log_win!("[TUN-WIN] tun2socks binary: {:?}", tun2socks_bin);
@@ -576,29 +640,32 @@ impl VpnManager {
         attempt.ensure_active()?;
         log_win!("[TUN-WIN] Default gateway detected");
 
-        // Bypass route: VPN server reachable via the original gateway, never
-        // via TUN. We pin it to the physical interface index — on cellular
-        // setups Windows reports the default route as "on-link" with no IP
-        // gateway, and only the explicit `if <idx>` keeps the route on the
-        // right NIC instead of getting picked up by some other adapter.
-        let _ = run_cmd("route", &["delete", server_ip], Some(attempt)).await;
-        run_cmd(
-            "route",
-            &[
-                "add",
-                server_ip,
-                "mask",
-                "255.255.255.255",
-                &gw,
-                "metric",
-                "1",
-                "if",
-                &idx,
-            ],
-            Some(attempt),
-        )
-        .await
-        .map_err(|e| format!("route add bypass failed: {e}"))?;
+        // Pin VPN and configured fallback destinations to the original
+        // interface so control-plane requests never depend on the tunnel.
+        let mut direct_ips = vec![server_ip.to_string()];
+        direct_ips.extend(control_bypass_ips.iter().cloned());
+        direct_ips.sort();
+        direct_ips.dedup();
+        for ip in &direct_ips {
+            let _ = run_cmd("route", &["delete", ip], Some(attempt)).await;
+            run_cmd(
+                "route",
+                &[
+                    "add",
+                    ip,
+                    "mask",
+                    "255.255.255.255",
+                    &gw,
+                    "metric",
+                    "1",
+                    "if",
+                    &idx,
+                ],
+                Some(attempt),
+            )
+            .await
+            .map_err(|e| format!("route add direct-access destination failed: {e}"))?;
+        }
         attempt.ensure_active()?;
 
         // Spawn tun2socks. It creates the wintun adapter on first packet.
@@ -910,6 +977,9 @@ impl VpnManager {
         // Remove bypass route
         if let Some(server_ip) = self.server_ip.lock().await.take() {
             let _ = run_cmd("route", &["delete", &server_ip], None).await;
+        }
+        for ip in self.control_bypass_ips.lock().await.drain(..) {
+            let _ = run_cmd("route", &["delete", &ip], None).await;
         }
 
         // Remove split-default routes installed by start_tun (best-effort —

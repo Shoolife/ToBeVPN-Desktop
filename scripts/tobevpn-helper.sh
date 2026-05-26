@@ -115,18 +115,21 @@ case "$1" in
   start)
     TUN2SOCKS_BIN="$2"
     SERVER_IP="$3"
+    EXTRA_BYPASS_IPS=("${@:4}")
 
     if [ -z "$TUN2SOCKS_BIN" ] || [ -z "$SERVER_IP" ]; then
-        echo "ERROR: usage: $0 start <tun2socks-bin> <server-ip>" >&2
+        echo "ERROR: usage: $0 start <tun2socks-bin> <server-ip> [bypass-ip ...]" >&2
         exit 1
     fi
     if ! validate_tun2socks_path "$TUN2SOCKS_BIN"; then
         exit 1
     fi
-    if ! echo "$SERVER_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-        echo "ERROR: invalid server IP" >&2
-        exit 1
-    fi
+    for BYPASS_IP in "$SERVER_IP" "${EXTRA_BYPASS_IPS[@]}"; do
+        if ! echo "$BYPASS_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: invalid bypass IP" >&2
+            exit 1
+        fi
+    done
 
     cleanup_routing
 
@@ -168,12 +171,14 @@ case "$1" in
     ip -6 addr add "$TUN_ADDR6" dev "$TUN_NAME" 2>/dev/null || true
     ip link set "$TUN_NAME" up
 
-    if [ -n "$DEFAULT_GW" ]; then
-        ip route add "${SERVER_IP}/32" via "$DEFAULT_GW" dev "$DEFAULT_DEV" table "$TUN_TABLE"
-    else
-        # On-link upstream — no via, packet goes directly out the interface.
-        ip route add "${SERVER_IP}/32" dev "$DEFAULT_DEV" scope link table "$TUN_TABLE"
-    fi
+    for BYPASS_IP in "$SERVER_IP" "${EXTRA_BYPASS_IPS[@]}"; do
+        if [ -n "$DEFAULT_GW" ]; then
+            ip route add "${BYPASS_IP}/32" via "$DEFAULT_GW" dev "$DEFAULT_DEV" table "$TUN_TABLE"
+        else
+            # On-link upstream — no via, packet goes directly out the interface.
+            ip route add "${BYPASS_IP}/32" dev "$DEFAULT_DEV" scope link table "$TUN_TABLE"
+        fi
+    done
     ip route add default dev "$TUN_NAME" table "$TUN_TABLE"
     ip -6 route add "$TUN_PUBLIC_V6_PREFIX" dev "$TUN_NAME" table "$TUN_TABLE"
     ip rule add not fwmark "$FWMARK" table "$TUN_TABLE" prio 100
@@ -248,7 +253,7 @@ case "$1" in
     ;;
 
   *)
-    echo "ERROR: usage: $0 {start <tun2socks-bin> <server-ip>|stop}" >&2
+    echo "ERROR: usage: $0 {start <tun2socks-bin> <server-ip> [bypass-ip ...]|stop}" >&2
     exit 1
     ;;
 esac

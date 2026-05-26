@@ -1,6 +1,6 @@
 // Thin fetch wrapper for the bot backend using per-device sessions.
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
-import { BOT_API_BASE_URL, BOT_API_FALLBACK_URL } from "./config";
+import { BOT_API_BASE_URL, BOT_API_FALLBACK_URL, CONTROL_PLANE_BYPASS_HOSTS } from "./config";
 import { getDeviceFingerprint } from "../session/fingerprint";
 import {
   clearDeviceSession,
@@ -100,6 +100,17 @@ const REQUEST_TIMEOUT_MS = PRIMARY_TIMEOUT_MS + FALLBACK_TIMEOUT_MS;
 
 let tokenOperation: Promise<string | null> | null = null;
 
+function publicErrorMessage(raw: string): string {
+  let message = raw
+    .replace(/https?:\/\/[^\s)]+/gi, "[configured endpoint]")
+    .replace(/[\n\r\t]+/g, " ")
+    .trim();
+  for (const hostname of CONTROL_PLANE_BYPASS_HOSTS) {
+    message = message.split(hostname).join("[configured host]");
+  }
+  return message.slice(0, 200);
+}
+
 function runTokenOperation(
   operation: () => Promise<string | null>,
 ): Promise<string | null> {
@@ -134,7 +145,7 @@ async function attemptFetch(
     if (controller.signal.aborted && (!userSignal || !userSignal.aborted)) {
       throw new Error(`Request timed out after ${timeoutMs / 1000}s`);
     }
-    throw error;
+    throw new Error("Network request failed");
   } finally {
     clearTimeout(timeoutId);
   }
@@ -184,21 +195,19 @@ async function parseErrorMessage(response: Response): Promise<string> {
   // Cap the surfaced error message length so a hostile/buggy backend payload
   // can't blow up the UI layout. React already escapes the text — no XSS — but
   // multi-MB error bodies or multi-line markdown break the layout.
-  const sanitize = (raw: string): string =>
-    raw.replace(/[\n\r\t]+/g, " ").trim().slice(0, 200);
   try {
     const text = await response.text();
     if (!text) return `HTTP ${response.status}`;
     try {
       const parsed = JSON.parse(text) as { message?: string; detail?: string };
       if (typeof parsed.message === "string" && parsed.message.trim())
-        return sanitize(parsed.message);
+        return publicErrorMessage(parsed.message);
       if (typeof parsed.detail === "string" && parsed.detail.trim())
-        return sanitize(parsed.detail);
+        return publicErrorMessage(parsed.detail);
     } catch {
       // Not JSON — fall back to raw text.
     }
-    return sanitize(text);
+    return publicErrorMessage(text);
   } catch {
     return `HTTP ${response.status}`;
   }

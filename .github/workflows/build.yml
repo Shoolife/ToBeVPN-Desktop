@@ -33,14 +33,26 @@ jobs:
           FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: |
-          if [ -z "${FALLBACK_BOT_DOMAIN:-}" ]; then
-            echo "::error::FALLBACK_BOT_DOMAIN is required for a release build"
-            exit 1
-          fi
-          if [ -z "${FALLBACK_SUBS_DOMAIN:-}" ]; then
-            echo "::error::FALLBACK_SUBS_DOMAIN is required for a release build"
-            exit 1
-          fi
+          validate_endpoint() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "::error::${name} is required for a release build"
+              exit 1
+            fi
+            case "$value" in
+              *your-*|*example.invalid*|*'<'*|*'>'*|*__*)
+                echo "::error::${name} still contains a placeholder value"
+                exit 1
+                ;;
+            esac
+            if [[ "$value" != https://* ]]; then
+              echo "::error::${name} must be an HTTPS URL"
+              exit 1
+            fi
+          }
+          validate_endpoint FALLBACK_BOT_DOMAIN "$FALLBACK_BOT_DOMAIN"
+          validate_endpoint FALLBACK_SUBS_DOMAIN "$FALLBACK_SUBS_DOMAIN"
 
       - uses: actions/setup-node@v5
         with:
@@ -143,10 +155,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
-          # Fallback endpoint URLs. Empty when the secret is unset
-          # — the JS layer treats empty strings as "no fallback configured"
-          # and skips the retry path entirely, so a missing secret degrades
-          # gracefully to v1.0.6 behavior instead of breaking the build.
+          # The audit job above rejects empty or placeholder release values.
           VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
 
