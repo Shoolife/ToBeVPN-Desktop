@@ -155,7 +155,6 @@ function writeCachedSubscriptionUrl(shortUuid: string, url: string | null): void
 }
 
 function setSubscriptionUsageBlocked(shortUuid: string, blocked: boolean): void {
-  const wasBlocked = isSubscriptionUsageBlocked(shortUuid);
   try {
     if (blocked) {
       localStorage.setItem(BLOCKED_SUBSCRIPTION_KEY, shortUuid);
@@ -165,9 +164,7 @@ function setSubscriptionUsageBlocked(shortUuid: string, blocked: boolean): void 
   } catch {
     // Keep connection handling functional in webviews without persistence.
   }
-  if (wasBlocked !== isSubscriptionUsageBlocked(shortUuid)) {
-    window.dispatchEvent(new Event(SUBSCRIPTION_ACCESS_EVENT));
-  }
+  window.dispatchEvent(new Event(SUBSCRIPTION_ACCESS_EVENT));
 }
 
 function isSubscriptionUsageBlocked(shortUuid: string | null): boolean {

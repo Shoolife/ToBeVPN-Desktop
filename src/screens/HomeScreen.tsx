@@ -171,7 +171,10 @@ export default function HomeScreen({
   const isPaidOrAdmin = session.userPlan === "PAID" || session.userPlan === "ADMIN";
 
   useEffect(() => {
-    void syncSubscription();
+    // Force-sync on mount so the block state lands before the user can act,
+    // bypassing the 12h throttle of the unforced syncSubscription.
+    void syncSubscription({ force: true });
+    void pingHwidOnly().catch(() => {});
     startPendingPurchaseRefreshIfNeeded();
 
     const BLOCK_POLL_MS = 30_000;
