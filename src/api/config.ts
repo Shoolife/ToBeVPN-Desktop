@@ -37,6 +37,10 @@ export const BOT_API_FALLBACK_URL: string | null =
 const fallbackSubs = (import.meta.env.VITE_FALLBACK_SUBS_DOMAIN ?? "").trim();
 export const SUBS_FALLBACK_URL: string | null = fallbackSubs ? fallbackSubs : null;
 
+const panelUrl = (import.meta.env.VITE_PANEL_URL ?? "").trim();
+export const PANEL_BASE_URL: string | null =
+  panelUrl ? (panelUrl.startsWith("http") ? panelUrl : `https://${panelUrl}`) : null;
+
 function readHostname(url: string | null): string | null {
   if (!url) return null;
   try {
@@ -55,6 +59,7 @@ export const CONTROL_PLANE_BYPASS_HOSTS = Array.from(
       readHostname(isDev ? null : BOT_API_BASE_URL),
       readHostname(BOT_API_FALLBACK_URL),
       readHostname(SUBS_FALLBACK_URL),
+      readHostname(PANEL_BASE_URL),
     ].filter((host): host is string => host !== null),
   ),
 );

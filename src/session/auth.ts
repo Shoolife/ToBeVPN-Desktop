@@ -398,7 +398,8 @@ export async function initializeAuthSession(): Promise<void> {
     STARTUP_SESSION_TIMEOUT_MS,
   );
 
-  if (getSession().isLinked) {
+  const sessionAfterSync = getSession();
+  if (sessionAfterSync.isLinked || sessionAfterSync.shortUuid) {
     await settleStartupStep(
       "syncSubscription",
       syncSubscription({ force: true }),
@@ -577,12 +578,11 @@ async function readOrFetchSubscriptionUrl(shortUuid: string): Promise<string | n
 
 async function runSyncSubscription(): Promise<void> {
   let session = getSession();
-  if (!session.isLinked) return;
 
   const telegramId = session.telegramId;
 
   let panelUser: PanelUserDto | null = null;
-  if (telegramId !== null) {
+  if (session.isLinked && telegramId !== null) {
     try {
     const { response: panelUsers } = await getUserByTelegramId(telegramId);
     panelUser = selectBestPanelUser(
