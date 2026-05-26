@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
 // UpdateBanner now mounts in App as a top-of-window overlay so it
@@ -153,6 +154,8 @@ export default function HomeScreen({
   const { connected, connecting, disconnecting, sessionBytes, sessionStartTime, lastError } = vpn;
   const [showSubscription, setShowSubscription] = useState(false);
   const [showTrialInfo, setShowTrialInfo] = useState(false);
+  const [showBlockedDialog, setShowBlockedDialog] = useState(false);
+  const blockDialogShownOnce = useRef(false);
   const [checkingSubscriptionAccess, setCheckingSubscriptionAccess] = useState(false);
   const [preparingConnection, setPreparingConnection] = useState(false);
   const toggleGeneration = useRef(0);
@@ -170,12 +173,28 @@ export default function HomeScreen({
   useEffect(() => {
     void syncSubscription();
     startPendingPurchaseRefreshIfNeeded();
+
+    const BLOCK_POLL_MS = 30_000;
+    const checkBlock = () => void pingHwidOnly().catch(() => {});
+    const timer = window.setInterval(checkBlock, BLOCK_POLL_MS);
+    window.addEventListener("focus", checkBlock);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", checkBlock);
+    };
   }, []);
 
   useEffect(() => {
     if (subscriptionUsageBlocked) {
       setShowSubscription(false);
       setShowTrialInfo(false);
+      if (!blockDialogShownOnce.current) {
+        blockDialogShownOnce.current = true;
+        setShowBlockedDialog(true);
+      }
+    } else {
+      blockDialogShownOnce.current = false;
+      setShowBlockedDialog(false);
     }
   }, [subscriptionUsageBlocked]);
 
@@ -349,8 +368,7 @@ export default function HomeScreen({
         <div className="home-connect-area">
           <button
             className={`home-power ${connected ? "home-power--on" : ""} ${activating ? "home-power--connecting" : ""} ${disconnecting ? "home-power--disconnecting" : ""} ${subscriptionUsageBlocked ? "home-power--blocked" : ""}`}
-            onClick={subscriptionUsageBlocked ? undefined : handleToggle}
-            disabled={subscriptionUsageBlocked}
+            onClick={subscriptionUsageBlocked ? () => setShowBlockedDialog(true) : handleToggle}
           >
             <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
@@ -481,7 +499,10 @@ export default function HomeScreen({
 
         {/* Subscription card */}
         {subscriptionUsageBlocked ? (
-          <div className="home-card home-card--sub home-card--blocked">
+          <div
+            className="home-card home-card--clickable home-card--sub home-card--blocked"
+            onClick={() => setShowBlockedDialog(true)}
+          >
             <div className="home-card__row">
               <span className="home-card__blocked-icon">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -494,6 +515,9 @@ export default function HomeScreen({
                 <div className="home-sub__label">{t("subscription")}</div>
                 <div className="home-sub__blocked-text">{t("usage_blocked")}</div>
               </div>
+              <svg className="home-card__arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
             </div>
           </div>
         ) : (
@@ -521,6 +545,41 @@ export default function HomeScreen({
 
       {showSubscription && !subscriptionUsageBlocked && (
         <SubscriptionSheet onDismiss={() => setShowSubscription(false)} />
+      )}
+
+      {showBlockedDialog && (
+        <div className="home-trial-dialog-overlay" onClick={() => setShowBlockedDialog(false)}>
+          <div className="home-trial-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="home-trial-dialog__header">
+              <span className="home-trial-dialog__icon">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+              </span>
+              <div className="home-trial-dialog__title">{t("usage_blocked")}</div>
+            </div>
+            <div className="home-trial-dialog__text">{t("block_appeal_message")}</div>
+            <div className="home-trial-dialog__actions">
+              <button
+                className="home-trial-dialog__btn home-trial-dialog__btn--secondary"
+                onClick={() => setShowBlockedDialog(false)}
+              >
+                OK
+              </button>
+              <button
+                className="home-trial-dialog__btn home-trial-dialog__btn--primary"
+                onClick={() => {
+                  setShowBlockedDialog(false);
+                  void openUrl("https://t.me/meow_meow_vpn?direct").catch(() => {});
+                }}
+              >
+                {t("block_appeal_button")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {showTrialInfo && (
