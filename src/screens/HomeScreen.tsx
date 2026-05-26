@@ -14,6 +14,7 @@ import { isSameServerSelection } from "../session/serverSelection";
 import {
   fetchVpnServers,
   getSubscriptionUsageBlocked,
+  getUpdateRequired,
   pingHwidOnly,
   startPendingPurchaseRefreshIfNeeded,
   subscribeSubscriptionUsageBlocked,
@@ -127,6 +128,8 @@ function toSelectedServer(server: VpnServer): SelectedServer {
   };
 }
 
+let blockDialogShownThisSession = false;
+
 export default function HomeScreen({
   onLogout: _onLogout,
   onSettings,
@@ -150,12 +153,17 @@ export default function HomeScreen({
     getSubscriptionUsageBlocked,
     getSubscriptionUsageBlocked,
   );
+  const updateRequired = useSyncExternalStore(
+    subscribeSubscriptionUsageBlocked,
+    getUpdateRequired,
+    getUpdateRequired,
+  );
   const vpn = useVpnRuntime();
   const { connected, connecting, disconnecting, sessionBytes, sessionStartTime, lastError } = vpn;
   const [showSubscription, setShowSubscription] = useState(false);
   const [showTrialInfo, setShowTrialInfo] = useState(false);
   const [showBlockedDialog, setShowBlockedDialog] = useState(false);
-  const blockDialogShownOnce = useRef(false);
+  const prevBlocked = useRef(subscriptionUsageBlocked);
   const [checkingSubscriptionAccess, setCheckingSubscriptionAccess] = useState(false);
   const [preparingConnection, setPreparingConnection] = useState(false);
   const toggleGeneration = useRef(0);
@@ -191,14 +199,19 @@ export default function HomeScreen({
     if (subscriptionUsageBlocked) {
       setShowSubscription(false);
       setShowTrialInfo(false);
-      if (!blockDialogShownOnce.current) {
-        blockDialogShownOnce.current = true;
+      // Show dialog automatically only:
+      // 1. First time this session (app startup) — blockDialogShownThisSession is false
+      // 2. Real-time transition: was unblocked → now blocked (prevBlocked was false)
+      // NOT on re-mount (navigating back from Settings/Stats).
+      const isRealTimeTransition = !prevBlocked.current;
+      if (!blockDialogShownThisSession || isRealTimeTransition) {
+        blockDialogShownThisSession = true;
         setShowBlockedDialog(true);
       }
     } else {
-      blockDialogShownOnce.current = false;
       setShowBlockedDialog(false);
     }
+    prevBlocked.current = subscriptionUsageBlocked;
   }, [subscriptionUsageBlocked]);
 
   const openSubscription = async () => {
@@ -387,7 +400,7 @@ export default function HomeScreen({
         {/* Server card */}
         <div className={`home-card ${subscriptionUsageBlocked ? "" : "home-card--clickable"}`} onClick={subscriptionUsageBlocked ? undefined : onServers}>
           <div className="home-card__row">
-            {selectedServer ? (
+            {selectedServer && !subscriptionUsageBlocked ? (
               <span className="home-server__flag">
                 {countryFlagForUi(selectedServer.country, selectedServer.name)}
               </span>
@@ -402,11 +415,11 @@ export default function HomeScreen({
             )}
             <div className="home-card__info">
               <div className="home-card__title">
-                {selectedServer
+                {selectedServer && !subscriptionUsageBlocked
                   ? serverDisplayName(selectedServer.name, selectedServer.country)
                   : t("server_choose")}
               </div>
-              {selectedServer && (
+              {selectedServer && !subscriptionUsageBlocked && (
                 <div className="home-card__subtitle">
                   {countryName(
                     serverCountryCodeForUi(
@@ -417,7 +430,7 @@ export default function HomeScreen({
                 </div>
               )}
             </div>
-            {selectedServer && ping !== 0 && (
+            {selectedServer && !subscriptionUsageBlocked && ping !== 0 && (
               <div className="home-card__ping">
                 {ping > 0 ? (
                   <>
@@ -552,25 +565,22 @@ export default function HomeScreen({
 
       {showBlockedDialog && (
         <div className="home-trial-dialog-overlay" onClick={() => setShowBlockedDialog(false)}>
-          <div className="home-trial-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="home-trial-dialog__header">
-              <span className="home-trial-dialog__icon">
-                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10" />
-                  <line x1="12" y1="8" x2="12" y2="12" />
-                  <line x1="12" y1="16" x2="12.01" y2="16" />
-                </svg>
-              </span>
-              <div className="home-trial-dialog__title">{t("usage_blocked")}</div>
-            </div>
+          <div className="home-trial-dialog home-trial-dialog--centered" onClick={(e) => e.stopPropagation()}>
+            <button className="home-trial-dialog__close" onClick={() => setShowBlockedDialog(false)}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+            <span className="home-trial-dialog__icon home-trial-dialog__icon--top">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+            </span>
+            <div className="home-trial-dialog__title">{t("usage_blocked")}</div>
             <div className="home-trial-dialog__text">{t("block_appeal_message")}</div>
-            <div className="home-trial-dialog__actions">
-              <button
-                className="home-trial-dialog__btn home-trial-dialog__btn--secondary"
-                onClick={() => setShowBlockedDialog(false)}
-              >
-                OK
-              </button>
+            <div className="home-trial-dialog__actions home-trial-dialog__actions--centered">
               <button
                 className="home-trial-dialog__btn home-trial-dialog__btn--primary"
                 onClick={() => {
@@ -614,6 +624,42 @@ export default function HomeScreen({
                 }}
               >
                 {t("trial_access_open_plans")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {updateRequired && (
+        <div className="home-trial-dialog-overlay home-trial-dialog-overlay--modal">
+          <div className="home-trial-dialog home-trial-dialog--centered">
+            <span className="home-trial-dialog__icon home-trial-dialog__icon--top home-trial-dialog__icon--update">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            </span>
+            <div className="home-trial-dialog__title">{t("update_required_title")}</div>
+            <div className="home-trial-dialog__text">{t("update_required_message")}</div>
+            <div className="home-trial-dialog__actions home-trial-dialog__actions--centered">
+              <button
+                className="home-trial-dialog__btn home-trial-dialog__btn--secondary"
+                onClick={() => void invoke("plugin:process|exit", { code: 0 })}
+              >
+                {t("update_required_quit")}
+              </button>
+              <button
+                className="home-trial-dialog__btn home-trial-dialog__btn--primary"
+                onClick={() => {
+                  void (async () => {
+                    const { forceCheckUpdate, startUpdateDownload } = await import("../session/updateStore");
+                    await forceCheckUpdate();
+                    await startUpdateDownload();
+                  })();
+                }}
+              >
+                {t("update_required_button")}
               </button>
             </div>
           </div>

@@ -59,6 +59,7 @@ const SUB_INTERVAL_KEY = "tobevpn_sub_interval_ms_v1";
 const LEGACY_SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v1";
 const SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v2";
 const BLOCKED_SUBSCRIPTION_KEY = "tobevpn_blocked_subscription_v1";
+const UPDATE_REQUIRED_KEY = "tobevpn_update_required_v1";
 const SUBSCRIPTION_ACCESS_EVENT = "tobevpn:subscription-access-changed";
 const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
 const PENDING_AUTH_TOKEN_KEY = "tobevpn_pending_auth_token_v1";
@@ -178,6 +179,28 @@ function isSubscriptionUsageBlocked(shortUuid: string | null): boolean {
 
 export function getSubscriptionUsageBlocked(): boolean {
   return isSubscriptionUsageBlocked(getSession().shortUuid);
+}
+
+export function getUpdateRequired(): boolean {
+  try {
+    return localStorage.getItem(UPDATE_REQUIRED_KEY) === "yes";
+  } catch {
+    return false;
+  }
+}
+
+function setUpdateRequired(required: boolean): void {
+  const was = getUpdateRequired();
+  try {
+    if (required) {
+      localStorage.setItem(UPDATE_REQUIRED_KEY, "yes");
+    } else {
+      localStorage.removeItem(UPDATE_REQUIRED_KEY);
+    }
+  } catch {}
+  if (was !== getUpdateRequired()) {
+    window.dispatchEvent(new Event(SUBSCRIPTION_ACCESS_EVENT));
+  }
 }
 
 export function subscribeSubscriptionUsageBlocked(listener: () => void): () => void {
@@ -543,6 +566,7 @@ export async function pingHwidOnly(): Promise<boolean> {
     const result = await pingSubscriptionUrl(url);
     if (!result) return wasBlocked;
     setSubscriptionUsageBlocked(shortUuid, result.isUsageBlocked);
+    setUpdateRequired(result.isUpdateRequired);
     return result.isUsageBlocked;
   } catch {
     return wasBlocked;

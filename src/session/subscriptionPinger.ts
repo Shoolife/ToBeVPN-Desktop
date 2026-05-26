@@ -2,6 +2,7 @@
 // This is the only request the subscription panel parses to create/refresh an
 // HWID device record; the bot's /api/* endpoints don't expose it to the panel.
 // We hit the URL (a) before each VPN connect, (b) on subscription refresh.
+import { invoke } from "@tauri-apps/api/core";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { SUBS_FALLBACK_URL } from "../api/config";
 import { getDeviceFingerprint } from "./fingerprint";
@@ -16,18 +17,15 @@ const httpFetch: typeof fetch =
     ? window.fetch.bind(window)
     : tauriFetch;
 
-const PRIMARY_TIMEOUT_MS = 8_000;
-const PRIMARY_HEDGED_TIMEOUT_MS = 3_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
-// Start the fallback before the primary leg fully times out. A blackholed
-// primary route otherwise adds the whole 8s timeout to every VPN connect.
-const FALLBACK_HEDGE_DELAY_MS = 900;
 const BLOCK_HEADER = "is-hack";
 const BLOCK_VALUE = "yes";
+const UPDATE_REQUIRED_HEADER = "update-required";
 
 export interface SubscriptionPingResult {
   intervalMs: number | null;
   isUsageBlocked: boolean;
+  isUpdateRequired: boolean;
 }
 
 /**
@@ -54,135 +52,67 @@ export async function pingSubscriptionUrl(
     };
     if (fp.hwid) (headers as Record<string, string>)["x-hwid"] = fp.hwid;
 
-    const fallback = buildFallbackUrl(subscriptionUrl);
-    if (fallback) {
-      return await hedgedPing(subscriptionUrl, fallback, headers);
-    }
-    return readResult(await timedFetch(subscriptionUrl, headers, PRIMARY_TIMEOUT_MS));
+    const fallbackUrl = buildFallbackUrl(subscriptionUrl);
+    return await primaryThenFallback(subscriptionUrl, fallbackUrl, headers);
   } catch {
     console.warn("[pingSubscriptionUrl] failed");
     return null;
   }
 }
 
-interface TimedRequest {
-  promise: Promise<Response>;
-  abort: () => void;
-}
-
-function startTimedFetch(url: string, headers: HeadersInit, timeoutMs: number): TimedRequest {
+async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-  const promise = httpFetch(url, { method: "GET", headers, signal: controller.signal }).finally(() => {
+  try {
+    return await httpFetch(url, { method: "GET", headers, signal: controller.signal });
+  } finally {
     clearTimeout(timeoutId);
-  });
-  return {
-    promise,
-    abort: () => {
-      clearTimeout(timeoutId);
-      controller.abort();
-    },
-  };
+  }
 }
 
-async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
-  const request = startTimedFetch(url, headers, timeoutMs);
-  return request.promise;
-}
-
-async function hedgedPing(
+/**
+ * Primary ping goes through a Rust command (`fetch_subscription_ping`)
+ * that is NOT subject to the Tauri HTTP plugin's build-time scope.
+ * The subscription URL host (`__SUBSCRIPTION_HOST__`) is determined at runtime
+ * by the panel and will never match the static allowlist.
+ *
+ * Fallback (Yandex CF) still uses `tauriFetch` because it IS in the
+ * allowlist and we only need it when the primary is unreachable.
+ */
+async function primaryThenFallback(
   primaryUrl: string,
-  fallbackUrl: string,
+  fallbackUrl: string | null,
   headers: HeadersInit,
 ): Promise<SubscriptionPingResult> {
-  const primary = startTimedFetch(primaryUrl, headers, PRIMARY_HEDGED_TIMEOUT_MS);
-  let fallback: TimedRequest | null = null;
-  let fallbackTimer: number | null = null;
-
-  return new Promise<SubscriptionPingResult>((resolve, reject) => {
-    let settled = false;
-    let primaryFailed = false;
-    let fallbackFailed = false;
-    let primaryError: unknown = null;
-    let fallbackError: unknown = null;
-    let fallbackResult: SubscriptionPingResult | null = null;
-
-    const cleanup = () => {
-      if (fallbackTimer !== null) {
-        clearTimeout(fallbackTimer);
-        fallbackTimer = null;
-      }
+  try {
+    const fp = await getDeviceFingerprint();
+    const raw = await invoke<{
+      status: number;
+      is_hack: string;
+      update_required: string;
+      profile_update_interval: string;
+    }>("fetch_subscription_ping", {
+      url: primaryUrl,
+      hwid: fp.hwid ?? "",
+      deviceOs: fp.platform,
+      osVersion: fp.osVersion,
+      deviceModel: fp.model,
+      userAgent: fp.userAgent,
+    });
+    return {
+      intervalMs: readIntervalMs(raw.profile_update_interval || null),
+      isUsageBlocked: raw.is_hack.trim().toLowerCase() === BLOCK_VALUE,
+      isUpdateRequired: raw.update_required.trim().toLowerCase() === BLOCK_VALUE,
     };
-
-    const finish = (result: SubscriptionPingResult, winner: "primary" | "fallback") => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (winner === "primary") {
-        fallback?.abort();
-      } else {
-        primary.abort();
-      }
-      resolve(result);
-    };
-
-    const handlePrimaryResponse = (response: Response) => {
-      finish(readResult(response), "primary");
-    };
-
-    const handleFallbackResponse = (response: Response) => {
-      const result = readResult(response);
-      if (result.isUsageBlocked || primaryFailed) {
-        finish(result, "fallback");
-        return;
-      }
-      fallbackResult = result;
-    };
-
-    const failIfBothFailed = () => {
-      if (!primaryFailed || !fallbackFailed || settled) return;
-      settled = true;
-      cleanup();
-      primary.abort();
-      fallback?.abort();
-      reject(fallbackError ?? primaryError);
-    };
-
-    const startFallback = () => {
-      if (settled || fallback) return;
-      console.warn("[pingSubscriptionUrl] using fallback leg");
-      fallback = startTimedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
-      fallback.promise
-        .then(handleFallbackResponse)
-        .catch((error) => {
-          fallbackFailed = true;
-          fallbackError = error;
-          failIfBothFailed();
-        });
-    };
-
-    fallbackTimer = window.setTimeout(() => {
-      fallbackTimer = null;
-      startFallback();
-    }, FALLBACK_HEDGE_DELAY_MS);
-
-    primary.promise
-      .then(handlePrimaryResponse)
-      .catch((error) => {
-        primaryFailed = true;
-        primaryError = error;
-        if (fallbackResult) {
-          finish(fallbackResult, "fallback");
-          return;
-        }
-        if (fallbackTimer !== null) {
-          clearTimeout(fallbackTimer);
-          fallbackTimer = null;
-          startFallback();
-        }
-        failIfBothFailed();
-      });
-  });
+  } catch (primaryError) {
+    if (!fallbackUrl) throw primaryError;
+    try {
+      const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      return readResult(response);
+    } catch {
+      throw primaryError;
+    }
+  }
 }
 
 // Floor at 1h so a misconfigured panel can't cause the client to hammer it;
@@ -195,6 +125,8 @@ function readResult(response: Response): SubscriptionPingResult {
   return {
     intervalMs: readIntervalMs(response.headers.get("profile-update-interval")),
     isUsageBlocked: readUsageBlocked(response.headers),
+    isUpdateRequired:
+      (response.headers.get(UPDATE_REQUIRED_HEADER) ?? "").trim().toLowerCase() === BLOCK_VALUE,
   };
 }
 

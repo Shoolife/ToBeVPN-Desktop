@@ -27,9 +27,66 @@ export function serverCountryCodeForUi(
   countryCode: string | null | undefined,
   serverName: string,
 ): string {
+  // Server names like "Нидерланды 5" or "Швеция 1" are explicit user-facing
+  // labels. They take priority over the panel's `country_code`, which can
+  // point at the *entry* node of a cascade (e.g. RU→NL keeps country_code=RU
+  // while the user sees and expects "Нидерланды").
+  const codeFromName = countryCodeFromServerName(serverName);
+  if (codeFromName) return codeFromName;
+
   const normalizedCode = countryCode?.trim().toUpperCase() ?? "";
   if (countryFlagOrNull(normalizedCode)) return normalizedCode;
   return countryCodeFromFlag(parseLeadingPrefix(serverName).flag) ?? "";
+}
+
+const COUNTRY_NAME_TO_CODE: Record<string, string> = {
+  "нидерланды": "NL",
+  "netherlands": "NL",
+  "швеция": "SE",
+  "sweden": "SE",
+  "финляндия": "FI",
+  "finland": "FI",
+  "германия": "DE",
+  "germany": "DE",
+  "франция": "FR",
+  "france": "FR",
+  "великобритания": "GB",
+  "англия": "GB",
+  "uk": "GB",
+  "сша": "US",
+  "usa": "US",
+  "польша": "PL",
+  "poland": "PL",
+  "литва": "LT",
+  "lithuania": "LT",
+  "латвия": "LV",
+  "latvia": "LV",
+  "эстония": "EE",
+  "estonia": "EE",
+  "испания": "ES",
+  "spain": "ES",
+  "италия": "IT",
+  "italy": "IT",
+  "турция": "TR",
+  "turkey": "TR",
+  "япония": "JP",
+  "japan": "JP",
+  "сингапур": "SG",
+  "singapore": "SG",
+  "украина": "UA",
+  "ukraine": "UA",
+  "казахстан": "KZ",
+  "kazakhstan": "KZ",
+  "беларусь": "BY",
+  "belarus": "BY",
+};
+
+function countryCodeFromServerName(serverName: string): string | null {
+  const lower = serverName.toLowerCase();
+  for (const [keyword, code] of Object.entries(COUNTRY_NAME_TO_CODE)) {
+    if (lower.includes(keyword)) return code;
+  }
+  return null;
 }
 
 export function serverDisplayName(

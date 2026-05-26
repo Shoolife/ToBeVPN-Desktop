@@ -156,7 +156,7 @@
 .home-power--blocked {
   background: #F44336;
   color: var(--bg);
-  cursor: not-allowed;
+  cursor: pointer;
   opacity: 0.85;
 }
 
@@ -438,10 +438,16 @@
   inset: 0;
   z-index: 180;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   padding: 14px 18px;
   background: rgba(0, 0, 0, 0.36);
+  animation: dialog-overlay-in 0.2s ease-out;
+}
+
+@keyframes dialog-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .home-trial-dialog {
@@ -451,6 +457,53 @@
   border-radius: 18px;
   padding: 18px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
+  animation: dialog-slide-in 0.25s ease-out;
+}
+
+@keyframes dialog-slide-in {
+  from { opacity: 0; transform: scale(0.95) translateY(-10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.home-trial-dialog--centered {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 24px 18px;
+}
+
+.home-trial-dialog-overlay--modal {
+  z-index: 200;
+  pointer-events: auto;
+}
+
+.home-trial-dialog__icon--update {
+  background: rgba(76, 175, 80, 0.14);
+  color: #4CAF50;
+}
+
+.home-trial-dialog__close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.home-trial-dialog__close:hover {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .home-trial-dialog__header {
@@ -471,15 +524,21 @@
   flex-shrink: 0;
 }
 
+.home-trial-dialog__icon--top {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 16px;
+}
+
 .home-trial-dialog__title {
-  font-size: 17px;
+  font-size: 19px;
   font-weight: 700;
   color: var(--text);
 }
 
 .home-trial-dialog__text {
   margin-top: 12px;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.5;
   color: var(--text-muted);
 }
@@ -490,6 +549,11 @@
   align-items: center;
   gap: 8px;
   margin-top: 18px;
+}
+
+.home-trial-dialog__actions--centered {
+  justify-content: center;
+  margin-top: 24px;
 }
 
 .home-trial-dialog__btn {

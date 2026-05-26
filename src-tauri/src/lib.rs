@@ -269,6 +269,59 @@ async fn install_latest_linux_update(_version: String) -> Result<(), String> {
     Err("Linux update helper is unavailable on this platform".into())
 }
 
+#[tauri::command]
+fn debug_log(msg: String) {
+    eprintln!("[JS] {}", msg);
+}
+
+#[tauri::command]
+async fn fetch_subscription_ping(
+    url: String,
+    hwid: String,
+    device_os: String,
+    os_version: String,
+    device_model: String,
+    user_agent: String,
+) -> Result<serde_json::Value, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(&url)
+        .header("x-hwid", &hwid)
+        .header("x-device-os", &device_os)
+        .header("x-ver-os", &os_version)
+        .header("x-device-model", &device_model)
+        .header("User-Agent", &user_agent)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let headers = response.headers();
+    let is_hack = headers
+        .get("is-hack")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let update_required = headers
+        .get("update-required")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let interval = headers
+        .get("profile-update-interval")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    Ok(serde_json::json!({
+        "status": response.status().as_u16(),
+        "is_hack": is_hack,
+        "update_required": update_required,
+        "profile_update_interval": interval,
+    }))
+}
+
 /// Measure TCP connect latency to `host:port`.
 #[tauri::command]
 async fn tcp_ping(host: String, port: u16, timeout_ms: u64) -> i64 {
@@ -533,6 +586,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            debug_log,
+            fetch_subscription_ping,
             get_hostname,
             get_hwid,
             get_os_version,
