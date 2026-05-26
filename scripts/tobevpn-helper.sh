@@ -252,8 +252,43 @@ case "$1" in
     echo "STOPPED"
     ;;
 
+  bypass)
+    BYPASS_IPS=("${@:2}")
+
+    if [ ${#BYPASS_IPS[@]} -eq 0 ]; then
+        echo "OK"
+        exit 0
+    fi
+    for BYPASS_IP in "${BYPASS_IPS[@]}"; do
+        if ! echo "$BYPASS_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: invalid bypass IP" >&2
+            exit 1
+        fi
+    done
+
+    if [ ! -f /tmp/tobevpn_orig_route ]; then
+        echo "OK"
+        exit 0
+    fi
+
+    read -r DEFAULT_GW DEFAULT_DEV < /tmp/tobevpn_orig_route
+    if [ -z "$DEFAULT_DEV" ]; then
+        echo "ERROR: original route is missing interface" >&2
+        exit 1
+    fi
+
+    for BYPASS_IP in "${BYPASS_IPS[@]}"; do
+        if [ "$DEFAULT_GW" = "on-link" ] || [ -z "$DEFAULT_GW" ]; then
+            ip route replace "${BYPASS_IP}/32" dev "$DEFAULT_DEV" scope link table "$TUN_TABLE"
+        else
+            ip route replace "${BYPASS_IP}/32" via "$DEFAULT_GW" dev "$DEFAULT_DEV" table "$TUN_TABLE"
+        fi
+    done
+    echo "OK"
+    ;;
+
   *)
-    echo "ERROR: usage: $0 {start <tun2socks-bin> <server-ip> [bypass-ip ...]|stop}" >&2
+    echo "ERROR: usage: $0 {start <tun2socks-bin> <server-ip> [bypass-ip ...]|bypass <ip> [ip ...]|stop}" >&2
     exit 1
     ;;
 esac

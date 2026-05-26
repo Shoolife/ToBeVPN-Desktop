@@ -244,10 +244,10 @@ async function stableDeviceIdFromHwid(hwid: string): Promise<string | null> {
 
 async function resolveBootstrapDeviceId(): Promise<string> {
   const session = getSession();
-  if (session.isLinked || hasValidAccessToken(session) || hasValidRefreshToken(session)) {
+
+  if (session.isLinked) {
     return session.deviceId;
   }
-
   try {
     const fingerprint = await getDeviceFingerprint();
     const stableDeviceId = await stableDeviceIdFromHwid(fingerprint.hwid);

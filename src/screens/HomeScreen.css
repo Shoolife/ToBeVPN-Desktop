@@ -153,6 +153,17 @@
   opacity: 0.7;
 }
 
+.home-power--blocked {
+  background: #F44336;
+  color: var(--bg);
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+
+.home-power--blocked:hover {
+  background: #F44336;
+}
+
 .home__status-label {
   font-size: 20px;
   font-weight: 600;

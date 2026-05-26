@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 
 use super::config::{self, ServerConfig, SOCKS_PORT, STATS_API_PORT};
-use super::state::{TrafficStats, VpnState};
+use super::state::{PingHostMapping, TrafficStats, VpnState};
 use super::{ConnectAttempt, CONNECT_CANCELLED};
 
 // CREATE_NO_WINDOW — suppress flashing console for every spawned helper.
@@ -33,6 +33,7 @@ const SUBPROC_TIMEOUT: Duration = Duration::from_secs(15);
 // retry loop stays time-bounded even if PowerShell wedges.
 const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
+const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Per-user app data dir (e.g. C:\Users\<user>\AppData\Local\ToBeVPN).
 /// %LOCALAPPDATA% is already per-user — by default other local users on
@@ -144,6 +145,67 @@ impl VpnManager {
         }
     }
 
+    pub async fn prepare_ping_bypass(
+        &self,
+        hosts: Vec<String>,
+    ) -> Result<Vec<PingHostMapping>, String> {
+        // Always return the host → IPv4 mapping so the caller can pin
+        // tcp_ping to a fixed IP. Routing is only mutated when a tunnel is
+        // up; off-tunnel the OS already routes ping packets directly.
+        let mapping = Self::resolve_hosts_to_ipv4_pairs(&hosts).await;
+        if !matches!(self.get_state().await, VpnState::Connected) {
+            return Ok(mapping);
+        }
+
+        let active_server_ip = self.server_ip.lock().await.clone();
+        let existing_bypass_ips = self.control_bypass_ips.lock().await.clone();
+        let mut new_ips: Vec<String> = {
+            let mut seen = BTreeSet::new();
+            for entry in &mapping {
+                seen.insert(entry.ip.clone());
+            }
+            seen.into_iter().collect()
+        };
+        new_ips
+            .retain(|ip| active_server_ip.as_ref() != Some(ip) && !existing_bypass_ips.contains(ip));
+        if new_ips.is_empty() {
+            return Ok(mapping);
+        }
+
+        let (gw, idx) = get_default_gateway()
+            .await
+            .ok_or("Could not detect default IPv4 gateway")?;
+        log_win!("[VPN-WIN] Preparing {} direct ping routes", new_ips.len());
+        for ip in &new_ips {
+            let _ = run_cmd("route", &["delete", ip], None).await;
+            run_cmd(
+                "route",
+                &[
+                    "add",
+                    ip,
+                    "mask",
+                    "255.255.255.255",
+                    &gw,
+                    "metric",
+                    "1",
+                    "if",
+                    &idx,
+                ],
+                None,
+            )
+            .await
+            .map_err(|e| format!("route add ping destination failed: {e}"))?;
+        }
+
+        let mut control_bypass_ips = self.control_bypass_ips.lock().await;
+        for ip in new_ips {
+            if !control_bypass_ips.contains(&ip) {
+                control_bypass_ips.push(ip);
+            }
+        }
+        Ok(mapping)
+    }
+
     /// Start full VPN: xray-core → tun2socks (wintun) → routing.
     pub async fn start(
         &self,
@@ -169,26 +231,19 @@ impl VpnManager {
         }
 
         let prev_state = self.state.lock().await.clone();
-        match prev_state {
-            VpnState::Connected | VpnState::Connecting => {
-                log_win!("[VPN-WIN] Previous session active — stopping first");
-                self.bump_session_gen().await;
-                self.force_stop().await;
-            }
-            VpnState::Disconnecting => {
-                return Err("Disconnecting in progress, try again in a moment".into());
-            }
-            _ => {}
+        if matches!(&prev_state, VpnState::Disconnecting) {
+            return Err("Disconnecting in progress, try again in a moment".into());
         }
 
-        attempt.ensure_active()?;
-        self.set_state(VpnState::Connecting).await;
-
-        // Pre-resolve server hostname so xray never needs to DNS through itself.
+        // Resolve the replacement before stopping an existing tunnel. Under
+        // restricted networks the current tunnel may be the only path that
+        // can resolve a different VPN endpoint during a live switch.
         let server_ip = match Self::resolve_server_ip(&server.address, attempt).await {
             Ok(ip) => ip,
             Err(e) => {
-                self.set_state(VpnState::Error { message: e.clone() }).await;
+                if !matches!(&prev_state, VpnState::Connected) {
+                    self.set_state(VpnState::Error { message: e.clone() }).await;
+                }
                 return Err(e);
             }
         };
@@ -196,14 +251,7 @@ impl VpnManager {
         let mut control_bypass_ips =
             match Self::resolve_bypass_ips(&server.bypass_hosts, attempt).await {
                 Ok(ips) => ips,
-                Err(e) => {
-                    if attempt.is_cancelled() {
-                        self.set_state(VpnState::Disconnected).await;
-                    } else {
-                        self.set_state(VpnState::Error { message: e.clone() }).await;
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             };
         control_bypass_ips.retain(|ip| ip != &server_ip);
         log_win!(
@@ -211,9 +259,23 @@ impl VpnManager {
             control_bypass_ips.len()
         );
         if attempt.is_cancelled() {
+            return Err(CONNECT_CANCELLED.into());
+        }
+
+        match prev_state {
+            VpnState::Connected | VpnState::Connecting => {
+                log_win!("[VPN-WIN] Previous session active — stopping first");
+                self.bump_session_gen().await;
+                self.force_stop().await;
+            }
+            _ => {}
+        }
+
+        if attempt.is_cancelled() {
             self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
         }
+        self.set_state(VpnState::Connecting).await;
 
         let mut server = server;
         if server.sni.is_empty() && server.address.parse::<std::net::IpAddr>().is_err() {
@@ -618,6 +680,49 @@ impl VpnManager {
             }
         }
         Ok(ips.into_iter().collect())
+    }
+
+    /// Resolve each host to its first IPv4 address, preserving the input
+    /// host string. Hosts that fail to resolve or that are IPv6-only are
+    /// omitted — the JS caller falls back to the hostname for ping.
+    async fn resolve_hosts_to_ipv4_pairs(hosts: &[String]) -> Vec<PingHostMapping> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        for host in hosts {
+            let trimmed = host.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !seen.insert(trimmed.to_string()) {
+                continue;
+            }
+            if trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
+                out.push(PingHostMapping {
+                    host: trimmed.to_string(),
+                    ip: trimmed.to_string(),
+                });
+                continue;
+            }
+            match timeout(
+                DNS_RESOLVE_TIMEOUT,
+                tokio::net::lookup_host(format!("{}:443", trimmed)),
+            )
+            .await
+            {
+                Ok(Ok(addrs)) => {
+                    if let Some(addr) = addrs.into_iter().find(|a| a.is_ipv4()) {
+                        out.push(PingHostMapping {
+                            host: trimmed.to_string(),
+                            ip: addr.ip().to_string(),
+                        });
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {
+                    log_win!("[VPN-WIN] Ping destination DNS lookup failed");
+                }
+            }
+        }
+        out
     }
 
     async fn start_tun(
@@ -1271,7 +1376,8 @@ async fn wait_for_port(
 }
 
 async fn query_stat_value(xray_bin: &PathBuf, server: &str, name: &str) -> u64 {
-    let output = Command::new(xray_bin)
+    let mut command = Command::new(xray_bin);
+    command
         .args([
             "api",
             "statsquery",
@@ -1282,11 +1388,11 @@ async fn query_stat_value(xray_bin: &PathBuf, server: &str, name: &str) -> u64 {
             "-reset",
         ])
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await;
-    let out = match output {
-        Ok(out) => out,
+        .kill_on_drop(true);
+    let out = match timeout(STATS_QUERY_TIMEOUT, command.output()).await {
+        Ok(Ok(out)) => out,
         Err(_) => return 0,
+        Ok(Err(_)) => return 0,
     };
     if !out.status.success() {
         return 0;

@@ -18,7 +18,7 @@ use gtk::prelude::*;
 
 use vpn::config::ServerConfig;
 use vpn::manager::VpnManager;
-use vpn::state::{TrafficStats, VpnState};
+use vpn::state::{PingHostMapping, TrafficStats, VpnState};
 use vpn::ConnectAttempt;
 
 /// Shared VPN manager state.
@@ -302,6 +302,24 @@ async fn resolve_host(host: String) -> String {
     .unwrap_or_default()
 }
 
+/// Add direct routes for server ping targets while a tunnel is active and
+/// return the resolved host→IPv4 mapping so the JS layer can pin `tcp_ping`
+/// to the exact IP a bypass route was installed for. Without this pinning,
+/// `tcp_ping` would call `getaddrinfo` a second time and potentially land
+/// on a different rotation/CDN replica that isn't in the bypass set,
+/// sending the probe back through the tunnel.
+#[tauri::command]
+async fn prepare_ping_bypass(
+    hosts: Vec<String>,
+    state: tauri::State<'_, AppVpn>,
+) -> Result<Vec<PingHostMapping>, String> {
+    let guard = state.0.lock().await;
+    match guard.as_ref() {
+        Some(mgr) => mgr.prepare_ping_bypass(hosts).await,
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Start the VPN connection with the given server config.
 #[tauri::command]
 async fn start_vpn(
@@ -526,6 +544,7 @@ pub fn run() {
             install_latest_linux_update,
             tcp_ping,
             resolve_host,
+            prepare_ping_bypass,
             start_vpn,
             stop_vpn,
             get_vpn_state,

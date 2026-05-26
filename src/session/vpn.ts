@@ -55,3 +55,33 @@ export async function getTrafficStats(): Promise<TrafficStats> {
 export async function getXrayVersion(): Promise<string> {
   return await invoke<string>("get_xray_version");
 }
+
+export interface PingHostMapping {
+  host: string;
+  ip: string;
+}
+
+/**
+ * Resolve each host to its first IPv4 address and — when a tunnel is up —
+ * install per-IP bypass routes so the probe never re-enters the VPN. The
+ * returned mapping must be used to pin `tcp_ping` to the exact IP a bypass
+ * route was added for; calling `tcp_ping` with the hostname would trigger
+ * a second `getaddrinfo` that could land on a different rotation and the
+ * packet would slip back into the tunnel.
+ */
+export async function preparePingBypass(
+  hosts: string[],
+): Promise<Map<string, string>> {
+  const uniqueHosts = Array.from(
+    new Set(hosts.map((host) => host.trim()).filter(Boolean)),
+  );
+  if (uniqueHosts.length === 0) return new Map();
+  const mapping = await invoke<PingHostMapping[]>("prepare_ping_bypass", {
+    hosts: uniqueHosts,
+  });
+  const out = new Map<string, string>();
+  for (const entry of mapping) {
+    if (entry.host && entry.ip) out.set(entry.host, entry.ip);
+  }
+  return out;
+}

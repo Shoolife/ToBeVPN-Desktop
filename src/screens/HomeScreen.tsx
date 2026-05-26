@@ -21,6 +21,7 @@ import {
 } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { connectVpn, disconnectVpn, useVpnRuntime, clearVpnError } from "../session/vpnState";
+import { preparePingBypass } from "../session/vpn";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
 
@@ -198,17 +199,20 @@ export default function HomeScreen({
     }
     let cancelled = false;
     setPing(0);
-    invoke<number>("tcp_ping", {
-      host: selectedServer.address,
-      port: selectedServer.port,
-      timeoutMs: 3000,
-    })
-      .then((ms) => {
+    void (async () => {
+      await preparePingBypass([selectedServer.address]).catch(() => {});
+      if (cancelled) return;
+      try {
+        const ms = await invoke<number>("tcp_ping", {
+          host: selectedServer.address,
+          port: selectedServer.port,
+          timeoutMs: 3000,
+        });
         if (!cancelled) setPing(ms >= 0 ? ms : -1);
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setPing(-1);
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -344,8 +348,9 @@ export default function HomeScreen({
       <div className="home-content">
         <div className="home-connect-area">
           <button
-            className={`home-power ${connected ? "home-power--on" : ""} ${activating ? "home-power--connecting" : ""} ${disconnecting ? "home-power--disconnecting" : ""}`}
-            onClick={handleToggle}
+            className={`home-power ${connected ? "home-power--on" : ""} ${activating ? "home-power--connecting" : ""} ${disconnecting ? "home-power--disconnecting" : ""} ${subscriptionUsageBlocked ? "home-power--blocked" : ""}`}
+            onClick={subscriptionUsageBlocked ? undefined : handleToggle}
+            disabled={subscriptionUsageBlocked}
           >
             <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
@@ -353,13 +358,13 @@ export default function HomeScreen({
             </svg>
           </button>
           <div className={`home__status-label ${statusClass}`}>{statusText}</div>
-          {vpnError && (
+          {vpnError && !subscriptionUsageBlocked && (
             <div className="home__vpn-error">{vpnError}</div>
           )}
         </div>
 
         {/* Server card */}
-        <div className="home-card home-card--clickable" onClick={onServers}>
+        <div className={`home-card ${subscriptionUsageBlocked ? "" : "home-card--clickable"}`} onClick={subscriptionUsageBlocked ? undefined : onServers}>
           <div className="home-card__row">
             {selectedServer ? (
               <span className="home-server__flag">
