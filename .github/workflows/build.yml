@@ -159,7 +159,10 @@ jobs:
           VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
 
-      - uses: actions/upload-artifact@v5
+      # Built clients contain runtime configuration. Keep disposable branch
+      # validation binaries on the runner; publish installers only for releases.
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v5
         with:
           name: ToBeVPN-linux-deb
           path: |
@@ -234,7 +237,10 @@ jobs:
           VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
 
-      - uses: actions/upload-artifact@v5
+      # Built clients contain runtime configuration. Keep disposable branch
+      # validation binaries on the runner; publish installers only for releases.
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v5
         with:
           # GitHub Actions always wraps uploaded artifacts in a zip; we can't
           # ship a bare .exe through this API. The archive contains a single
@@ -247,8 +253,8 @@ jobs:
           if-no-files-found: error
 
   # Tag-triggered: when push refs/tags/v*, attach both artifacts to a
-  # GitHub Release. Works only on tag pushes — regular branch pushes still
-  # produce artifacts but don't create a release.
+  # GitHub Release. Branch/PR/manual builds validate compilation without
+  # uploading distributable binaries.
   release:
     needs: [build-linux, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
