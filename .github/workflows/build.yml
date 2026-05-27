@@ -172,6 +172,10 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/deb/*.deb.sig
           if-no-files-found: error
+          # Short retention so old releases can't be revived by downloading
+          # the CI artifact in this public repo. The Release page is the
+          # only canonical distribution point.
+          retention-days: 7
 
   build-windows:
     needs: audit
@@ -257,6 +261,7 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
+          retention-days: 7
 
   # Tag-triggered: when push refs/tags/v*, attach both artifacts to a
   # GitHub Release. Branch/PR/manual builds validate compilation without
