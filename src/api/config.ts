@@ -41,6 +41,17 @@ const panelUrl = (import.meta.env.VITE_PANEL_URL ?? "").trim();
 export const PANEL_BASE_URL: string | null =
   panelUrl ? (panelUrl.startsWith("http") ? panelUrl : `https://${panelUrl}`) : null;
 
+// Subscription panel host (e.g. https://__SUBSCRIPTION_HOST__/). The panel's
+// `/api/panel/sub/<short_uuid>/info` returns full subscription URLs
+// against this host, and our HWID ping hits it directly. Operator-
+// configured at build time so it lands in both the Tauri HTTP scope
+// (capabilities/default.json) and CONTROL_PLANE_BYPASS_HOSTS.
+const subscriptionUrl = (import.meta.env.VITE_SUBSCRIPTION_URL ?? "").trim();
+export const SUBSCRIPTION_BASE_URL: string | null =
+  subscriptionUrl
+    ? (subscriptionUrl.startsWith("http") ? subscriptionUrl : `https://${subscriptionUrl}`)
+    : null;
+
 function readHostname(url: string | null): string | null {
   if (!url) return null;
   try {
@@ -60,6 +71,7 @@ export const CONTROL_PLANE_BYPASS_HOSTS = Array.from(
       readHostname(BOT_API_FALLBACK_URL),
       readHostname(SUBS_FALLBACK_URL),
       readHostname(PANEL_BASE_URL),
+      readHostname(SUBSCRIPTION_BASE_URL),
     ].filter((host): host is string => host !== null),
   ),
 );

@@ -2,7 +2,6 @@
 // This is the only request the subscription panel parses to create/refresh an
 // HWID device record; the bot's /api/* endpoints don't expose it to the panel.
 // We hit the URL (a) before each VPN connect, (b) on subscription refresh.
-import { invoke } from "@tauri-apps/api/core";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { SUBS_FALLBACK_URL } from "../api/config";
 import { getDeviceFingerprint } from "./fingerprint";
@@ -17,6 +16,7 @@ const httpFetch: typeof fetch =
     ? window.fetch.bind(window)
     : tauriFetch;
 
+const PRIMARY_TIMEOUT_MS = 8_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
 const BLOCK_HEADER = "is-hack";
 const BLOCK_VALUE = "yes";
@@ -71,13 +71,10 @@ async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number):
 }
 
 /**
- * Primary ping goes through a Rust command (`fetch_subscription_ping`)
- * that is NOT subject to the Tauri HTTP plugin's build-time scope.
- * The subscription URL host (`__SUBSCRIPTION_HOST__`) is determined at runtime
- * by the panel and will never match the static allowlist.
- *
- * Fallback (Yandex CF) still uses `tauriFetch` because it IS in the
- * allowlist and we only need it when the primary is unreachable.
+ * Try the primary subscription URL first via tauriFetch; only fall back
+ * to the proxy function when the primary actually fails. The subscription
+ * host must be listed in capabilities/default.json (Tauri HTTP scope) and
+ * in CONTROL_PLANE_BYPASS_HOSTS (so VPN doesn't tunnel the request).
  */
 async function primaryThenFallback(
   primaryUrl: string,
@@ -85,25 +82,8 @@ async function primaryThenFallback(
   headers: HeadersInit,
 ): Promise<SubscriptionPingResult> {
   try {
-    const fp = await getDeviceFingerprint();
-    const raw = await invoke<{
-      status: number;
-      is_hack: string;
-      update_required: string;
-      profile_update_interval: string;
-    }>("fetch_subscription_ping", {
-      url: primaryUrl,
-      hwid: fp.hwid ?? "",
-      deviceOs: fp.platform,
-      osVersion: fp.osVersion,
-      deviceModel: fp.model,
-      userAgent: fp.userAgent,
-    });
-    return {
-      intervalMs: readIntervalMs(raw.profile_update_interval || null),
-      isUsageBlocked: raw.is_hack.trim().toLowerCase() === BLOCK_VALUE,
-      isUpdateRequired: raw.update_required.trim().toLowerCase() === BLOCK_VALUE,
-    };
+    const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
+    return readResult(response);
   } catch (primaryError) {
     if (!fallbackUrl) throw primaryError;
     try {
@@ -115,9 +95,6 @@ async function primaryThenFallback(
   }
 }
 
-// Floor at 1h so a misconfigured panel can't cause the client to hammer it;
-// ceiling at 7d so a typo'd value doesn't disable refreshes for the
-// foreseeable future.
 const MIN_INTERVAL_HOURS = 1;
 const MAX_INTERVAL_HOURS = 24 * 7;
 
@@ -143,13 +120,6 @@ function readIntervalMs(raw: string | null): number | null {
   return hours * 60 * 60 * 1000;
 }
 
-/**
- * Derives the fallback endpoint URL from the panel URL by extracting
- * the trailing path segment (the subscription key) and appending it
- * to SUBS_FALLBACK_URL, which is configured to already end with
- * `?sub=`. Returns null if the operator hasn't set the fallback or
- * the input URL has no key segment.
- */
 function buildFallbackUrl(panelUrl: string): string | null {
   if (!SUBS_FALLBACK_URL) return null;
   let key: string;

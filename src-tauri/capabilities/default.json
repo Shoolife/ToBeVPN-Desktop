@@ -23,6 +23,7 @@
       "allow": [
         { "url": "https://__BOT_API_HOST__/*" },
         { "url": "https://__PANEL_HOST__/*" },
+        { "url": "https://__SUBSCRIPTION_HOST__/*" },
         { "url": "https://functions.yandexcloud.net/*" },
         { "url": "https://functions.yandexcloud.net/*" }
       ]

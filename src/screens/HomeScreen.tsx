@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { exit } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
+import {
+  forceCheckUpdate,
+  retryUpdate,
+  startUpdateDownload,
+  useUpdateState,
+} from "../session/updateStore";
 // UpdateBanner now mounts in App as a top-of-window overlay so it
 // covers every screen, not only Home.
 import {
@@ -630,41 +637,128 @@ export default function HomeScreen({
         </div>
       )}
 
-      {updateRequired && (
-        <div className="home-trial-dialog-overlay home-trial-dialog-overlay--modal">
-          <div className="home-trial-dialog home-trial-dialog--centered">
-            <span className="home-trial-dialog__icon home-trial-dialog__icon--top home-trial-dialog__icon--update">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="7 10 12 15 17 10" />
-                <line x1="12" y1="15" x2="12" y2="3" />
-              </svg>
-            </span>
-            <div className="home-trial-dialog__title">{t("update_required_title")}</div>
-            <div className="home-trial-dialog__text">{t("update_required_message")}</div>
+      {updateRequired && <UpdateRequiredDialog />}
+    </div>
+  );
+}
+
+function UpdateRequiredDialog() {
+  const updateState = useUpdateState();
+
+  const handleUpdate = async () => {
+    if (updateState.kind !== "available") {
+      await forceCheckUpdate();
+    }
+    await startUpdateDownload();
+  };
+
+  const downloading = updateState.kind === "downloading";
+  const ready = updateState.kind === "ready";
+  const failed = updateState.kind === "failed";
+
+  const fraction =
+    downloading && updateState.progress.total > 0
+      ? Math.min(updateState.progress.downloaded / updateState.progress.total, 1)
+      : 0;
+  const downloadedMb = downloading
+    ? (updateState.progress.downloaded / (1024 * 1024)).toFixed(1)
+    : "0.0";
+  const totalMb =
+    downloading && updateState.progress.total > 0
+      ? (updateState.progress.total / (1024 * 1024)).toFixed(1)
+      : null;
+  const indeterminate = downloading && updateState.progress.indeterminate;
+
+  return (
+    <div className="home-trial-dialog-overlay home-trial-dialog-overlay--modal">
+      <div className="home-trial-dialog home-trial-dialog--centered">
+        <span className="home-trial-dialog__icon home-trial-dialog__icon--top home-trial-dialog__icon--update">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </span>
+
+        {downloading ? (
+          <>
+            <div className="home-trial-dialog__title">
+              {t("update_banner_downloading_title").replace("{version}", updateState.info.version)}
+            </div>
+            <div
+              className={
+                indeterminate
+                  ? "update-banner__progress update-banner__progress--indeterminate"
+                  : "update-banner__progress"
+              }
+              style={{ marginTop: 16, width: "100%" }}
+            >
+              <div
+                className="update-banner__progress-fill"
+                style={{ width: `${fraction * 100}%` }}
+              />
+            </div>
+            <div className="home-trial-dialog__text">
+              {indeterminate
+                ? t("update_banner_installing_privileged")
+                : totalMb
+                  ? `${downloadedMb} МБ / ${totalMb} МБ`
+                  : `${downloadedMb} МБ`}
+            </div>
+          </>
+        ) : ready ? (
+          <>
+            <div className="home-trial-dialog__title">
+              {t("update_banner_ready_title").replace("{version}", updateState.info.version)}
+            </div>
+            <div className="home-trial-dialog__text">
+              {t("update_banner_ready_description")}
+            </div>
+          </>
+        ) : failed ? (
+          <>
+            <div className="home-trial-dialog__title">
+              {t("update_banner_failed_title")}
+            </div>
+            {updateState.reason && (
+              <div className="home-trial-dialog__text">{updateState.reason.slice(0, 200)}</div>
+            )}
             <div className="home-trial-dialog__actions home-trial-dialog__actions--centered">
               <button
                 className="home-trial-dialog__btn home-trial-dialog__btn--secondary"
-                onClick={() => void invoke("plugin:process|exit", { code: 0 })}
+                onClick={() => void exit(0)}
               >
                 {t("update_required_quit")}
               </button>
               <button
                 className="home-trial-dialog__btn home-trial-dialog__btn--primary"
-                onClick={() => {
-                  void (async () => {
-                    const { forceCheckUpdate, startUpdateDownload } = await import("../session/updateStore");
-                    await forceCheckUpdate();
-                    await startUpdateDownload();
-                  })();
-                }}
+                onClick={retryUpdate}
+              >
+                {t("update_banner_retry")}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="home-trial-dialog__title">{t("update_required_title")}</div>
+            <div className="home-trial-dialog__text">{t("update_required_message")}</div>
+            <div className="home-trial-dialog__actions home-trial-dialog__actions--centered">
+              <button
+                className="home-trial-dialog__btn home-trial-dialog__btn--secondary"
+                onClick={() => void exit(0)}
+              >
+                {t("update_required_quit")}
+              </button>
+              <button
+                className="home-trial-dialog__btn home-trial-dialog__btn--primary"
+                onClick={() => void handleUpdate()}
               >
                 {t("update_required_button")}
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { getCurrentWindow, LogicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
@@ -12,6 +12,7 @@ import SpeedTestScreen from "./screens/SpeedTestScreen";
 import DevicesScreen from "./screens/DevicesScreen";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import UpdateBanner from "./components/UpdateBanner";
+import { getUpdateRequired, subscribeSubscriptionUsageBlocked } from "./session/auth";
 import { isPaired, useSession } from "./session/store";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
 import { isSameServerSelection } from "./session/serverSelection";
@@ -65,6 +66,11 @@ export default function App() {
   const [direction, setDirection] = useState<Direction>("none");
   const [animating, setAnimating] = useState(false);
   const [selectedServer, setSelectedServer] = useState<SelectedServer | null>(() => loadLastServer());
+  const updateRequired = useSyncExternalStore(
+    subscribeSubscriptionUsageBlocked,
+    getUpdateRequired,
+    getUpdateRequired,
+  );
   const timeoutRef = useRef<number | null>(null);
 
   const DURATION = 300;
@@ -353,7 +359,7 @@ export default function App() {
             sits outside the .app container's overflow:hidden and the
             screen-transition transforms — both create new containing
             blocks that break position:fixed under WebKitGTK on Linux. */}
-        {currentScreen !== "splash" && currentScreen !== "onboarding" && currentScreen !== "pairing" &&
+        {!updateRequired && currentScreen !== "splash" && currentScreen !== "onboarding" && currentScreen !== "pairing" &&
           (() => {
             const target = document.getElementById("overlay-root") ?? document.body;
             return createPortal(

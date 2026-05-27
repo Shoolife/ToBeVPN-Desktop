@@ -136,6 +136,7 @@ jobs:
         env:
           BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
           PANEL_HOST: ${{ secrets.PANEL_HOST }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST }}
           VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: bash scripts/inject-backend-host.sh
@@ -156,6 +157,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
           VITE_PANEL_URL: https://${{ secrets.PANEL_HOST }}
+          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST }}/
           # The audit job above rejects empty or placeholder release values.
           VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
@@ -225,6 +227,7 @@ jobs:
         env:
           BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
           PANEL_HOST: ${{ secrets.PANEL_HOST }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST }}
           VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: bash scripts/inject-backend-host.sh
@@ -236,6 +239,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
           VITE_PANEL_URL: https://${{ secrets.PANEL_HOST }}
+          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST }}/
           VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
 

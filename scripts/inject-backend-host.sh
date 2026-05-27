@@ -40,6 +40,15 @@ if [ -z "${PANEL_HOST:-}" ] && [ -f .env ]; then
         PANEL_HOST="$url"
     fi
 fi
+if [ -z "${SUBSCRIPTION_HOST:-}" ] && [ -f .env ]; then
+    line=$(grep -E '^VITE_SUBSCRIPTION_URL=' .env || true)
+    if [ -n "$line" ]; then
+        url="${line#VITE_SUBSCRIPTION_URL=}"
+        url="${url#https://}"
+        url="${url%/}"
+        SUBSCRIPTION_HOST="$url"
+    fi
+fi
 
 # Fallback hosts — extract just the hostname from the full URL so we can
 # whitelist them in capabilities/default.json. CI provides these values as
@@ -72,6 +81,7 @@ FALLBACK_SUBS_HOST="${FALLBACK_SUBS_HOST:-$(fallback_host_from_url VITE_FALLBACK
 # unconfigured fallback can't accidentally match someone else's host.
 : "${FALLBACK_BOT_HOST:=example.invalid}"
 : "${FALLBACK_SUBS_HOST:=example.invalid}"
+: "${SUBSCRIPTION_HOST:=example.invalid}"
 
 if [ -z "${BOT_API_HOST:-}" ] || [ -z "${PANEL_HOST:-}" ]; then
     # Hosts unavailable. If the working tree already has real hosts
@@ -121,6 +131,7 @@ restore_placeholder src-tauri/capabilities/default.json __BOT_API_HOST__ BOT_API
 restore_placeholder src-tauri/capabilities/default.json __PANEL_HOST__   PANEL_HOST
 restore_placeholder src-tauri/capabilities/default.json __FALLBACK_BOT_HOST__ FALLBACK_BOT_HOST
 restore_placeholder src-tauri/capabilities/default.json __FALLBACK_SUBS_HOST__ FALLBACK_SUBS_HOST
+restore_placeholder src-tauri/capabilities/default.json __SUBSCRIPTION_HOST__ SUBSCRIPTION_HOST
 
 # Step 2: inject real hosts.
 sed -i.bak \
@@ -132,6 +143,7 @@ sed -i.bak \
 sed -i.bak \
     -e "s|__FALLBACK_BOT_HOST__|${FALLBACK_BOT_HOST}|g" \
     -e "s|__FALLBACK_SUBS_HOST__|${FALLBACK_SUBS_HOST}|g" \
+    -e "s|__SUBSCRIPTION_HOST__|${SUBSCRIPTION_HOST}|g" \
     src-tauri/capabilities/default.json
 
 rm -f src-tauri/tauri.conf.json.bak src-tauri/capabilities/default.json.bak
