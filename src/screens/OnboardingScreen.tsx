@@ -1,5 +1,5 @@
 import { t } from "../i18n";
-import brandLogo from "../../src-tauri/icons/source.svg";
+import brandLogo from "../assets/onboarding_logo.svg";
 import "./OnboardingScreen.css";
 
 export default function OnboardingScreen({ onContinue }: { onContinue: () => void }) {

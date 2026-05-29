@@ -23,6 +23,21 @@ case "$1" in
             -exec chown root:root {} \; \
             -exec chmod 755 {} \; 2>/dev/null || true
     done
+
+    # Ensure the desktop entry passes the deep-link URL through to the app.
+    # Tauri's generated .desktop sets the x-scheme-handler MimeType but omits
+    # the %u field code, so without this the tobevpn:// URL is dropped on
+    # launch (the window still opens via single-instance, but the URL is
+    # lost). Append %u to Exec and refresh the desktop/MIME databases.
+    DESKTOP_FILE=/usr/share/applications/ToBeVPN.desktop
+    [ -f "$DESKTOP_FILE" ] || DESKTOP_FILE=/usr/share/applications/tobevpn-desktop.desktop
+    if [ -f "$DESKTOP_FILE" ]; then
+        if grep -q '^Exec=tobevpn-desktop$' "$DESKTOP_FILE"; then
+            sed -i 's|^Exec=tobevpn-desktop$|Exec=tobevpn-desktop %u|' "$DESKTOP_FILE"
+        fi
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+        xdg-mime default "$(basename "$DESKTOP_FILE")" x-scheme-handler/tobevpn 2>/dev/null || true
+    fi
     ;;
 esac
 

@@ -413,6 +413,20 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // Deep-link `tobevpn://open` handling: we deliberately do NOT use
+            // tauri-plugin-deep-link. Its init() writes a user-level
+            // ~/.local/share/applications/*-handler.desktop on Linux, which
+            // collides with the system .desktop the .deb installs and makes
+            // the OS show an "open with" chooser with two ToBeVPN entries.
+            //
+            // Instead the scheme is registered purely by the bundler
+            // (plugins.deep-link.schemes in tauri.conf.json adds the
+            // x-scheme-handler MimeType to the .deb .desktop / Windows
+            // registry), and tauri-plugin-single-instance raises the window
+            // when the OS launches us with the URL while already running.
+            // We only need to surface the window — auth/payment stay on the
+            // existing polling path.
+
             // Resolve sidecar binary directory.
             // In dev mode, Tauri copies externalBin to target/debug/ (next to the executable).
             // In production, they're in the resource dir.

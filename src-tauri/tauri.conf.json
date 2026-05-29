@@ -77,6 +77,11 @@
       ],
       "dialog": false,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDQTkyQzdDOUVGMzk5NEMKUldSTW1mT2VmQ3lwM01NWkFhQ2ZoZ21kVjdCWFNUbk5kU0E4UHRvUVhKRGhPZjR5QVRWYW00azMK"
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["tobevpn"]
+      }
     }
   }
 }
