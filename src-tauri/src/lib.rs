@@ -3,6 +3,9 @@ pub mod linux_update;
 mod vpn;
 
 use keyring::{Entry, Error as KeyringError};
+use std::fs;
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,6 +38,9 @@ struct VpnPipelineLock {
 
 const SECURE_SESSION_SERVICE: &str = "network.tobevpn.desktop";
 const SECURE_SESSION_ACCOUNT: &str = "device-session-v1";
+const MAX_DESKTOP_STATS_BYTES: usize = 512 * 1024;
+#[cfg(target_os = "linux")]
+const LEGACY_WEBKIT_WAL_COMPACT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -257,6 +263,111 @@ fn clear_secure_session() -> Result<(), String> {
     }
 }
 
+fn desktop_stats_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ToBeVPN")
+        .join("stats.json")
+}
+
+#[tauri::command]
+fn load_desktop_stats() -> Result<Option<String>, String> {
+    match fs::read_to_string(desktop_stats_path()) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Could not load desktop stats: {error}")),
+    }
+}
+
+#[tauri::command]
+fn save_desktop_stats(payload: String) -> Result<(), String> {
+    if payload.len() > MAX_DESKTOP_STATS_BYTES {
+        return Err("Desktop stats payload is unexpectedly large".into());
+    }
+
+    let path = desktop_stats_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Desktop stats path has no parent directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create desktop stats directory: {error}"))?;
+
+    let temporary_path = path.with_extension("json.tmp");
+    fs::write(&temporary_path, payload)
+        .map_err(|error| format!("Could not write desktop stats: {error}"))?;
+
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("Could not replace desktop stats: {error}"))?;
+    }
+
+    fs::rename(&temporary_path, &path)
+        .map_err(|error| format!("Could not commit desktop stats: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn compact_legacy_webkit_localstorage() {
+    use rusqlite::{Connection, OpenFlags};
+    use std::time::Duration;
+
+    let database_path = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("com.tobevpn.desktop")
+        .join("localstorage")
+        .join("tauri_localhost_0.localstorage");
+    let wal_path = database_path.with_extension("localstorage-wal");
+    let wal_size = match fs::metadata(&wal_path) {
+        Ok(metadata) if metadata.len() >= LEGACY_WEBKIT_WAL_COMPACT_THRESHOLD_BYTES => {
+            metadata.len()
+        }
+        _ => return,
+    };
+
+    let connection = match Connection::open_with_flags(
+        &database_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!("[STATS] could not open legacy WebKit localStorage for compaction: {error}");
+            return;
+        }
+    };
+    if let Err(error) = connection.busy_timeout(Duration::from_millis(250)) {
+        eprintln!("[STATS] could not set localStorage busy timeout: {error}");
+        return;
+    }
+
+    match connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    }) {
+        Ok((0, _, _)) => {
+            let remaining = fs::metadata(&wal_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            eprintln!(
+                "[STATS] compacted legacy WebKit localStorage WAL: {wal_size} -> {remaining} bytes"
+            );
+        }
+        Ok((busy, _, _)) => {
+            eprintln!(
+                "[STATS] skipped legacy WebKit localStorage compaction: database busy ({busy})"
+            );
+        }
+        Err(error) => {
+            eprintln!("[STATS] could not compact legacy WebKit localStorage: {error}");
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn compact_legacy_webkit_localstorage() {}
+
 #[cfg(target_os = "linux")]
 #[tauri::command]
 async fn install_latest_linux_update(version: String) -> Result<(), String> {
@@ -393,6 +504,12 @@ async fn get_xray_version(state: tauri::State<'_, AppVpn>) -> Result<String, Str
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK keeps localStorage in SQLite. Older versions wrote the VPN
+    // stats snapshot once per second, which could leave a large WAL file.
+    // Run a safe checkpoint before the webview opens; SQLite skips it if a
+    // previous instance still owns the database.
+    compact_legacy_webkit_localstorage();
+
     let mut builder = tauri::Builder::default();
 
     // Single-instance must be the FIRST plugin registered. When a second copy
@@ -555,6 +672,8 @@ pub fn run() {
             load_secure_session,
             save_secure_session,
             clear_secure_session,
+            load_desktop_stats,
+            save_desktop_stats,
             install_latest_linux_update,
             tcp_ping,
             resolve_host,

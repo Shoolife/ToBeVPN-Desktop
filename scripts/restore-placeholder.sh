@@ -39,6 +39,7 @@ resolve() {
 
 BOT=$(resolve BOT_API_HOST VITE_BOT_API_URL)
 PANEL=$(resolve PANEL_HOST VITE_PANEL_URL)
+SUBSCRIPTION_HOST_VAL=$(resolve SUBSCRIPTION_HOST VITE_SUBSCRIPTION_URL)
 
 # Fallback hosts are pulled from the same environment/.env entries the inject
 # script uses. We keep separate placeholders because the two routes need not
@@ -100,6 +101,7 @@ restore_fallback_in() {
 
 restore_in src-tauri/tauri.conf.json
 restore_in src-tauri/capabilities/default.json
+restore_fallback_in src-tauri/capabilities/default.json "$SUBSCRIPTION_HOST_VAL" __SUBSCRIPTION_HOST__
 restore_fallback_in src-tauri/capabilities/default.json "$FALLBACK_BOT_HOST_VAL" __FALLBACK_BOT_HOST__
 restore_fallback_in src-tauri/capabilities/default.json "$FALLBACK_SUBS_HOST_VAL" __FALLBACK_SUBS_HOST__
 if [ -n "$FALLBACK_BOT_HOST_VAL" ] && [ "$FALLBACK_BOT_HOST_VAL" = "$FALLBACK_SUBS_HOST_VAL" ]; then

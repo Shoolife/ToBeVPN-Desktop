@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { QRCodeSVG } from "qrcode.react";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import {
@@ -9,14 +8,38 @@ import {
   startPendingPurchaseRefreshIfNeeded,
 } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
-import { getUserByTelegramId } from "../api/client";
-import type { PurchaseDurationDto, PurchasePlanDto, PurchasePlansDto } from "../api/types";
+import { getCurrentPlan } from "../api/client";
+import type { CurrentPlanDto, PurchaseDurationDto, PurchasePlanDto, PurchasePlansDto } from "../api/types";
+import { formatDateDots } from "../session/dateFormat";
 import Spinner from "./Spinner";
 import "./SubscriptionSheet.css";
 
 interface CurrentLimits {
   trafficLimitBytes: number;
   deviceLimit: number;
+}
+
+function normalizePlanTrafficLimit(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (value <= 0) return 0;
+  return value > 1024 * 1024 ? value : value * 1024 * 1024 * 1024;
+}
+
+function currentLimitsFromPlan(dto: CurrentPlanDto | null | undefined): CurrentLimits | null {
+  if (!dto) return null;
+  const snapshot = dto.current_plan ?? dto.plan_snapshot ?? null;
+  const subscription = dto.subscription ?? null;
+  const trafficLimitBytes =
+    subscription?.traffic_limit_bytes ??
+    normalizePlanTrafficLimit(subscription?.traffic_limit) ??
+    snapshot?.traffic_limit_bytes ??
+    normalizePlanTrafficLimit(snapshot?.traffic_limit);
+  const deviceLimit = subscription?.device_limit ?? snapshot?.device_limit;
+  if (trafficLimitBytes === null && deviceLimit === null) return null;
+  return {
+    trafficLimitBytes: trafficLimitBytes ?? 0,
+    deviceLimit: deviceLimit ?? 0,
+  };
 }
 
 const BOT_NAME = "meow_meow_vpn_bot";
@@ -100,7 +123,7 @@ function formatDurationPrice(duration: PurchaseDurationDto, isRu: boolean): stri
     if (usd) return formatUsd(usd);
     const xtr = map.get("XTR");
     if (xtr) return formatStars(xtr);
-    return "—";
+    return t("plan_unknown_name");
   }
   const usd = map.get("USD");
   if (usd) return formatUsd(usd);
@@ -108,7 +131,7 @@ function formatDurationPrice(duration: PurchaseDurationDto, isRu: boolean): stri
   if (rub) return formatRub(rub);
   const xtr = map.get("XTR");
   if (xtr) return formatStars(xtr);
-  return "—";
+  return t("plan_unknown_name");
 }
 
 function planDescription(plan: PurchasePlanDto | null): string {
@@ -163,10 +186,11 @@ function buildRows(data: PurchasePlansDto | null, isRu: boolean): PlanRow[] {
     }));
 }
 
-function planLabel(plan: UserPlan): string {
+function planLabel(plan: UserPlan, displayName?: string | null): string {
+  if (displayName && plan !== "EXPIRED") return displayName;
   switch (plan) {
-    case "PAID": return t("plan_standard");
-    case "ADMIN": return t("plan_admin");
+    case "PAID": return t("plan_unknown_name");
+    case "ADMIN": return t("plan_unknown_name");
     case "EXPIRED": return t("plan_expired");
     case "FREE_TRIAL":
     default: return t("plan_free");
@@ -204,7 +228,6 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const [qrVisible, setQrVisible] = useState(false);
   const [qrClosing, setQrClosing] = useState(false);
   const [closing, setClosing] = useState(false);
-  const [openingTelegram, setOpeningTelegram] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
 
   const closeQr = () => {
@@ -246,15 +269,10 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     let cancelled = false;
     setCurrentLimits(null);
     setLoadedLimitsKey(null);
-    getUserByTelegramId(session.telegramId)
-      .then(({ response }) => {
+    getCurrentPlan()
+      .then((response) => {
         if (cancelled) return;
-        const user = response[0];
-        if (!user) return;
-        setCurrentLimits({
-          trafficLimitBytes: Number(user.traffic_limit_bytes) || 0,
-          deviceLimit: Number(user.hwid_device_limit ?? 0) || 0,
-        });
+        setCurrentLimits(response.success ? currentLimitsFromPlan(response.data) : null);
       })
       .catch(() => {
         if (!cancelled) setCurrentLimits(null);
@@ -306,49 +324,8 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const fallbackQr = `https://t.me/${BOT_NAME}?start=buy_${selectedRow?.key ?? "month"}_${lang}`;
   const qrUrl = selectedRow?.paymentUrl ?? fallbackQr;
 
-  // Telegram deep-link helpers, mirroring PairingScreen's getPairingOpenTargets.
-  // We extract the start-parameter from whatever URL the backend gave us so we
-  // can offer a proper tg:// scheme on the desktop installation. If there's
-  // no recognizable t.me start-link, we fall back to opening the URL as-is.
-  const tgTargets = (() => {
-    const url = qrUrl;
-    try {
-      const parsed = new URL(url);
-      const isTme =
-        parsed.hostname === "t.me" || parsed.hostname.endsWith(".t.me");
-      const start = parsed.searchParams.get("start");
-      const domain = parsed.pathname.replace(/^\//, "").split("/")[0] || BOT_NAME;
-      if (isTme && start) {
-        return {
-          desktopUrl: `tg://resolve?domain=${domain}&start=${encodeURIComponent(start)}`,
-          browserUrl: url,
-        };
-      }
-    } catch {
-      // not a parseable URL — fall through
-    }
-    return { desktopUrl: url, browserUrl: url };
-  })();
-
-  const handleOpenTelegram = async () => {
-    if (openingTelegram) return;
-    setOpeningTelegram(true);
-    setOpenError(null);
-    try {
-      try {
-        await openUrl(tgTargets.desktopUrl);
-      } catch {
-        await openUrl(tgTargets.browserUrl);
-      }
-    } catch (e) {
-      setOpenError(
-        e instanceof Error && e.message ? e.message : t("pairing_open_failed"),
-      );
-    } finally {
-      setOpeningTelegram(false);
-    }
-  };
   const canPurchase = session.isLinked && session.telegramId !== null;
+  const isRenewal = session.userPlan === "PAID" || session.userPlan === "EXPIRED";
   const handleShowQr = async () => {
     if (!canPurchase) {
       setOpenError(t("not_authorized"));
@@ -368,23 +345,25 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   };
   const buyText = selectedRow
     ? canPurchase
-      ? tf("buy_plan", selectedRow.title, selectedRow.priceDisplay)
+      ? tf(isRenewal ? "renew_plan" : "buy_plan", selectedRow.title, selectedRow.priceDisplay)
       : t("not_authorized")
     : t("subscription");
 
   // Current plan summary
-  const currentPlanName = planLabel(session.userPlan);
+  const currentPlanName = planLabel(session.userPlan, session.planDisplayName);
   const currentPlanNameClass = planNameClass(session.userPlan);
   const expiresAtFormatted =
     session.planExpiresAt && (session.userPlan === "PAID" || session.userPlan === "ADMIN")
-      ? new Date(session.planExpiresAt).toLocaleDateString()
+      ? formatDateDots(session.planExpiresAt)
       : null;
 
   // Per-status hint, mirrors phone's SubscriptionBottomSheet.
   let currentHint: string | null = null;
   switch (session.userPlan) {
     case "ADMIN":
-      currentHint = t("plan_unlimited_access");
+      currentHint = expiresAtFormatted
+        ? tf("plan_active_until", expiresAtFormatted)
+        : null;
       break;
     case "PAID":
       currentHint = expiresAtFormatted
@@ -416,7 +395,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       : displayedLimits && displayedLimits.trafficLimitBytes <= 0
         ? "\u221E"
         : `XXX ${t("unit_gb")}`;
-  const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : "XX";
+  const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : t("plan_unknown_name");
 
   return (
     <div
@@ -513,26 +492,21 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           onClick={(e) => e.target === e.currentTarget && closeQr()}
         >
           <div className={`sub-qr-card ${qrClosing ? "sub-qr-card--closing" : ""}`}>
-            <div className="sub-qr-card__title">{t("subscription_qr_title")}</div>
+            <div className="sub-qr-card__title">
+              {t(isRenewal ? "subscription_qr_renew_title" : "subscription_qr_title")}
+            </div>
             <div className="sub-qr-card__qr">
               <QRCodeSVG value={qrUrl} size={220} level="M" />
             </div>
-            <div className="sub-qr-card__hint">{t("subscription_qr_hint")}</div>
+            <div className="sub-qr-card__hint">
+              {t(isRenewal ? "subscription_qr_renew_hint" : "subscription_qr_hint")}
+            </div>
             <div className="sub-qr-card__hint">{t("subscription_sync_hint")}</div>
             {openError && (
               <div className="sub-qr-card__hint sub-qr-card__hint--error">
                 {openError}
               </div>
             )}
-            <button
-              className="cta-pill sub-qr-card__open-tg"
-              onClick={handleOpenTelegram}
-              disabled={openingTelegram}
-            >
-              {openingTelegram
-                ? t("pairing_opening_telegram")
-                : t("pairing_open_telegram")}
-            </button>
             <button className="sub-qr-card__close" onClick={closeQr}>
               {t("subscription_change_plan")}
             </button>

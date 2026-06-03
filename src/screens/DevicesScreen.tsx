@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { t } from "../i18n";
 import { fetchDevices, unlinkOtherDevice } from "../session/auth";
 import { getSession } from "../session/store";
+import { formatEpochSecondsDateDots } from "../session/dateFormat";
 import Spinner from "../components/Spinner";
 import type { LinkedDeviceDto } from "../api/types";
 import "./DevicesScreen.css";
@@ -34,11 +35,6 @@ function deviceTypeIcon(dto: LinkedDeviceDto): React.ReactNode {
       <rect x="5" y="2" width="14" height="20" rx="2" ry="2" /><line x1="12" y1="18" x2="12.01" y2="18" />
     </svg>
   );
-}
-
-function formatDate(ts: number | null | undefined): string {
-  if (!ts) return "";
-  return new Date(ts * 1000).toLocaleDateString();
 }
 
 export default function DevicesScreen({ onBack }: { onBack: () => void }) {
@@ -114,8 +110,12 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
       <div className="devices-content">
         {/* Counter */}
         <div className="devices-counter">
-          <span className="devices-counter__count">{devices.length}/{maxDevices}</span>
-          <span className="devices-counter__label">{t("devices_count")}</span>
+          <span className="devices-counter__count">
+            {maxDevices === 0 ? devices.length : `${devices.length}/${maxDevices}`}
+          </span>
+          <span className="devices-counter__label">
+            {maxDevices === 0 ? t("devices_count_unlimited") : t("devices_count")}
+          </span>
         </div>
 
         {/* Current device */}
@@ -155,7 +155,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
                 <div className="devices-card__meta">
                   {deviceTypeLabel(d)}
                   {d.platform ? ` \u00B7 ${d.platform}` : ""}
-                  {d.last_seen_at ? ` \u00B7 ${formatDate(d.last_seen_at)}` : ""}
+                  {d.last_seen_at ? ` \u00B7 ${formatEpochSecondsDateDots(d.last_seen_at)}` : ""}
                 </div>
               </div>
               <button

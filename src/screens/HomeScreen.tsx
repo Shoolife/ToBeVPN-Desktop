@@ -31,6 +31,7 @@ import {
 import { useSession, type UserPlan } from "../session/store";
 import { connectVpn, disconnectVpn, useVpnRuntime, clearVpnError } from "../session/vpnState";
 import { preparePingBypass } from "../session/vpn";
+import { formatDateDots } from "../session/dateFormat";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
 
@@ -46,12 +47,13 @@ function pingColor(ping: number): string {
   return "#F44336";
 }
 
-function planLabel(plan: UserPlan): string {
+function planLabel(plan: UserPlan, displayName?: string | null): string {
+  if (displayName && plan !== "EXPIRED") return displayName;
   switch (plan) {
     case "PAID":
-      return t("plan_standard");
+      return t("plan_unknown_name");
     case "ADMIN":
-      return t("plan_admin");
+      return t("plan_unknown_name");
     case "EXPIRED":
       return t("plan_expired");
     case "FREE_TRIAL":
@@ -106,13 +108,43 @@ function trafficProgressColor(progress: number): string {
 }
 
 function planHint(plan: UserPlan, expiresAt: number | null): string {
-  if (plan === "ADMIN") return t("plan_unlimited_access");
-  if (expiresAt && plan === "PAID") {
-    return tf("plan_until", new Date(expiresAt).toLocaleDateString());
+  if (expiresAt && (plan === "PAID" || plan === "ADMIN")) {
+    return tf("plan_until", formatDateDots(expiresAt));
   }
   if (plan === "FREE_TRIAL") return t("free_tier_hint");
   if (plan === "EXPIRED") return t("plan_expired");
   return "";
+}
+
+const SUBSCRIPTION_REMINDER_DAY_MS = 86_400_000;
+
+function ruDayWord(days: number): string {
+  const mod10 = days % 10;
+  const mod100 = days % 100;
+  if (mod10 === 1 && mod100 !== 11) return "день";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "дня";
+  return "дней";
+}
+
+function expiringSubscriptionTitle(daysLeft: number): string {
+  if (daysLeft <= 0) return t("subscription_expiry_today");
+  if (getSavedLang() === "ru") {
+    return `${t("subscription_expiring_prefix")} ${daysLeft} ${ruDayWord(daysLeft)}`;
+  }
+  return `${t("subscription_expiring_prefix")} ${daysLeft} ${daysLeft === 1 ? "day" : "days"}`;
+}
+
+function subscriptionReminder(plan: UserPlan, expiresAt: number | null): { title: string; expired: boolean } | null {
+  if (plan === "EXPIRED") {
+    return { title: t("subscription_expired_title"), expired: true };
+  }
+  if (plan !== "PAID" || expiresAt === null) return null;
+  const msLeft = expiresAt - Date.now();
+  if (msLeft < 0 || msLeft > 3 * SUBSCRIPTION_REMINDER_DAY_MS) return null;
+  return {
+    title: expiringSubscriptionTitle(Math.ceil(msLeft / SUBSCRIPTION_REMINDER_DAY_MS)),
+    expired: false,
+  };
 }
 
 function toSelectedServer(server: VpnServer): SelectedServer {
@@ -170,6 +202,7 @@ export default function HomeScreen({
   const [showSubscription, setShowSubscription] = useState(false);
   const [showTrialInfo, setShowTrialInfo] = useState(false);
   const [showBlockedDialog, setShowBlockedDialog] = useState(false);
+  const [dismissedReminderKey, setDismissedReminderKey] = useState<string | null>(null);
   const prevBlocked = useRef(subscriptionUsageBlocked);
   const [checkingSubscriptionAccess, setCheckingSubscriptionAccess] = useState(false);
   const [preparingConnection, setPreparingConnection] = useState(false);
@@ -184,6 +217,12 @@ export default function HomeScreen({
   const [ping, setPing] = useState(0);
 
   const isPaidOrAdmin = session.userPlan === "PAID" || session.userPlan === "ADMIN";
+  const reminder = subscriptionReminder(session.userPlan, session.planExpiresAt);
+  const reminderKey = `${session.userPlan}:${session.planExpiresAt ?? ""}`;
+  const showSubscriptionReminder =
+    !subscriptionUsageBlocked &&
+    reminder !== null &&
+    dismissedReminderKey !== reminderKey;
 
   useEffect(() => {
     // Force-sync on mount so the block state lands before the user can act,
@@ -387,6 +426,38 @@ export default function HomeScreen({
         </button>
       )}
 
+      {showSubscriptionReminder && reminder && (
+        <div className={`home-sub-reminder ${reminder.expired ? "home-sub-reminder--expired" : ""}`}>
+          <div className="home-sub-reminder__header">
+            <div className="home-sub-reminder__icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+            </div>
+            <div className="home-sub-reminder__body">
+              <div className="home-sub-reminder__title">{reminder.title}</div>
+              <div className="home-sub-reminder__text">{t("subscription_renew_reminder_desc")}</div>
+            </div>
+          </div>
+          <div className="home-sub-reminder__actions">
+            <button
+              className="home-sub-reminder__btn home-sub-reminder__btn--primary"
+              onClick={() => void openSubscription()}
+            >
+              {t("subscription_renew_action")}
+            </button>
+            <button
+              className="home-sub-reminder__btn home-sub-reminder__btn--text"
+              onClick={() => setDismissedReminderKey(reminderKey)}
+            >
+              {t("update_banner_later")}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="home-content">
         <div className="home-connect-area">
           <button
@@ -551,7 +622,9 @@ export default function HomeScreen({
             <div className="home-card__row">
               <div className="home-card__info">
                 <div className="home-sub__label">{t("subscription")}</div>
-                <div className={planBadgeClass(session.userPlan)}>{planLabel(session.userPlan)}</div>
+                <div className={planBadgeClass(session.userPlan)}>
+                  {planLabel(session.userPlan, session.planDisplayName)}
+                </div>
                 <div className="home-sub__hint">
                   {checkingSubscriptionAccess
                     ? t("loading_data")

@@ -7,13 +7,21 @@ export interface DeviceFingerprint {
   platform: string;    // "Windows" / "macOS" / "Linux"
   osVersion: string;   // e.g. "11" / "26.4" / "24.04"
   model: string;       // OS edition / hardware model when available
-  userAgent: string;   // "ToBeVPN/<appVersion>/<platformLower>/<appVersion>"
+  userAgent: string;   // "ToBeVPN/<appVersion>/<platformLower>/<numericBuildCode>"
 }
 
 declare const __APP_VERSION__: string;
 const APP_VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "0.0.0";
+const APP_BUILD_CODE = numericBuildCode(APP_VERSION);
 
 let cached: DeviceFingerprint | null = null;
+
+function numericBuildCode(version: string): string {
+  const [major = 0, minor = 0, patch = 0] = version
+    .split(".", 3)
+    .map((part) => Number.parseInt(part, 10) || 0);
+  return String(major * 1_000_000 + minor * 1_000 + patch);
+}
 
 async function safeInvoke(cmd: string): Promise<string> {
   try {
@@ -37,7 +45,7 @@ export async function getDeviceFingerprint(): Promise<DeviceFingerprint> {
     platform: platform || "Desktop",
     osVersion,
     model: model || "Desktop",
-    userAgent: `ToBeVPN/${APP_VERSION}/${platformSlug}/${APP_VERSION}`,
+    userAgent: `ToBeVPN/${APP_VERSION}/${platformSlug}/${APP_BUILD_CODE}`,
   };
   return cached;
 }

@@ -16,6 +16,7 @@ export interface Session {
   shortUuid: string | null;
   panelUserUuid: string | null;
   userPlan: UserPlan;
+  planDisplayName: string | null;
   planExpiresAt: number | null;
   trafficLimitBytes: number;
   trafficUsedBytes: number;
@@ -55,6 +56,7 @@ function defaultSession(): Session {
     shortUuid: null,
     panelUserUuid: null,
     userPlan: "FREE_TRIAL",
+    planDisplayName: null,
     planExpiresAt: null,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
@@ -136,6 +138,7 @@ export function clearIdentity() {
     shortUuid: null,
     panelUserUuid: null,
     userPlan: "FREE_TRIAL",
+    planDisplayName: null,
     planExpiresAt: null,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
@@ -155,6 +158,7 @@ export function clearDeviceSession() {
     shortUuid: null,
     panelUserUuid: null,
     userPlan: "FREE_TRIAL",
+    planDisplayName: null,
     planExpiresAt: null,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
@@ -213,6 +217,7 @@ export function updateSessionFromTokens(tokens: SessionTokensDto): Session {
     shortUuid: isLinked ? (tokens.short_uuid ?? currentSession.shortUuid) : null,
     panelUserUuid: isLinked ? (tokens.panel_user_uuid ?? currentSession.panelUserUuid) : null,
     userPlan: isLinked ? currentSession.userPlan : "FREE_TRIAL",
+    planDisplayName: isLinked ? currentSession.planDisplayName : null,
     planExpiresAt: isLinked ? currentSession.planExpiresAt : null,
     trafficLimitBytes: isLinked ? currentSession.trafficLimitBytes : 0,
     trafficUsedBytes: isLinked ? currentSession.trafficUsedBytes : 0,

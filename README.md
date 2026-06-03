@@ -73,6 +73,7 @@ ToBeVPN — нативный desktop-клиент к VPN-сети с защищ�
 ## Связанные репозитории
 
 - **Android-клиент:** [ToBeVPN-Android](https://github.com/Shoolife/ToBeVPN-Android) — нативный Android-клиент
+- **Android TV-клиент:** [ToBeVPN-Android-TV](https://github.com/Shoolife/ToBeVPN-Android-TV) — Android TV / приставки
 
 ## Roadmap
 

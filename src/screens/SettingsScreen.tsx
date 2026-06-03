@@ -3,15 +3,17 @@ import { t, getSavedLang, saveLang, type Lang } from "../i18n";
 import { logout, saveEmail } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { getXrayVersion } from "../session/vpn";
+import { formatDateDots } from "../session/dateFormat";
 import UpdateCheckRow from "../components/UpdateCheckRow";
 import "./SettingsScreen.css";
 
-function planLabel(plan: UserPlan): string {
+function planLabel(plan: UserPlan, displayName?: string | null): string {
+  if (displayName && plan !== "EXPIRED") return displayName;
   switch (plan) {
     case "PAID":
-      return t("plan_standard");
+      return t("plan_unknown_name");
     case "ADMIN":
-      return t("plan_admin");
+      return t("plan_unknown_name");
     case "EXPIRED":
       return t("plan_expired");
     case "FREE_TRIAL":
@@ -31,14 +33,6 @@ function planValueClass(plan: UserPlan): string {
     default:
       return "settings-info-row__value settings-info-row__value--orange";
   }
-}
-
-function formatExpiresDate(epochMillis: number): string {
-  const d = new Date(epochMillis);
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  return `${dd}.${mm}.${yyyy}`;
 }
 
 export default function SettingsScreen({
@@ -152,21 +146,15 @@ export default function SettingsScreen({
           <div className="settings-info-row">
             <span className="settings-info-row__label">{t("plan")}</span>
             <span className={planValueClass(session.userPlan)}>
-              {planLabel(session.userPlan)}
+              {planLabel(session.userPlan, session.planDisplayName)}
             </span>
           </div>
-          {session.userPlan === "PAID" && session.planExpiresAt !== null && (
+          {(session.userPlan === "PAID" || session.userPlan === "ADMIN") && session.planExpiresAt !== null && (
             <div className="settings-info-row">
               <span className="settings-info-row__label">{t("expires")}</span>
               <span className="settings-info-row__value">
-                {formatExpiresDate(session.planExpiresAt)}
+                {formatDateDots(session.planExpiresAt)}
               </span>
-            </div>
-          )}
-          {session.userPlan === "ADMIN" && (
-            <div className="settings-info-row">
-              <span className="settings-info-row__label">{t("traffic")}</span>
-              <span className="settings-info-row__value">{t("plan_unlimited_access")}</span>
             </div>
           )}
           {session.userPlan === "EXPIRED" && (

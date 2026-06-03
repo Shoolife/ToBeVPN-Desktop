@@ -20,6 +20,7 @@ import type {
   AuthRequestResponseDto,
   AuthStatusDto,
   BootstrapRequestDto,
+  CurrentPlanDto,
   DeviceRegisterRequestDto,
   DeviceUnlinkRequestDto,
   LinkedDevicesDto,
@@ -43,6 +44,16 @@ const httpFetch: typeof fetch = import.meta.env.DEV ? window.fetch.bind(window) 
 
 type AuthMode = "access" | "none";
 const DEVICE_ID_NAMESPACE = "tobevpn:desktop:device-id:v1";
+
+export class ApiHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiHttpError";
+  }
+}
 
 function resolveBase(base: string = BOT_API_BASE_URL): string {
   if (base === "/" || base === "") return window.location.origin + "/";
@@ -215,7 +226,7 @@ async function parseErrorMessage(response: Response): Promise<string> {
 
 async function expectJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    throw new Error(await parseErrorMessage(response));
+    throw new ApiHttpError(response.status, await parseErrorMessage(response));
   }
   return (await response.json()) as T;
 }
@@ -287,6 +298,10 @@ async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
   return payload.data;
 }
 
+export async function bootstrapDeviceSession(): Promise<void> {
+  await bootstrapDeviceSessionInternal();
+}
+
 async function refreshDeviceSessionInternal(refreshToken: string): Promise<SessionTokensDto> {
   const requestBody: RefreshRequestDto = {
     refresh_token: refreshToken,
@@ -318,24 +333,6 @@ export async function ensureDeviceSession(): Promise<void> {
         return refreshed.access_token;
       } catch (error) {
         console.warn("[device-session] refresh failed during startup:", error);
-      }
-    }
-
-    const bootstrapped = await bootstrapDeviceSessionInternal();
-    return bootstrapped.access_token;
-  });
-}
-
-export async function syncDeviceSessionState(): Promise<void> {
-  await runTokenOperation(async () => {
-    const current = getSession();
-
-    if (current.refreshToken) {
-      try {
-        const refreshed = await refreshDeviceSessionInternal(current.refreshToken);
-        return refreshed.access_token;
-      } catch (error) {
-        console.warn("[device-session] refresh state sync failed:", error);
       }
     }
 
@@ -491,6 +488,10 @@ export function getSubscriptionInfo(
   shortUuid: string,
 ): Promise<PanelResponse<PanelSubInfoDto>> {
   return request(`api/panel/sub/${shortUuid}/info`, { method: "GET" });
+}
+
+export function getCurrentPlan(): Promise<ApiResponse<CurrentPlanDto>> {
+  return request("api/subscription/current-plan", { method: "GET" });
 }
 
 // --- Email ---

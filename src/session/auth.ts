@@ -2,7 +2,13 @@
 // Mirrors the Kotlin AuthRepository on the TV/phone clients.
 import { invoke } from "@tauri-apps/api/core";
 import {
+  ApiHttpError,
+  bootstrapDeviceSession,
   checkAuthStatus,
+  checkTvPairingStatus,
+  createTvPairing,
+  ensureDeviceSession,
+  getCurrentPlan,
   getDevices as apiGetDevices,
   getNodes as apiGetNodes,
   getPurchasePlans as apiGetPurchasePlans,
@@ -12,15 +18,16 @@ import {
   requestAuth,
   registerDevice,
   saveEmail as apiSaveEmail,
-  syncDeviceSessionState,
   unlinkDevice,
 } from "../api/client";
 import type {
   AuthStatusDto,
+  CurrentPlanDto,
   LinkedDevicesDto,
   PanelNodeDto,
   PanelUserDto,
   PurchasePlansDto,
+  TvPairStatusDto,
 } from "../api/types";
 import {
   clearDeviceSession,
@@ -346,6 +353,84 @@ function planForPanelUser(user: PanelUserDto): UserPlan {
   return "FREE_TRIAL";
 }
 
+interface CurrentSubscriptionPlanInfo {
+  displayName: string | null;
+  trafficLimitBytes: number | null;
+  deviceLimit: number | null;
+  expiresAtMillis: number | null;
+  isActive: boolean | null;
+  isExpired: boolean | null;
+  isTrial: boolean | null;
+  isUnlimited: boolean | null;
+  hasPlanData: boolean;
+}
+
+function normalizePlanTrafficLimit(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (value <= 0) return 0;
+  return value > 1024 * 1024 ? value : value * 1024 * 1024 * 1024;
+}
+
+function normalizeTrafficLimitBytes(
+  trafficLimitBytes: number | null | undefined,
+  trafficLimit: number | null | undefined,
+): number | null {
+  if (trafficLimitBytes !== null && trafficLimitBytes !== undefined) return trafficLimitBytes;
+  return normalizePlanTrafficLimit(trafficLimit);
+}
+
+function epochTimestampToMillis(value: number | null | undefined): number | null {
+  const timestamp = value && value > 0 ? value : null;
+  if (timestamp === null) return null;
+  return timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp;
+}
+
+function currentPlanInfoFromDto(dto: CurrentPlanDto | null | undefined): CurrentSubscriptionPlanInfo | null {
+  if (!dto) return null;
+  const snapshot = dto.current_plan ?? dto.plan_snapshot ?? null;
+  const subscription = dto.subscription ?? null;
+  const subscriptionStatus = subscription?.status ?? subscription?.stored_status ?? dto.status ?? null;
+  const expiresAtMillis =
+    epochTimestampToMillis(subscription?.expire_at_ts) ??
+    parseExpiresAtMillis(subscription?.expire_at) ??
+    parseExpiresAtMillis(subscription?.expires_at) ??
+    parseExpiresAtMillis(dto.expire_at) ??
+    parseExpiresAtMillis(dto.expires_at);
+  const isExpired =
+    subscription?.is_expired ??
+    (subscriptionStatus ? subscriptionStatus.toUpperCase() === "EXPIRED" : null) ??
+    (expiresAtMillis !== null ? expiresAtMillis <= Date.now() : null);
+  const isActive =
+    subscription?.is_active ??
+    (subscriptionStatus ? subscriptionStatus.toUpperCase() === "ACTIVE" : null);
+  const hasPlanData = Boolean(snapshot || subscription || dto.plan_name?.trim() || dto.name?.trim());
+  const displayName =
+    (snapshot?.name ?? dto.plan_name ?? dto.name ?? "").trim() || null;
+  return {
+    displayName,
+    trafficLimitBytes:
+      normalizeTrafficLimitBytes(subscription?.traffic_limit_bytes, subscription?.traffic_limit) ??
+      normalizeTrafficLimitBytes(snapshot?.traffic_limit_bytes, snapshot?.traffic_limit),
+    deviceLimit: subscription?.device_limit ?? snapshot?.device_limit ?? null,
+    expiresAtMillis,
+    isActive,
+    isExpired,
+    isTrial: subscription?.is_trial ?? snapshot?.is_trial ?? null,
+    isUnlimited: subscription?.is_unlimited ?? (snapshot?.type ? snapshot.type.toUpperCase() === "UNLIMITED" : null),
+    hasPlanData,
+  };
+}
+
+async function fetchCurrentSubscriptionPlan(): Promise<CurrentSubscriptionPlanInfo | null> {
+  try {
+    const res = await getCurrentPlan();
+    if (!res.success) return null;
+    return currentPlanInfoFromDto(res.data);
+  } catch {
+    return null;
+  }
+}
+
 function parsePanelExpireAtMillis(value: string | null | undefined): number {
   if (!value) return Number.NEGATIVE_INFINITY;
   const ts = Date.parse(value);
@@ -391,6 +476,14 @@ function parseExpiresAtMillis(value: string | null | undefined): number | null {
   return Number.isNaN(ts) ? null : ts;
 }
 
+function resolvePlanFromCurrentPlan(cachedPlan: UserPlan, currentPlanInfo: CurrentSubscriptionPlanInfo | null): UserPlan {
+  if (!currentPlanInfo) return cachedPlan;
+  if (!currentPlanInfo.hasPlanData) return "FREE_TRIAL";
+  if (currentPlanInfo.isExpired === true || currentPlanInfo.isActive === false) return "EXPIRED";
+  if (currentPlanInfo.isTrial === true) return "FREE_TRIAL";
+  return "PAID";
+}
+
 // --- Public API ---
 
 export async function initializeAuthSession(): Promise<void> {
@@ -413,8 +506,8 @@ export async function initializeAuthSession(): Promise<void> {
   }
 
   await settleStartupStep(
-    "syncDeviceSessionState",
-    syncDeviceSessionState(),
+    "ensureDeviceSession",
+    ensureDeviceSession(),
     STARTUP_SESSION_TIMEOUT_MS,
   );
 
@@ -450,8 +543,13 @@ export interface PairingCode {
   qrUrl: string;
 }
 
+export interface DevicePairingCode {
+  code: string;
+  expiresIn: number;
+}
+
 export async function createPairingCode(): Promise<PairingCode> {
-  await syncDeviceSessionState();
+  await ensureDeviceSession();
   const session = getSession();
   const res = await requestAuth({
     panel_user_uuid: session.panelUserUuid,
@@ -462,6 +560,16 @@ export async function createPairingCode(): Promise<PairingCode> {
   writePendingAuthToken(authToken);
   const qrUrl = getPairingOpenTargets(authToken).browserUrl;
   return { authToken, qrUrl };
+}
+
+export async function createDevicePairingCode(): Promise<DevicePairingCode> {
+  await ensureDeviceSession();
+  const res = await createTvPairing({});
+  if (!res.success || !res.data) throw new Error(res.message ?? "Empty pairing response");
+  return {
+    code: res.data.code,
+    expiresIn: res.data.expires_in,
+  };
 }
 
 export function getPairingOpenTargets(authToken: string): {
@@ -480,6 +588,11 @@ export type PairingPollResult =
   | { status: "expired" }
   | { status: "completed"; payload: NonNullable<AuthStatusDto> };
 
+export type DevicePairingPollResult =
+  | { status: "pending" }
+  | { status: "expired" }
+  | { status: "completed"; payload: NonNullable<TvPairStatusDto> };
+
 export async function pollPairing(authToken: string): Promise<PairingPollResult> {
   const res = await checkAuthStatus(authToken);
   if (!res.success || !res.data) {
@@ -492,6 +605,23 @@ export async function pollPairing(authToken: string): Promise<PairingPollResult>
     if (!data.telegram_id) throw new Error("Pairing completed without telegram_id");
     return { status: "completed", payload: data };
   }
+  return { status: "pending" };
+}
+
+export async function pollDevicePairing(code: string): Promise<DevicePairingPollResult> {
+  const res = await checkTvPairingStatus(code);
+  if (!res.success || !res.data) {
+    const message = res.message ?? "Pairing code not found";
+    if (/not found|expired/i.test(message)) return { status: "expired" };
+    throw new Error(message);
+  }
+  const data = res.data;
+  if (data.status === "completed") {
+    if (!data.telegram_id) throw new Error("Pairing completed without telegram_id");
+    return { status: "completed", payload: data };
+  }
+  if (data.status === "expired") return { status: "expired" };
+  if (data.status === "rejected") throw new Error(res.message ?? "Pairing was rejected");
   return { status: "pending" };
 }
 
@@ -509,6 +639,8 @@ export async function authenticateWithTelegramId(
     shortUuid: preferredShortUuid,
     panelUserUuid: preferredPanelUserUuid,
   });
+
+  await bootstrapDeviceSession().catch(() => {});
 
   // Force the sync — we just authenticated and the user expects to
   // immediately see the right plan (PAID / FREE_TRIAL), not whatever
@@ -603,6 +735,7 @@ async function runSyncSubscription(): Promise<void> {
   const telegramId = session.telegramId;
 
   let panelUser: PanelUserDto | null = null;
+  let currentPlanInfo: CurrentSubscriptionPlanInfo | null = null;
   if (session.isLinked && telegramId !== null) {
     try {
     const { response: panelUsers } = await getUserByTelegramId(telegramId);
@@ -621,6 +754,7 @@ async function runSyncSubscription(): Promise<void> {
     } catch {
       // Fall through — keep using the cached shortUuid.
     }
+    currentPlanInfo = await fetchCurrentSubscriptionPlan();
   }
 
   const shortUuid = session.shortUuid;
@@ -634,6 +768,7 @@ async function runSyncSubscription(): Promise<void> {
       writeCachedSubscriptionUrl(shortUuid, null);
       updateSession({
         userPlan: "EXPIRED",
+        planDisplayName: null,
         planExpiresAt: null,
         trafficLimitBytes: 0,
         trafficUsedBytes: 0,
@@ -679,7 +814,9 @@ async function runSyncSubscription(): Promise<void> {
   //      FREE_TRIAL on a transient/ambiguous response (this used to flip
   //      the badge to "Пробный" while server-switching).
   let plan: UserPlan;
-  if (!isActive) {
+  if (currentPlanInfo) {
+    plan = resolvePlanFromCurrentPlan(cachedPlan, currentPlanInfo);
+  } else if (!isActive) {
     plan = "EXPIRED";
   } else if (panelUser && planForPanelUser(panelUser) !== "FREE_TRIAL") {
     plan = planForPanelUser(panelUser);
@@ -691,12 +828,15 @@ async function runSyncSubscription(): Promise<void> {
     plan = "FREE_TRIAL";
   }
 
-  const expiresAtMillis = parseExpiresAtMillis(subUser.expires_at);
-  const trafficLimitBytes = Number(subUser.traffic_limit_bytes) || 0;
+  const expiresAtMillis = currentPlanInfo?.expiresAtMillis ?? parseExpiresAtMillis(subUser.expires_at);
+  const trafficLimitBytes = currentPlanInfo?.trafficLimitBytes ?? (Number(subUser.traffic_limit_bytes) || 0);
   const trafficUsedBytes = Number(subUser.traffic_used_bytes) || 0;
 
   updateSession({
     userPlan: plan,
+    planDisplayName:
+      currentPlanInfo?.displayName ??
+      (session.userPlan === plan && plan !== "EXPIRED" ? session.planDisplayName : null),
     planExpiresAt: expiresAtMillis,
     trafficLimitBytes,
     trafficUsedBytes,
@@ -776,20 +916,22 @@ function paymentLooksApplied(pending: PendingPurchaseState, session: Session): b
 
 /**
  * Check whether the current device session is still linked server-side.
- * bootstrap/refresh is the source of truth for remote unlink state.
+ * The ordinary access-token request avoids rotating session tokens on every poll.
  */
 export async function isCurrentDeviceLinked(): Promise<boolean> {
-  const { isLinked } = getSession();
+  const { deviceId, isLinked } = getSession();
   if (!isLinked) return false;
   try {
-    await syncDeviceSessionState();
-    return getSession().isLinked;
-  } catch {
-    return true; // network error → don't kick the user
+    const res = await apiGetDevices();
+    if (!res.success || !res.data) return getSession().isLinked;
+    return res.data.devices.some((device) => device.device_id === deviceId);
+  } catch (error) {
+    if (error instanceof ApiHttpError && error.status === 403) return false;
+    return getSession().isLinked; // network error → don't kick the user
   }
 }
 
-const DEVICE_LINK_POLL_MS = 10_000;
+const DEVICE_LINK_POLL_MS = 60_000;
 let linkPollTimer: number | null = null;
 
 /**

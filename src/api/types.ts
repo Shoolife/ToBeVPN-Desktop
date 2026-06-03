@@ -178,6 +178,49 @@ export interface PanelSubInfoDto {
   subscription_url: string | null;
 }
 
+export interface CurrentPlanSnapshotDto {
+  id?: number | null;
+  name?: string | null;
+  type?: string | null;
+  traffic_limit?: number | null;
+  traffic_limit_bytes?: number | null;
+  device_limit?: number | null;
+  duration?: number | null;
+  duration_days?: number | null;
+  tag?: string | null;
+  is_trial?: boolean | null;
+  traffic_limit_strategy?: string | null;
+}
+
+export interface CurrentPlanSubscriptionDto {
+  expire_at?: string | null;
+  expires_at?: string | null;
+  expire_at_ts?: number | null;
+  status?: string | null;
+  stored_status?: string | null;
+  is_active?: boolean | null;
+  is_expired?: boolean | null;
+  is_unlimited?: boolean | null;
+  is_trial?: boolean | null;
+  traffic_limit?: number | null;
+  traffic_limit_bytes?: number | null;
+  traffic_limit_strategy?: string | null;
+  device_limit?: number | null;
+  created_at?: string | null;
+  created_at_ts?: number | null;
+}
+
+export interface CurrentPlanDto {
+  current_plan?: CurrentPlanSnapshotDto | null;
+  plan_snapshot?: CurrentPlanSnapshotDto | null;
+  subscription?: CurrentPlanSubscriptionDto | null;
+  plan_name?: string | null;
+  name?: string | null;
+  status?: string | null;
+  expire_at?: string | null;
+  expires_at?: string | null;
+}
+
 // --- Purchase plans ---
 
 export interface PurchasePriceDto {

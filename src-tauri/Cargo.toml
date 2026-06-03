@@ -1,6 +1,6 @@
 [package]
 name = "tobevpn-desktop"
-version = "1.0.33"
+version = "1.0.34"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -44,6 +44,7 @@ gtk = "0.18"
 libc = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = "2"
