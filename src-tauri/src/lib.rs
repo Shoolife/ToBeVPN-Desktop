@@ -219,6 +219,10 @@ fn get_os_name() -> String {
 /// Falls back to OS edition (e.g. "Pro") if model can't be detected.
 #[tauri::command]
 fn get_device_model() -> String {
+    if let Some(model) = detect_hardware_model() {
+        return model;
+    }
+
     let info = os_info::get();
     let edition = info.edition().unwrap_or("");
     let codename = info.codename().unwrap_or("");
@@ -229,6 +233,95 @@ fn get_device_model() -> String {
     } else {
         info.os_type().to_string()
     }
+}
+
+fn clean_device_model_part(value: &str) -> Option<String> {
+    let cleaned = value.trim().trim_matches(char::from(0)).trim();
+    let normalized = cleaned.to_ascii_lowercase();
+    let generic = [
+        "",
+        "0",
+        "none",
+        "null",
+        "unknown",
+        "default string",
+        "not specified",
+        "not applicable",
+        "to be filled by o.e.m.",
+        "to be filled by oem",
+        "system product name",
+        "system manufacturer",
+        "standard pc",
+        "computer",
+        "desktop",
+        "pc",
+        "linux",
+        "windows",
+        "macos",
+    ];
+    if generic.contains(&normalized.as_str()) {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+fn compose_vendor_model(vendor: Option<String>, model: Option<String>) -> Option<String> {
+    let model = model?;
+    match vendor {
+        Some(vendor) if !model.to_ascii_lowercase().starts_with(&vendor.to_ascii_lowercase()) => {
+            Some(format!("{vendor} {model}"))
+        }
+        _ => Some(model),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_hardware_model() -> Option<String> {
+    fn read_dmi(name: &str) -> Option<String> {
+        fs::read_to_string(PathBuf::from("/sys/class/dmi/id").join(name))
+            .ok()
+            .and_then(|value| clean_device_model_part(&value))
+    }
+
+    compose_vendor_model(read_dmi("sys_vendor"), read_dmi("product_name"))
+        .or_else(|| compose_vendor_model(read_dmi("board_vendor"), read_dmi("board_name")))
+}
+
+#[cfg(target_os = "windows")]
+fn detect_hardware_model() -> Option<String> {
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "$c=Get-CimInstance Win32_ComputerSystem; (($c.Manufacturer,$c.Model) -join ' ')",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    clean_device_model_part(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn detect_hardware_model() -> Option<String> {
+    let output = std::process::Command::new("sysctl")
+        .args(["-n", "hw.model"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    clean_device_model_part(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn detect_hardware_model() -> Option<String> {
+    None
 }
 
 fn secure_session_entry() -> Result<Entry, String> {

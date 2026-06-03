@@ -6,15 +6,29 @@ import Spinner from "../components/Spinner";
 import type { LinkedDeviceDto } from "../api/types";
 import "./DevicesScreen.css";
 
-function deviceTypeLabel(dto: LinkedDeviceDto): string {
+type DeviceKind = "phone" | "desktop" | "tv";
+
+function inferDeviceKind(dto: LinkedDeviceDto): DeviceKind {
   const type = (dto.device_type ?? "").toLowerCase();
+  const platform = (dto.platform ?? "").toLowerCase();
+  const userAgent = (dto.user_agent ?? "").toLowerCase();
+  const desktopPlatform = platform === "linux" || platform === "windows" || platform === "macos";
+  if (type === "tv" || platform === "android tv" || userAgent.includes("/androidtv/")) return "tv";
+  if (desktopPlatform || type === "desktop" || userAgent.includes("/linux/") || userAgent.includes("/windows/") || userAgent.includes("/macos/")) {
+    return "desktop";
+  }
+  return "phone";
+}
+
+function deviceTypeLabel(dto: LinkedDeviceDto): string {
+  const type = inferDeviceKind(dto);
   if (type === "tv") return t("devices_type_tv");
   if (type === "desktop") return t("devices_type_desktop");
   return t("devices_type_phone");
 }
 
 function deviceTypeIcon(dto: LinkedDeviceDto): React.ReactNode {
-  const type = (dto.device_type ?? "").toLowerCase();
+  const type = inferDeviceKind(dto);
   if (type === "tv") {
     return (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -46,8 +60,30 @@ function deviceMatchesAliases(dto: LinkedDeviceDto, aliases: string[]): boolean 
   });
 }
 
+function isTechnicalDesktopName(value: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]{1,31}$/.test(value) && value === value.toLowerCase();
+}
+
+function cleanDesktopModel(model: string | null | undefined, platform: string | null | undefined): string {
+  const trimmed = model?.trim() ?? "";
+  if (!trimmed) return "";
+  const normalized = trimmed.toLowerCase();
+  const normalizedPlatform = platform?.trim().toLowerCase() ?? "";
+  if (normalized === "desktop" || normalized === "pc" || normalized === normalizedPlatform) return "";
+  return trimmed;
+}
+
 function deviceName(dto: LinkedDeviceDto): string {
-  return dto.device_name?.trim() || dto.device_model?.trim() || "Unknown";
+  const kind = inferDeviceKind(dto);
+  if (kind === "desktop") {
+    const name = dto.device_name?.trim() ?? "";
+    if (name && !isTechnicalDesktopName(name)) return name;
+    const model = cleanDesktopModel(dto.device_model, dto.platform);
+    if (model) return model;
+    const platform = dto.platform?.trim();
+    return platform ? `${t("devices_type_desktop")} ${platform}` : t("devices_type_desktop");
+  }
+  return dto.device_name?.trim() || dto.device_model?.trim() || deviceTypeLabel(dto);
 }
 
 export default function DevicesScreen({ onBack }: { onBack: () => void }) {

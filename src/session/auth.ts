@@ -337,15 +337,37 @@ async function settleStartupStep<T>(
 async function getDeviceName(): Promise<string> {
   if (cachedHostname) return cachedHostname;
   try {
-    const name = await invoke<string>("get_hostname");
-    if (name) {
-      cachedHostname = name;
-      return name;
+    const fingerprint = await getDeviceFingerprint();
+    const model = cleanDesktopModelName(fingerprint.model, fingerprint.platform);
+    if (model) {
+      cachedHostname = model;
+      return cachedHostname;
+    }
+    const platform = fingerprint.platform.trim();
+    if (platform && platform !== "Desktop") {
+      cachedHostname = `${platform} PC`;
+      return cachedHostname;
     }
   } catch {
-    // Tauri command unavailable (e.g. running in browser)
+    // Tauri commands unavailable (e.g. running in browser)
   }
   return "ToBeVPN Desktop";
+}
+
+function cleanDesktopModelName(model: string, platform: string): string {
+  const trimmed = model.trim();
+  if (!trimmed) return "";
+  const normalized = trimmed.toLocaleLowerCase("en-US");
+  const normalizedPlatform = platform.trim().toLocaleLowerCase("en-US");
+  const generic = new Set([
+    "desktop",
+    "pc",
+    "linux",
+    "windows",
+    "macos",
+    normalizedPlatform,
+  ]);
+  return generic.has(normalized) ? "" : trimmed;
 }
 
 function planForPanelUser(user: PanelUserDto): UserPlan {
