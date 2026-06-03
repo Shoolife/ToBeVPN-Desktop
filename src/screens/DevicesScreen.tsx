@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { t } from "../i18n";
-import { fetchDevices, unlinkOtherDevice } from "../session/auth";
-import { getSession } from "../session/store";
+import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../session/auth";
 import { formatEpochSecondsDateDots } from "../session/dateFormat";
 import Spinner from "../components/Spinner";
 import type { LinkedDeviceDto } from "../api/types";
@@ -37,21 +36,40 @@ function deviceTypeIcon(dto: LinkedDeviceDto): React.ReactNode {
   );
 }
 
+function deviceMatchesAliases(dto: LinkedDeviceDto, aliases: string[]): boolean {
+  const normalizedAliases = new Set(
+    aliases.map((alias) => alias.trim().toLocaleLowerCase("en-US")).filter(Boolean),
+  );
+  return [dto.device_id, dto.hwid].some((value) => {
+    const normalizedValue = value?.trim().toLocaleLowerCase("en-US");
+    return !!normalizedValue && normalizedAliases.has(normalizedValue);
+  });
+}
+
+function deviceName(dto: LinkedDeviceDto): string {
+  return dto.device_name?.trim() || dto.device_model?.trim() || "Unknown";
+}
+
 export default function DevicesScreen({ onBack }: { onBack: () => void }) {
   const [devices, setDevices] = useState<LinkedDeviceDto[]>([]);
   const [maxDevices, setMaxDevices] = useState(0);
+  const [currentCount, setCurrentCount] = useState<number | null>(null);
+  const [currentAliases, setCurrentAliases] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
-
-  const currentDeviceId = getSession().deviceId;
 
   const load = async () => {
     setLoading(true);
     try {
-      const data = await fetchDevices();
+      const [data, aliases] = await Promise.all([
+        fetchDevices(),
+        getCurrentDeviceAliases(),
+      ]);
+      setCurrentAliases(aliases);
       if (data) {
         setDevices(data.devices);
         setMaxDevices(data.max_devices);
+        setCurrentCount(data.current_count ?? null);
       }
     } catch {
       // keep previous state
@@ -76,8 +94,9 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const currentDevice = devices.find((d) => d.device_id === currentDeviceId);
-  const otherDevices = devices.filter((d) => d.device_id !== currentDeviceId);
+  const devicesCount = currentCount ?? devices.length;
+  const currentDevice = devices.find((d) => deviceMatchesAliases(d, currentAliases));
+  const otherDevices = devices.filter((d) => !deviceMatchesAliases(d, currentAliases));
 
   return (
     <div className="devices-root">
@@ -111,7 +130,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
         {/* Counter */}
         <div className="devices-counter">
           <span className="devices-counter__count">
-            {maxDevices === 0 ? devices.length : `${devices.length}/${maxDevices}`}
+            {maxDevices === 0 ? devicesCount : `${devicesCount}/${maxDevices}`}
           </span>
           <span className="devices-counter__label">
             {maxDevices === 0 ? t("devices_count_unlimited") : t("devices_count")}
@@ -126,7 +145,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
               <div className="devices-card__icon">{deviceTypeIcon(currentDevice)}</div>
               <div className="devices-card__info">
                 <div className="devices-card__name">
-                  {currentDevice.device_name ?? "Unknown"}
+                  {deviceName(currentDevice)}
                 </div>
                 <div className="devices-card__meta">
                   {deviceTypeLabel(currentDevice)}
@@ -151,7 +170,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
             <div key={d.device_id} className="devices-card">
               <div className="devices-card__icon">{deviceTypeIcon(d)}</div>
               <div className="devices-card__info">
-                <div className="devices-card__name">{d.device_name ?? "Unknown"}</div>
+                <div className="devices-card__name">{deviceName(d)}</div>
                 <div className="devices-card__meta">
                   {deviceTypeLabel(d)}
                   {d.platform ? ` \u00B7 ${d.platform}` : ""}

@@ -73,14 +73,18 @@ export interface DeviceUnlinkRequestDto {
 
 export interface LinkedDeviceDto {
   device_id: string;
+  hwid?: string | null;
   device_name?: string | null;
   device_type?: string | null;
   platform?: string | null;
+  device_model?: string | null;
+  user_agent?: string | null;
   linked_at?: number | null;
   last_seen_at?: number | null;
 }
 
 export interface LinkedDevicesDto {
+  current_count?: number | null;
   max_devices: number;
   devices: LinkedDeviceDto[];
 }

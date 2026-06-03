@@ -23,6 +23,7 @@ import {
 import type {
   AuthStatusDto,
   CurrentPlanDto,
+  LinkedDeviceDto,
   LinkedDevicesDto,
   PanelNodeDto,
   PanelUserDto,
@@ -48,6 +49,7 @@ import {
 } from "./secureSession";
 import { disconnectVpn } from "./vpnState";
 import { pingSubscriptionUrl, type SubscriptionPingResult } from "./subscriptionPinger";
+import { getDeviceFingerprint } from "./fingerprint";
 
 const DEVICE_TYPE = "desktop";
 const PLATFORM = "Desktop";
@@ -532,10 +534,53 @@ export async function registerCurrentDevice(): Promise<void> {
   if (!res.success) throw new Error(res.message ?? "Could not register device");
 }
 
+export async function getCurrentDeviceAliases(): Promise<string[]> {
+  const aliases = new Set<string>();
+  const addAlias = (value: string | null | undefined) => {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    aliases.add(trimmed);
+    aliases.add(trimmed.toLocaleLowerCase("en-US"));
+  };
+
+  addAlias(getSession().deviceId);
+  try {
+    addAlias((await getDeviceFingerprint()).hwid);
+  } catch {
+    // Keep the app-session id if the platform fingerprint is temporarily unavailable.
+  }
+
+  return Array.from(aliases);
+}
+
+function deviceMatchesAliases(device: LinkedDeviceDto, aliases: string[]): boolean {
+  const normalized = new Set(
+    aliases.map((alias) => alias.trim().toLocaleLowerCase("en-US")).filter(Boolean),
+  );
+  return [device.device_id, device.hwid].some((value) => {
+    const normalizedValue = value?.trim().toLocaleLowerCase("en-US");
+    return !!normalizedValue && normalized.has(normalizedValue);
+  });
+}
+
 export async function unlinkCurrentDevice(): Promise<void> {
-  const { deviceId } = getSession();
-  const res = await unlinkDevice({ device_id: deviceId });
-  if (!res.success) throw new Error(res.message ?? "Could not unlink device");
+  const aliases = await getCurrentDeviceAliases();
+  let lastError: Error | null = null;
+  let succeeded = false;
+  for (const deviceId of aliases) {
+    try {
+      const res = await unlinkDevice({ device_id: deviceId });
+      if (res.success) {
+        succeeded = true;
+        continue;
+      }
+      lastError = new Error(res.message ?? "Could not unlink device");
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Could not unlink device");
+    }
+  }
+  if (succeeded) return;
+  throw lastError ?? new Error("Could not unlink device");
 }
 
 export interface PairingCode {
@@ -919,12 +964,14 @@ function paymentLooksApplied(pending: PendingPurchaseState, session: Session): b
  * The ordinary access-token request avoids rotating session tokens on every poll.
  */
 export async function isCurrentDeviceLinked(): Promise<boolean> {
-  const { deviceId, isLinked } = getSession();
+  const { isLinked } = getSession();
   if (!isLinked) return false;
   try {
+    await pingHwidOnly().catch(() => false);
+    const aliases = await getCurrentDeviceAliases();
     const res = await apiGetDevices();
     if (!res.success || !res.data) return getSession().isLinked;
-    return res.data.devices.some((device) => device.device_id === deviceId);
+    return res.data.devices.some((device) => deviceMatchesAliases(device, aliases));
   } catch (error) {
     if (error instanceof ApiHttpError && error.status === 403) return false;
     return getSession().isLinked; // network error → don't kick the user
@@ -1011,6 +1058,7 @@ export async function fetchNodes(): Promise<PanelNodeDto[]> {
 export async function fetchDevices(): Promise<LinkedDevicesDto | null> {
   const { isLinked } = getSession();
   if (!isLinked) return null;
+  await pingHwidOnly().catch(() => false);
   const res = await apiGetDevices();
   if (!res.success || !res.data) return null;
   return res.data;
