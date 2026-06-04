@@ -19,6 +19,9 @@ use tokio::time::{timeout, Duration};
 #[cfg(target_os = "linux")]
 use gtk::prelude::*;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use vpn::config::ServerConfig;
 use vpn::manager::VpnManager;
 use vpn::state::{PingHostMapping, TrafficStats, VpnState};
@@ -39,6 +42,8 @@ struct VpnPipelineLock {
 const SECURE_SESSION_SERVICE: &str = "network.tobevpn.desktop";
 const SECURE_SESSION_ACCOUNT: &str = "device-session-v1";
 const MAX_DESKTOP_STATS_BYTES: usize = 512 * 1024;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(target_os = "linux")]
 const LEGACY_WEBKIT_WAL_COMPACT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -276,6 +281,33 @@ fn compose_vendor_model(vendor: Option<String>, model: Option<String>) -> Option
     }
 }
 
+fn looks_like_model_code(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 12
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+        && value.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn prefer_human_model(
+    product_name: Option<String>,
+    product_version: Option<String>,
+    product_family: Option<String>,
+) -> Option<String> {
+    let product_name_is_code = product_name
+        .as_deref()
+        .map(looks_like_model_code)
+        .unwrap_or(false);
+
+    if product_name_is_code {
+        return product_version.or(product_family).or(product_name);
+    }
+
+    product_name.or(product_version).or(product_family)
+}
+
 #[cfg(target_os = "linux")]
 fn detect_hardware_model() -> Option<String> {
     fn read_dmi(name: &str) -> Option<String> {
@@ -284,13 +316,21 @@ fn detect_hardware_model() -> Option<String> {
             .and_then(|value| clean_device_model_part(&value))
     }
 
-    compose_vendor_model(read_dmi("sys_vendor"), read_dmi("product_name"))
+    let vendor = read_dmi("sys_vendor");
+    let model = prefer_human_model(
+        read_dmi("product_name"),
+        read_dmi("product_version"),
+        read_dmi("product_family"),
+    );
+
+    compose_vendor_model(vendor, model)
         .or_else(|| compose_vendor_model(read_dmi("board_vendor"), read_dmi("board_name")))
 }
 
 #[cfg(target_os = "windows")]
 fn detect_hardware_model() -> Option<String> {
-    let output = std::process::Command::new("powershell.exe")
+    let mut command = std::process::Command::new("powershell.exe");
+    let output = command
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -299,6 +339,7 @@ fn detect_hardware_model() -> Option<String> {
             "-Command",
             "$c=Get-CimInstance Win32_ComputerSystem; (($c.Manufacturer,$c.Model) -join ' ')",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     if !output.status.success() {

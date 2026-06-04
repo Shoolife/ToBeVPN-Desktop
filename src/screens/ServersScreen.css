@@ -110,6 +110,17 @@
   flex-shrink: 0;
 }
 
+.server-item__auto-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #43D39E;
+  margin-right: 16px;
+  flex-shrink: 0;
+}
+
 .server-item__info {
   flex: 1;
   min-width: 0;

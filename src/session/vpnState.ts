@@ -17,8 +17,27 @@ import {
   recordTraffic,
 } from "./stats";
 import { getSession, subscribeSession } from "./store";
-import { pingHwidOnly, registerCurrentDevice } from "./auth";
+import {
+  fetchVpnServers,
+  isAvailableVpnServer,
+  pingHwidOnly,
+  registerCurrentDevice,
+  type VpnServer,
+} from "./auth";
 import { t } from "../i18n";
+import {
+  loadAutomaticServerSelection,
+  saveLastServer,
+} from "./lastServer";
+import { stableServerId } from "./serverSelection";
+import {
+  recordServerConnectionFailure,
+  recordServerConnectionSuccess,
+  recordServerTraffic,
+  recordServerTunnelFailure,
+  recordServerTunnelHealthy,
+  selectBestVpnServer,
+} from "./serverQuality";
 
 // Poll access blocking frequently while keeping the device `last_seen_at`
 // heartbeat at its normal cadence. /api/device/register is the only
@@ -34,6 +53,7 @@ const TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY = 2;
 const TUNNEL_RECOVERY_RESTART_DELAY_MS = 700;
 const MAX_TUNNEL_RECOVERY_ATTEMPTS = 2;
 const RECENT_TUNNEL_TRAFFIC_GRACE_MS = 60_000;
+const QUALITY_TRAFFIC_CONFIRM_BYTES = 64 * 1024;
 const TUNNEL_PROBE_URLS = [
   "https://speed.cloudflare.com/__down?bytes=1",
   "https://api.github.com/zen",
@@ -89,6 +109,59 @@ let tunnelHealthFailedCycles = 0;
 let lastTunnelTrafficAt: number | null = null;
 let currentServerForRecovery: ServerVpnConfig | null = null;
 let resumeRecoveryInFlight = false;
+let trafficQualityConfirmed = false;
+
+function toServerVpnConfig(server: Awaited<ReturnType<typeof fetchVpnServers>>[number]): ServerVpnConfig {
+  return {
+    address: server.address,
+    port: server.port,
+    uuid: server.uuid,
+    flow: server.flow,
+    security: server.security,
+    sni: server.sni,
+    fingerprint: server.fingerprint,
+    public_key: server.public_key,
+    short_id: server.short_id,
+    network: server.network,
+    path: server.path,
+    mode: server.mode,
+    spx: server.spx,
+  };
+}
+
+async function refreshServerConfigAfterAccessCheck(
+  server: ServerVpnConfig,
+  options: { avoidCurrentInAuto?: boolean } = {},
+): Promise<ServerVpnConfig> {
+  let servers: VpnServer[];
+  try {
+    servers = await fetchVpnServers({ skipAccessPing: true });
+  } catch {
+    return server;
+  }
+  const availableServers = servers.filter(isAvailableVpnServer);
+  if (availableServers.length === 0) {
+    throw new Error(t("servers_empty"));
+  }
+  const automatic = loadAutomaticServerSelection();
+  const fresh = automatic
+    ? await selectBestVpnServer(availableServers, {
+        excludeServerId: options.avoidCurrentInAuto ? stableServerId(server) : undefined,
+      })
+    : availableServers.find(
+        (candidate) =>
+          candidate.address === server.address &&
+          candidate.port === server.port &&
+          candidate.sni === (server.sni ?? ""),
+      ) ?? null;
+  if (!fresh) {
+    throw new Error(t("servers_empty"));
+  }
+  if (automatic) {
+    saveLastServer(fresh);
+  }
+  return toServerVpnConfig(fresh);
+}
 
 function startPolling() {
   if (pollTimer !== null) return;
@@ -118,10 +191,19 @@ function startPolling() {
     // Persists into the local stats bucket store (used by StatsScreen).
     // The panel-side trafficUsedBytes is refreshed independently via syncSubscription.
     recordTraffic(delta, 1);
+    const nextSessionBytes = state.sessionBytes + delta;
     setState({
-      sessionBytes: state.sessionBytes + delta,
+      sessionBytes: nextSessionBytes,
       tick: state.tick + 1,
     });
+    if (
+      !trafficQualityConfirmed &&
+      nextSessionBytes >= QUALITY_TRAFFIC_CONFIRM_BYTES &&
+      currentServerForRecovery
+    ) {
+      trafficQualityConfirmed = true;
+      void recordServerTraffic(currentServerForRecovery, nextSessionBytes);
+    }
 
     if (!accessBlockCheckInFlight) accessBlockCounter++;
     if (!accessBlockCheckInFlight && accessBlockCounter >= ACCESS_BLOCK_POLL_TICKS) {
@@ -174,6 +256,7 @@ export async function connectVpn(server: ServerVpnConfig): Promise<void> {
 async function connectVpnInternal(
   server: ServerVpnConfig,
   resetWatchdogRecovery: boolean,
+  avoidCurrentInAuto = false,
 ): Promise<void> {
   // Refuse the panel's "subscription expired" sentinel server before we
   // hand it to the Rust-side engine. xray would crash on its all-zeros
@@ -201,7 +284,9 @@ async function connectVpnInternal(
   const hadConnectedTunnel = state.connected;
   const previousServerForRecovery = currentServerForRecovery;
   const gen = ++connectionGeneration;
-  currentServerForRecovery = server;
+  let serverToStart = server;
+  let serverStartAttempted = false;
+  currentServerForRecovery = serverToStart;
   if (resetWatchdogRecovery) {
     watchdogRecoveryAttempts = 0;
   }
@@ -223,7 +308,13 @@ async function connectVpnInternal(
       throw new Error(t("usage_blocked"));
     }
     if (gen !== connectionGeneration) return;
-    await engineStart(server);
+    serverToStart = await refreshServerConfigAfterAccessCheck(serverToStart, {
+      avoidCurrentInAuto,
+    });
+    if (gen !== connectionGeneration) return;
+    currentServerForRecovery = serverToStart;
+    serverStartAttempted = true;
+    await engineStart(serverToStart);
     if (gen !== connectionGeneration) return;
     if (hadConnectedTunnel) statsSessionEnd();
     statsSessionStart();
@@ -236,11 +327,16 @@ async function connectVpnInternal(
     });
     tunnelHealthFailedCycles = 0;
     lastTunnelTrafficAt = null;
+    trafficQualityConfirmed = false;
+    void recordServerConnectionSuccess(serverToStart);
     startPolling();
     startTunnelHealthCheck(gen);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (gen === connectionGeneration) {
+      if (serverStartAttempted) {
+        await recordServerConnectionFailure(serverToStart);
+      }
       const nativeState = await engineGetState().catch(() => null);
       const oldTunnelPreserved =
         hadConnectedTunnel && nativeState?.status === "Connected";
@@ -267,6 +363,7 @@ export async function disconnectVpn(): Promise<void> {
   resumeRecoveryInFlight = false;
   tunnelHealthFailedCycles = 0;
   lastTunnelTrafficAt = null;
+  trafficQualityConfirmed = false;
   stopTunnelHealthCheck();
   stopPolling();
   statsSessionEnd();
@@ -313,14 +410,23 @@ async function runTunnelHealthLoop(gen: number): Promise<void> {
     if (healthy) {
       watchdogRecoveryAttempts = 0;
       tunnelHealthFailedCycles = 0;
+      if (currentServerForRecovery) {
+        void recordServerTunnelHealthy(currentServerForRecovery);
+      }
     } else if (hasRecentTunnelTraffic()) {
       tunnelHealthFailedCycles = 0;
+      if (currentServerForRecovery) {
+        void recordServerTunnelHealthy(currentServerForRecovery);
+      }
     } else {
       tunnelHealthFailedCycles++;
       if (tunnelHealthFailedCycles < TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY) {
         console.warn("[VPN] tunnel health probe failed; waiting for a second failed cycle");
       } else {
         tunnelHealthFailedCycles = 0;
+        if (currentServerForRecovery) {
+          await recordServerTunnelFailure(currentServerForRecovery);
+        }
         await recoverTunnelAfterHealthFailure(gen);
         return;
       }
@@ -345,7 +451,7 @@ async function recoverTunnelAfterHealthFailure(gen: number): Promise<void> {
   await disconnectVpn().catch(() => {});
   await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
   if (!state.connected && !state.connecting) {
-    await connectVpnInternal(server, false).catch(() => {});
+    await connectVpnInternal(server, false, true).catch(() => {});
   }
 }
 
@@ -394,6 +500,7 @@ async function stopVpnWithError(message: string): Promise<void> {
   resumeRecoveryInFlight = false;
   tunnelHealthFailedCycles = 0;
   lastTunnelTrafficAt = null;
+  trafficQualityConfirmed = false;
   stopTunnelHealthCheck();
   stopPolling();
   try {
@@ -476,11 +583,13 @@ function ensureVpnDiedListener() {
   if (vpnDiedListenerRegistered) return;
   vpnDiedListenerRegistered = true;
   listen<string>("vpn-died", (event) => {
+    const failedServer = currentServerForRecovery;
     connectionGeneration++;
     currentServerForRecovery = null;
     resumeRecoveryInFlight = false;
     tunnelHealthFailedCycles = 0;
     lastTunnelTrafficAt = null;
+    trafficQualityConfirmed = false;
     stopTunnelHealthCheck();
     stopPolling();
     setState({
@@ -492,6 +601,9 @@ function ensureVpnDiedListener() {
       lastError: event.payload || "VPN process stopped unexpectedly",
     });
     statsSessionEnd();
+    if (failedServer) {
+      void recordServerTunnelFailure(failedServer);
+    }
   }).catch((e) => {
     console.warn("[vpnState] could not register vpn-died listener:", e);
   });

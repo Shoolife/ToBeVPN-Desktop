@@ -35,7 +35,7 @@ export interface SessionTokensDto {
   token_type: string;
   expires_in: number;
   refresh_expires_in: number;
-  device_id: string;
+  device_id?: string | null;
   telegram_id?: number | null;
   panel_user_uuid?: string | null;
   short_uuid?: string | null;

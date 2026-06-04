@@ -18,9 +18,14 @@ const httpFetch: typeof fetch =
 
 const PRIMARY_TIMEOUT_MS = 8_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
+const FALLBACK_HEDGE_DELAY_MS = 400;
+const PRIMARY_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
+const FALLBACK_HTTP_STATUS = 403;
 const BLOCK_HEADER = "is-hack";
 const BLOCK_VALUE = "yes";
 const UPDATE_REQUIRED_HEADER = "update-required";
+
+let primaryUnavailableUntil = 0;
 
 export interface SubscriptionPingResult {
   intervalMs: number | null;
@@ -29,10 +34,9 @@ export interface SubscriptionPingResult {
 }
 
 /**
- * Best-effort HWID ping against the subscription URL. Tries the original
- * panel URL first; on network failure / timeout retries the same key
- * against the configured fallback endpoint so the HWID record still
- * lands even when the panel is unreachable (network block, partner outage).
+ * Best-effort device ping against the subscription URL. Tries the original
+ * URL first; on network failure, timeout, or a route-rejection response,
+ * retries the same key against the configured fallback endpoint.
  *
  * Returns the panel-recommended auto-refresh cadence and the access state
  * from the response. Returns `null` when the URL is missing or both legs
@@ -70,29 +74,91 @@ async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number):
   }
 }
 
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function firstSuccessful<T>(promises: Promise<T>[]): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let pending = promises.length;
+    let firstError: unknown = null;
+    for (const promise of promises) {
+      promise
+        .then(resolve)
+        .catch((error) => {
+          if (firstError === null) firstError = error;
+          pending -= 1;
+          if (pending === 0) {
+            reject(firstError instanceof Error ? firstError : new Error("Network request failed"));
+          }
+        });
+    }
+  });
+}
+
 /**
- * Try the primary subscription URL first via tauriFetch; only fall back
- * to the proxy function when the primary actually fails. The subscription
- * host must be listed in capabilities/default.json (Tauri HTTP scope) and
- * in CONTROL_PLANE_BYPASS_HOSTS (so VPN doesn't tunnel the request).
+ * Start the primary subscription URL first, then hedge through the configured
+ * fallback after a short delay. This avoids an 8-second stall on networks
+ * where the primary route is blocked while still preferring a fast primary.
+ * Both hosts must remain in the Tauri HTTP scope and control-plane bypass.
  */
 async function primaryThenFallback(
   primaryUrl: string,
   fallbackUrl: string | null,
   headers: HeadersInit,
 ): Promise<SubscriptionPingResult> {
-  try {
-    const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
-    return readResult(response);
-  } catch (primaryError) {
-    if (!fallbackUrl) throw primaryError;
+  if (!fallbackUrl) {
+    return readResult(await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS));
+  }
+
+  if (primaryUnavailableUntil > Date.now()) {
     try {
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       return readResult(response);
     } catch {
-      throw primaryError;
+      const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
+      primaryUnavailableUntil = 0;
+      return readResult(response);
     }
   }
+
+  type HedgedResponse = {
+    source: "primary" | "fallback";
+    response: Response;
+  };
+  let rejectedPrimaryResult: SubscriptionPingResult | null = null;
+  const primaryPromise: Promise<HedgedResponse> = timedFetch(
+    primaryUrl,
+    headers,
+    PRIMARY_TIMEOUT_MS,
+  ).then((response) => {
+    if (response.status === FALLBACK_HTTP_STATUS) {
+      rejectedPrimaryResult = readResult(response);
+      throw new Error("Primary subscription route rejected request");
+    }
+    return { source: "primary", response };
+  });
+  const fallbackPromise: Promise<HedgedResponse> = (async () => {
+    await delayMs(FALLBACK_HEDGE_DELAY_MS);
+    return timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+  })().then((response) => ({ source: "fallback", response }));
+
+  let winner: HedgedResponse;
+  try {
+    winner = await firstSuccessful([primaryPromise, fallbackPromise]);
+  } catch (error) {
+    if (rejectedPrimaryResult) {
+      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      return rejectedPrimaryResult;
+    }
+    throw error;
+  }
+  if (winner.source === "primary") {
+    primaryUnavailableUntil = 0;
+  } else {
+    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+  }
+  return readResult(winner.response);
 }
 
 const MIN_INTERVAL_HOURS = 1;

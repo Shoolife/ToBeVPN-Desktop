@@ -87,6 +87,9 @@ const strings = {
 
     // Servers
     server_select: "Выберите сервер",
+    server_auto: "Автоматически",
+    server_auto_description: "Самый быстрый доступный сервер",
+    server_auto_selected: "Выбран автоматически",
     server_unavailable: "Недоступен",
     server_offline: "offline",
     servers_empty: "Нет доступных серверов",
@@ -304,6 +307,9 @@ const strings = {
 
     // Servers
     server_select: "Select a server",
+    server_auto: "Automatic",
+    server_auto_description: "Fastest available server",
+    server_auto_selected: "Selected automatically",
     server_unavailable: "Unavailable",
     server_offline: "offline",
     servers_empty: "No servers available",

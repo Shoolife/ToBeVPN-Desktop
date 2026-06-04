@@ -12,12 +12,28 @@ import SpeedTestScreen from "./screens/SpeedTestScreen";
 import DevicesScreen from "./screens/DevicesScreen";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import UpdateBanner from "./components/UpdateBanner";
-import { getUpdateRequired, subscribeSubscriptionUsageBlocked } from "./session/auth";
+import {
+  getCachedVpnServers,
+  getUpdateRequired,
+  isAvailableVpnServer,
+  subscribeSubscriptionUsageBlocked,
+  subscribeVpnServers,
+  type VpnServer,
+} from "./session/auth";
 import { isPaired, useSession } from "./session/store";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
-import { isSameServerSelection } from "./session/serverSelection";
+import { hasSameVpnConfig, isSameServerSelection } from "./session/serverSelection";
 import { connectVpn, getVpnRuntime } from "./session/vpnState";
-import { clearLastServer, loadLastServer, saveLastServer } from "./session/lastServer";
+import {
+  clearLastServer,
+  clearSelectedServer,
+  loadAutomaticServerSelection,
+  loadLastServer,
+  saveAutomaticServerSelection,
+  saveLastServer,
+  subscribeServerSelection,
+} from "./session/lastServer";
+import { selectBestVpnServer } from "./session/serverQuality";
 import "./App.css";
 
 export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices";
@@ -38,6 +54,26 @@ function markOnboardingSeen(): void {
   } catch {
     // Unavailable storage only means onboarding may be shown again next start.
   }
+}
+
+function toSelectedServer(server: VpnServer): SelectedServer {
+  return {
+    name: server.name,
+    country: server.country,
+    address: server.address,
+    port: server.port,
+    uuid: server.uuid,
+    flow: server.flow,
+    security: server.security,
+    sni: server.sni,
+    fingerprint: server.fingerprint,
+    public_key: server.public_key,
+    short_id: server.short_id,
+    network: server.network,
+    path: server.path,
+    mode: server.mode,
+    spx: server.spx,
+  };
 }
 
 export interface SelectedServer {
@@ -66,6 +102,11 @@ export default function App() {
   const [direction, setDirection] = useState<Direction>("none");
   const [animating, setAnimating] = useState(false);
   const [selectedServer, setSelectedServer] = useState<SelectedServer | null>(() => loadLastServer());
+  const [automaticServerSelection, setAutomaticServerSelection] = useState(
+    () => loadAutomaticServerSelection(),
+  );
+  const selectedServerRef = useRef<SelectedServer | null>(selectedServer);
+  const automaticServerSelectionRef = useRef(automaticServerSelection);
   const updateRequired = useSyncExternalStore(
     subscribeSubscriptionUsageBlocked,
     getUpdateRequired,
@@ -91,6 +132,25 @@ export default function App() {
 
   useEffect(() => {
     return () => { if (timeoutRef.current) clearTimeout(timeoutRef.current); };
+  }, []);
+
+  useEffect(() => {
+    selectedServerRef.current = selectedServer;
+  }, [selectedServer]);
+
+  useEffect(() => {
+    automaticServerSelectionRef.current = automaticServerSelection;
+  }, [automaticServerSelection]);
+
+  useEffect(() => {
+    return subscribeServerSelection(() => {
+      const loadedServer = loadLastServer();
+      const automatic = loadAutomaticServerSelection();
+      selectedServerRef.current = loadedServer;
+      automaticServerSelectionRef.current = automatic;
+      setSelectedServer(loadedServer);
+      setAutomaticServerSelection(automatic);
+    });
   }, []);
 
   const goForward = (to: Screen) => navigate(to, "forward");
@@ -147,11 +207,101 @@ export default function App() {
   useEffect(() => {
     if (!session.isLinked) {
       setSelectedServer(null);
+      setAutomaticServerSelection(true);
       clearLastServer();
       return;
     }
-    setSelectedServer(loadLastServer());
+    const loadedServer = loadLastServer();
+    const automatic = loadAutomaticServerSelection();
+    selectedServerRef.current = loadedServer;
+    automaticServerSelectionRef.current = automatic;
+    setSelectedServer(loadedServer);
+    setAutomaticServerSelection(automatic);
   }, [session.isLinked, session.shortUuid]);
+
+  useEffect(() => {
+    if (!session.isLinked || !automaticServerSelection || selectedServer) return;
+    const servers = getCachedVpnServers().filter(isAvailableVpnServer);
+    if (servers.length === 0) return;
+    let cancelled = false;
+    void selectBestVpnServer(servers).then((best) => {
+      if (cancelled || !best) return;
+      const resolved = toSelectedServer(best);
+      selectedServerRef.current = resolved;
+      setSelectedServer(resolved);
+      saveLastServer(resolved);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.isLinked, session.shortUuid, automaticServerSelection, selectedServer]);
+
+  // Subscription links can rotate UUID / Reality / transport parameters while
+  // keeping the same visible server address. Keep the persisted selection and
+  // any active tunnel on the fresh config instead of waiting for app data to
+  // be cleared.
+  useEffect(() => {
+    let generation = 0;
+    return subscribeVpnServers(() => {
+      const currentGeneration = ++generation;
+      const current = selectedServerRef.current;
+      const servers = getCachedVpnServers().filter(isAvailableVpnServer);
+      const automatic = automaticServerSelectionRef.current;
+      const matching = current
+        ? servers.find((server) => isSameServerSelection(current, server)) ?? null
+        : null;
+
+      const applyFreshServer = (fresh: VpnServer) => {
+        if (currentGeneration !== generation) return;
+        const previous = selectedServerRef.current;
+        const resolved = toSelectedServer(fresh);
+        const vpnConfigChanged = !hasSameVpnConfig(previous, resolved);
+        const displayChanged =
+          previous?.name !== resolved.name ||
+          previous?.country !== resolved.country;
+        if (!vpnConfigChanged && !displayChanged) return;
+
+        selectedServerRef.current = resolved;
+        setSelectedServer(resolved);
+        saveLastServer(resolved);
+
+        const runtime = getVpnRuntime();
+        if (vpnConfigChanged && runtime.connected) {
+          void connectVpn({
+            address: resolved.address,
+            port: resolved.port,
+            uuid: resolved.uuid,
+            flow: resolved.flow,
+            security: resolved.security,
+            sni: resolved.sni,
+            fingerprint: resolved.fingerprint,
+            public_key: resolved.public_key,
+            short_id: resolved.short_id,
+            network: resolved.network,
+            path: resolved.path,
+            mode: resolved.mode,
+            spx: resolved.spx,
+          }).catch((e) => {
+            console.error("[VPN] refreshed server config reconnect failed:", e);
+          });
+        }
+      };
+
+      if (matching) {
+        applyFreshServer(matching);
+        return;
+      }
+      if (!automatic) {
+        selectedServerRef.current = null;
+        setSelectedServer(null);
+        clearSelectedServer();
+        return;
+      }
+      void selectBestVpnServer(servers).then((best) => {
+        if (best) applyFreshServer(best);
+      });
+    });
+  }, []);
 
   // Start device-link polling when already authenticated on mount.
   useEffect(() => {
@@ -250,7 +400,9 @@ export default function App() {
             onStats={() => goForward("stats")}
             onSpeedTest={() => goForward("speedtest")}
             selectedServer={selectedServer}
+            automaticServerSelection={automaticServerSelection}
             onServerChange={(server) => {
+              selectedServerRef.current = server;
               setSelectedServer(server);
               saveLastServer(server);
             }}
@@ -271,27 +423,26 @@ export default function App() {
           <ServersScreen
             onBack={() => goBack("home")}
             selectedServer={selectedServer}
-            onSelect={(server) => {
+            automaticServerSelection={automaticServerSelection}
+            onSelect={(vpnServer) => {
+              // Keep a second guard behind ServersScreen so a stale click
+              // cannot persist or live-switch to a server that just went down.
+              if (!isAvailableVpnServer(vpnServer) || vpnServer.ping <= 0) return;
+              const server = toSelectedServer(vpnServer);
               const prev = selectedServer;
+              automaticServerSelectionRef.current = false;
+              setAutomaticServerSelection(false);
+              saveAutomaticServerSelection(false);
+              selectedServerRef.current = server;
               setSelectedServer(server);
               saveLastServer(server);
               goBack("home");
               // Live-switch: if a session is already up (or in flight) and the
               // user picked a different server, reconnect to the new one. The
               // backend's start() tears down the previous session itself.
-              const sameAsPrev = isSameServerSelection(prev, server);
-              // Skip the live-switch entirely when the user picked the
-              // panel's "subscription expired" sentinel. ServersScreen
-              // already filters it out of the list, but a stale cache
-              // could still surface it on first launch after upgrade
-              // — never feed it to the engine.
-              const sentinel =
-                server.uuid === "00000000-0000-0000-0000-000000000000" ||
-                !server.address ||
-                server.address === "127.0.0.1" ||
-                server.address === "0.0.0.0";
+              const sameConfig = hasSameVpnConfig(prev, server);
               const runtime = getVpnRuntime();
-              if (!sentinel && !sameAsPrev && (runtime.connected || runtime.connecting)) {
+              if (!sameConfig && (runtime.connected || runtime.connecting)) {
                 void connectVpn({
                   address: server.address,
                   port: server.port,
@@ -311,9 +462,47 @@ export default function App() {
                   if (!prev || !getVpnRuntime().connected) return;
                   setSelectedServer((current) => {
                     if (!current || !isSameServerSelection(current, server)) return current;
+                    selectedServerRef.current = prev;
                     saveLastServer(prev);
                     return prev;
                   });
+                });
+              }
+            }}
+            onSelectAutomatic={(vpnServer) => {
+              const server = toSelectedServer(vpnServer);
+              const prev = selectedServer;
+              automaticServerSelectionRef.current = true;
+              setAutomaticServerSelection(true);
+              saveAutomaticServerSelection(true);
+              selectedServerRef.current = server;
+              setSelectedServer(server);
+              saveLastServer(server);
+              goBack("home");
+
+              const sameConfig = hasSameVpnConfig(prev, server);
+              const runtime = getVpnRuntime();
+              if (!sameConfig && (runtime.connected || runtime.connecting)) {
+                void connectVpn({
+                  address: server.address,
+                  port: server.port,
+                  uuid: server.uuid,
+                  flow: server.flow,
+                  security: server.security,
+                  sni: server.sni,
+                  fingerprint: server.fingerprint,
+                  public_key: server.public_key,
+                  short_id: server.short_id,
+                  network: server.network,
+                  path: server.path,
+                  mode: server.mode,
+                  spx: server.spx,
+                }).catch((e) => {
+                  console.error("[VPN] automatic live-switch failed:", e);
+                  if (!prev || !getVpnRuntime().connected) return;
+                  selectedServerRef.current = prev;
+                  setSelectedServer(prev);
+                  saveLastServer(prev);
                 });
               }
             }}

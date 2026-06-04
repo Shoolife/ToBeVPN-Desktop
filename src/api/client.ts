@@ -3,7 +3,7 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { BOT_API_BASE_URL, BOT_API_FALLBACK_URL, CONTROL_PLANE_BYPASS_HOSTS } from "./config";
 import { getDeviceFingerprint } from "../session/fingerprint";
 import {
-  clearDeviceSession,
+  clearSessionTokens,
   getSession,
   hasValidAccessToken,
   hasValidRefreshToken,
@@ -108,8 +108,12 @@ function buildFallbackBotUrl(
 const PRIMARY_TIMEOUT_MS = 8_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
 const REQUEST_TIMEOUT_MS = PRIMARY_TIMEOUT_MS + FALLBACK_TIMEOUT_MS;
+const FALLBACK_HEDGE_DELAY_MS = 400;
+const PRIMARY_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
+const FALLBACK_HTTP_STATUS = 403;
 
 let tokenOperation: Promise<string | null> | null = null;
+let primaryUnavailableUntil = 0;
 
 function publicErrorMessage(raw: string): string {
   let message = raw
@@ -132,9 +136,13 @@ function runTokenOperation(
   return tokenOperation;
 }
 
+function isInvalidSessionTokenError(error: unknown): boolean {
+  return error instanceof ApiHttpError && (error.status === 401 || error.status === 403);
+}
+
 // Single attempt against one base URL with its own abort controller. Lifting
-// this out of performFetch lets us fire two attempts (primary then fallback)
-// each with its own timeout while still honouring the caller's abort signal.
+// this out of performFetch lets read requests use a delayed fallback hedge
+// while each route keeps its own timeout and honours the caller's abort signal.
 async function attemptFetch(
   url: string,
   init: RequestInit,
@@ -162,6 +170,106 @@ async function attemptFetch(
   }
 }
 
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function firstSuccessful<T>(promises: Promise<T>[]): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let pending = promises.length;
+    let firstError: unknown = null;
+    for (const promise of promises) {
+      promise
+        .then(resolve)
+        .catch((error) => {
+          if (firstError === null) firstError = error;
+          pending -= 1;
+          if (pending === 0) {
+            reject(firstError instanceof Error ? firstError : new Error("Network request failed"));
+          }
+        });
+    }
+  });
+}
+
+async function fallbackFirstFetch(
+  primaryUrl: string,
+  fallbackUrl: string,
+  init: RequestInit,
+  userSignal: AbortSignal | null | undefined,
+): Promise<Response> {
+  try {
+    return await attemptFetch(fallbackUrl, init, FALLBACK_TIMEOUT_MS, userSignal);
+  } catch (fallbackError) {
+    if (userSignal?.aborted) throw fallbackError;
+    const response = await attemptFetch(primaryUrl, init, PRIMARY_TIMEOUT_MS, userSignal);
+    primaryUnavailableUntil = 0;
+    return response;
+  }
+}
+
+async function hedgedGetFetch(
+  primaryUrl: string,
+  fallbackUrl: string,
+  init: RequestInit,
+  userSignal: AbortSignal | null | undefined,
+): Promise<Response> {
+  type HedgedResponse = {
+    source: "primary" | "fallback";
+    response: Response;
+  };
+
+  const primaryController = new AbortController();
+  const fallbackController = new AbortController();
+  let rejectedPrimaryResponse: Response | null = null;
+  if (userSignal) {
+    const abortBoth = () => {
+      primaryController.abort();
+      fallbackController.abort();
+    };
+    if (userSignal.aborted) abortBoth();
+    else userSignal.addEventListener("abort", abortBoth, { once: true });
+  }
+
+  const primaryPromise: Promise<HedgedResponse> = attemptFetch(
+    primaryUrl,
+    init,
+    PRIMARY_TIMEOUT_MS,
+    primaryController.signal,
+  ).then((response) => {
+    if (response.status === FALLBACK_HTTP_STATUS) {
+      rejectedPrimaryResponse = response;
+      throw new Error("Primary route rejected request");
+    }
+    return { source: "primary" as const, response };
+  });
+  const fallbackPromise: Promise<HedgedResponse> = (async () => {
+    await delayMs(FALLBACK_HEDGE_DELAY_MS);
+    return attemptFetch(
+      fallbackUrl,
+      init,
+      FALLBACK_TIMEOUT_MS,
+      fallbackController.signal,
+    );
+  })().then((response) => ({ source: "fallback" as const, response }));
+
+  try {
+    const winner = await firstSuccessful([primaryPromise, fallbackPromise]);
+    if (winner.source === "primary") {
+      fallbackController.abort();
+      primaryUnavailableUntil = 0;
+    } else {
+      primaryController.abort();
+      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    }
+    return winner.response;
+  } catch {
+    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    if (rejectedPrimaryResponse) return rejectedPrimaryResponse;
+    throw new Error("Network request failed");
+  }
+}
+
 async function performFetch(
   path: string,
   init: RequestInit = {},
@@ -179,10 +287,23 @@ async function performFetch(
 
   const userSignal = init.signal ?? null;
   const baseInit: RequestInit = { ...init, headers };
+  const primaryUrl = buildUrl(path, query, BOT_API_BASE_URL);
+  const fallbackUrl = BOT_API_FALLBACK_URL
+    ? buildFallbackBotUrl(path, query, BOT_API_FALLBACK_URL)
+    : null;
+  const method = (init.method ?? "GET").toUpperCase();
+
+  if (fallbackUrl && primaryUnavailableUntil > Date.now()) {
+    return fallbackFirstFetch(primaryUrl, fallbackUrl, baseInit, userSignal);
+  }
+
+  if (fallbackUrl && (method === "GET" || method === "HEAD")) {
+    return hedgedGetFetch(primaryUrl, fallbackUrl, baseInit, userSignal);
+  }
 
   try {
     return await attemptFetch(
-      buildUrl(path, query, BOT_API_BASE_URL),
+      primaryUrl,
       baseInit,
       BOT_API_FALLBACK_URL ? PRIMARY_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
       userSignal,
@@ -191,8 +312,8 @@ async function performFetch(
     if (!BOT_API_FALLBACK_URL) throw primaryError;
     if (userSignal?.aborted) throw primaryError;
     console.warn(`[bot-api] primary request to ${path} failed, retrying via fallback`);
-    const fallbackUrl = buildFallbackBotUrl(path, query, BOT_API_FALLBACK_URL);
     if (!fallbackUrl) throw primaryError;
+    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
     return await attemptFetch(
       fallbackUrl,
       baseInit,
@@ -333,6 +454,12 @@ export async function ensureDeviceSession(): Promise<void> {
         return refreshed.access_token;
       } catch (error) {
         console.warn("[device-session] refresh failed during startup:", error);
+        if (isInvalidSessionTokenError(error)) {
+          await clearSecureSession();
+          clearSessionTokens();
+        } else {
+          throw error;
+        }
       }
     }
 
@@ -373,8 +500,12 @@ async function recoverAccessTokenAfter401(previousToken: string | null): Promise
         return refreshed.access_token;
       } catch (error) {
         console.warn("[device-session] refresh after 401 failed:", error);
-        await clearSecureSession();
-        clearDeviceSession();
+        if (isInvalidSessionTokenError(error)) {
+          await clearSecureSession();
+          clearSessionTokens();
+        } else {
+          return null;
+        }
       }
     }
 
@@ -384,7 +515,7 @@ async function recoverAccessTokenAfter401(previousToken: string | null): Promise
     } catch (error) {
       console.warn("[device-session] bootstrap after 401 failed:", error);
       await clearSecureSession();
-      clearDeviceSession();
+      clearSessionTokens();
       return null;
     }
   });

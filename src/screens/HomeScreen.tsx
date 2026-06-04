@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { exit } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
@@ -17,11 +16,12 @@ import {
   serverCountryCodeForUi,
   serverDisplayName,
 } from "../components/serverDisplay";
-import { isSameServerSelection } from "../session/serverSelection";
+import { hasSameVpnConfig, isSameServerSelection } from "../session/serverSelection";
 import {
   fetchVpnServers,
   getSubscriptionUsageBlocked,
   getUpdateRequired,
+  isAvailableVpnServer,
   pingHwidOnly,
   startPendingPurchaseRefreshIfNeeded,
   subscribeSubscriptionUsageBlocked,
@@ -30,7 +30,11 @@ import {
 } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { connectVpn, disconnectVpn, useVpnRuntime, clearVpnError } from "../session/vpnState";
-import { preparePingBypass } from "../session/vpn";
+import {
+  measureVpnServerPing,
+  selectBestVpnServer,
+} from "../session/serverQuality";
+import { stableServerId } from "../session/serverSelection";
 import { formatDateDots } from "../session/dateFormat";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
@@ -176,6 +180,7 @@ export default function HomeScreen({
   onStats,
   onSpeedTest,
   selectedServer,
+  automaticServerSelection,
   onServerChange,
 }: {
   onLogout: () => void;
@@ -184,6 +189,7 @@ export default function HomeScreen({
   onStats: () => void;
   onSpeedTest: () => void;
   selectedServer: SelectedServer | null;
+  automaticServerSelection: boolean;
   onServerChange: (server: SelectedServer) => void;
 }) {
   const session = useSession();
@@ -281,18 +287,13 @@ export default function HomeScreen({
     let cancelled = false;
     setPing(0);
     void (async () => {
-      await preparePingBypass([selectedServer.address]).catch(() => {});
-      if (cancelled) return;
-      try {
-        const ms = await invoke<number>("tcp_ping", {
-          host: selectedServer.address,
-          port: selectedServer.port,
-          timeoutMs: 3000,
-        });
-        if (!cancelled) setPing(ms >= 0 ? ms : -1);
-      } catch {
-        if (!cancelled) setPing(-1);
-      }
+      const pingServer: VpnServer = {
+        ...selectedServer,
+        id: stableServerId(selectedServer),
+        isOnline: true,
+      };
+      const ms = await measureVpnServerPing(pingServer, { force: true });
+      if (!cancelled) setPing(ms);
     })();
     return () => {
       cancelled = true;
@@ -303,19 +304,23 @@ export default function HomeScreen({
   const vpnError = localError ?? lastError;
 
   const prepareServerForConnect = async (): Promise<SelectedServer | null> => {
-    if (!selectedServer) return null;
-    if (isPaidOrAdmin) return selectedServer;
+    if (!automaticServerSelection && (!selectedServer || ping < 0)) return null;
 
     await syncSubscription({ force: true }).catch(() => {});
-    const freshServers = await fetchVpnServers().catch(() => []);
-    const fresh =
-      freshServers.find((server) => isSameServerSelection(selectedServer, server)) ??
-      freshServers[0] ??
-      null;
+    const freshServers = (await fetchVpnServers().catch(() => []))
+      .filter(isAvailableVpnServer);
+    const fresh = automaticServerSelection
+      ? await selectBestVpnServer(freshServers, { forceProbe: true })
+      : freshServers.find((server) => isSameServerSelection(selectedServer, server)) ?? null;
     if (!fresh) return null;
+    if (!automaticServerSelection &&
+        await measureVpnServerPing(fresh, { force: true }) < 0
+    ) {
+      return null;
+    }
 
     const resolved = toSelectedServer(fresh);
-    if (!isSameServerSelection(selectedServer, fresh)) {
+    if (!hasSameVpnConfig(selectedServer, resolved)) {
       onServerChange(resolved);
     }
     return resolved;
@@ -338,7 +343,7 @@ export default function HomeScreen({
       }
       return;
     }
-    if (!selectedServer) {
+    if (!selectedServer && !automaticServerSelection) {
       setLocalError(t("server_choose"));
       return;
     }
@@ -499,12 +504,14 @@ export default function HomeScreen({
               </div>
               {selectedServer && !subscriptionUsageBlocked && (
                 <div className="home-card__subtitle">
-                  {countryName(
-                    serverCountryCodeForUi(
-                      selectedServer.country,
-                      selectedServer.name,
-                    ),
-                  )}
+                  {automaticServerSelection
+                    ? t("server_auto_selected")
+                    : countryName(
+                        serverCountryCodeForUi(
+                          selectedServer.country,
+                          selectedServer.name,
+                        ),
+                      )}
                 </div>
               )}
             </div>

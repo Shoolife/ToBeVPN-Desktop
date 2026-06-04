@@ -65,7 +65,11 @@ function defaultSession(): Session {
 }
 
 function migrateSession(parsed: Partial<Session>): Session {
-  const merged: Session = { ...defaultSession(), ...parsed };
+  const defaults = defaultSession();
+  const merged: Session = { ...defaults, ...parsed };
+  if (typeof merged.deviceId !== "string" || !merged.deviceId.trim()) {
+    merged.deviceId = defaults.deviceId;
+  }
   if (parsed.isLinked === undefined) {
     merged.isLinked = parsed.telegramId !== null && parsed.telegramId !== undefined;
   }
@@ -146,6 +150,15 @@ export function clearIdentity() {
   });
 }
 
+export function clearSessionTokens() {
+  updateSession({
+    accessToken: null,
+    refreshToken: null,
+    accessTokenExpiresAt: null,
+    refreshTokenExpiresAt: null,
+  });
+}
+
 export function clearDeviceSession() {
   // Explicit logout: keep install-scoped deviceId, drop device-session tokens and linked identity.
   updateSession({
@@ -205,17 +218,31 @@ export function applySessionSecrets(secrets: SessionSecrets | null): Session {
 export function updateSessionFromTokens(tokens: SessionTokensDto): Session {
   const currentSession = getSession();
   const now = Date.now();
-  const isLinked = Boolean(tokens.is_linked && tokens.telegram_id !== null && tokens.telegram_id !== undefined);
+  const tokenDeviceId =
+    typeof tokens.device_id === "string" && tokens.device_id.trim()
+      ? tokens.device_id
+      : currentSession.deviceId;
+  const tokenIsLinked = Boolean(
+    tokens.is_linked && tokens.telegram_id !== null && tokens.telegram_id !== undefined,
+  );
+  const preserveLinkedIdentity = currentSession.isLinked && !tokenIsLinked;
+  const isLinked = tokenIsLinked || preserveLinkedIdentity;
   return updateSession({
-    deviceId: tokens.device_id,
+    deviceId: tokenDeviceId,
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
     accessTokenExpiresAt: now + tokens.expires_in * 1000,
     refreshTokenExpiresAt: now + tokens.refresh_expires_in * 1000,
     isLinked,
-    telegramId: isLinked ? (tokens.telegram_id ?? null) : null,
-    shortUuid: isLinked ? (tokens.short_uuid ?? currentSession.shortUuid) : null,
-    panelUserUuid: isLinked ? (tokens.panel_user_uuid ?? currentSession.panelUserUuid) : null,
+    telegramId: tokenIsLinked
+      ? (tokens.telegram_id ?? null)
+      : (isLinked ? currentSession.telegramId : null),
+    shortUuid: tokenIsLinked
+      ? (tokens.short_uuid ?? currentSession.shortUuid)
+      : (isLinked ? currentSession.shortUuid : null),
+    panelUserUuid: tokenIsLinked
+      ? (tokens.panel_user_uuid ?? currentSession.panelUserUuid)
+      : (isLinked ? currentSession.panelUserUuid : null),
     userPlan: isLinked ? currentSession.userPlan : "FREE_TRIAL",
     planDisplayName: isLinked ? currentSession.planDisplayName : null,
     planExpiresAt: isLinked ? currentSession.planExpiresAt : null,

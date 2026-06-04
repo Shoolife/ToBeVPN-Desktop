@@ -1,6 +1,5 @@
 // Higher-level operations on top of the API client + local session.
 // Mirrors the Kotlin AuthRepository on the TV/phone clients.
-import { invoke } from "@tauri-apps/api/core";
 import {
   ApiHttpError,
   bootstrapDeviceSession,
@@ -26,6 +25,8 @@ import type {
   LinkedDeviceDto,
   LinkedDevicesDto,
   PanelNodeDto,
+  PanelResponse,
+  PanelSubInfoDto,
   PanelUserDto,
   PurchasePlansDto,
   TvPairStatusDto,
@@ -72,6 +73,7 @@ const UPDATE_REQUIRED_KEY = "tobevpn_update_required_v1";
 const SUBSCRIPTION_ACCESS_EVENT = "tobevpn:subscription-access-changed";
 const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
 const PENDING_AUTH_TOKEN_KEY = "tobevpn_pending_auth_token_v1";
+const VPN_SERVERS_EVENT = "tobevpn:vpn-servers-changed";
 // 12h matches the default surfaced in the panel's "subscription
 // auto-refresh" panel field. Used until the first successful ping
 // returns a `profile-update-interval` value.
@@ -82,12 +84,19 @@ const PURCHASE_REFRESH_TOTAL_WINDOW_MS = 10 * 60 * 1000;
 const PURCHASE_REFRESH_INTERVAL_MS = 3_000;
 const PURCHASE_REFRESH_SLOW_INTERVAL_MS = 30_000;
 const PURCHASE_PENDING_MAX_AGE_MS = 30 * 60 * 1000;
+const SERVER_METADATA_TIMEOUT_MS = 250;
 
 // Single in-flight syncSubscription. Concurrent callers (vpnState.connectVpn,
 // HomeScreen useEffect, manual refresh) all await the same promise so we
 // never fire two parallel /api/panel/sub/.../info round-trips.
 let syncInFlight: Promise<void> | null = null;
 let pendingPurchaseRefresh: Promise<void> | null = null;
+const subscriptionInfoInFlight = new Map<string, Promise<PanelResponse<PanelSubInfoDto>>>();
+let vpnServersMemoryCache: {
+  shortUuid: string;
+  servers: VpnServer[];
+} | null = null;
+let vpnServersCacheGeneration = 0;
 
 interface PendingPurchaseState {
   startedAt: number;
@@ -165,6 +174,9 @@ function writeCachedSubscriptionUrl(shortUuid: string, url: string | null): void
 }
 
 function setSubscriptionUsageBlocked(shortUuid: string, blocked: boolean): void {
+  if (blocked) {
+    clearVpnServersMemoryCache(shortUuid);
+  }
   try {
     if (blocked) {
       localStorage.setItem(BLOCKED_SUBSCRIPTION_KEY, shortUuid);
@@ -232,6 +244,19 @@ function clearSubSyncTimestamp(): void {
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function getSubscriptionInfoShared(shortUuid: string): Promise<PanelResponse<PanelSubInfoDto>> {
+  const existing = subscriptionInfoInFlight.get(shortUuid);
+  if (existing) return existing;
+
+  const task = getSubscriptionInfo(shortUuid).finally(() => {
+    if (subscriptionInfoInFlight.get(shortUuid) === task) {
+      subscriptionInfoInFlight.delete(shortUuid);
+    }
+  });
+  subscriptionInfoInFlight.set(shortUuid, task);
+  return task;
 }
 
 function readPendingPurchaseState(): PendingPurchaseState | null {
@@ -515,12 +540,7 @@ export async function initializeAuthSession(): Promise<void> {
   const secureSession = await loadSecureSession();
 
   if (secureSession) {
-    if (secureSession.deviceId === currentSession.deviceId) {
-      applySessionSecrets(secureSession);
-    } else {
-      await clearSecureSession();
-      applySessionSecrets(null);
-    }
+    applySessionSecrets(secureSession);
   } else {
     const legacySecrets = getSessionSecrets(currentSession);
     if (legacySecrets) {
@@ -776,7 +796,7 @@ async function readOrFetchSubscriptionUrl(shortUuid: string): Promise<string | n
   const cached = readCachedSubscriptionUrl(shortUuid);
   if (cached) return cached;
   try {
-    const subInfo = (await getSubscriptionInfo(shortUuid)).response;
+    const subInfo = (await getSubscriptionInfoShared(shortUuid)).response;
     if (!subInfo.is_found || !subInfo.user) {
       writeCachedSubscriptionUrl(shortUuid, null);
       if (getSession().shortUuid === shortUuid) {
@@ -829,10 +849,12 @@ async function runSyncSubscription(): Promise<void> {
 
   let subUser;
   let subscriptionUrl: string | null = null;
+  let serverLinks: string[] = [];
   try {
-    const subInfo = (await getSubscriptionInfo(shortUuid)).response;
+    const subInfo = (await getSubscriptionInfoShared(shortUuid)).response;
     if (!subInfo.is_found || !subInfo.user) {
       writeCachedSubscriptionUrl(shortUuid, null);
+      clearVpnServersMemoryCache(shortUuid);
       updateSession({
         userPlan: "EXPIRED",
         planDisplayName: null,
@@ -844,6 +866,7 @@ async function runSyncSubscription(): Promise<void> {
     }
     subUser = subInfo.user;
     subscriptionUrl = subInfo.subscription_url ?? panelUser?.subscription_url ?? null;
+    serverLinks = subInfo.links ?? [];
   } catch {
     return;
   }
@@ -854,7 +877,6 @@ async function runSyncSubscription(): Promise<void> {
   // which we feed back into the throttle window. We await it (rather than
   // fire-and-forget as before) so the throttle bookkeeping below sees the
   // fresh interval — pingSubscriptionUrl already enforces its own timeout.
-  writeCachedSubscriptionUrl(shortUuid, subscriptionUrl);
   let pingResult: SubscriptionPingResult | null = null;
   try {
     pingResult = await pingSubscriptionUrl(subscriptionUrl);
@@ -864,8 +886,25 @@ async function runSyncSubscription(): Promise<void> {
   if (pingResult) {
     setSubscriptionUsageBlocked(shortUuid, pingResult.isUsageBlocked);
     writeSubSyncState(pingResult.intervalMs);
+    // HWID binding can change the effective links while preserving the same
+    // visible server address. Refresh links after the tagged subscription hit.
+    try {
+      const refreshed = (await getSubscriptionInfoShared(shortUuid)).response;
+      if (refreshed.is_found && refreshed.user) {
+        serverLinks = refreshed.links ?? serverLinks;
+        subscriptionUrl = refreshed.subscription_url ?? subscriptionUrl;
+      }
+    } catch {
+      // Keep the pre-ping links if the follow-up read is unavailable.
+    }
   } else {
     clearSubSyncTimestamp();
+  }
+  writeCachedSubscriptionUrl(shortUuid, subscriptionUrl);
+  if (pingResult?.isUsageBlocked) {
+    clearVpnServersMemoryCache(shortUuid);
+  } else {
+    cacheVpnServersFromLinks(shortUuid, serverLinks);
   }
 
   const isActive = subUser.is_active && subUser.user_status === "ACTIVE";
@@ -981,27 +1020,45 @@ function paymentLooksApplied(pending: PendingPurchaseState, session: Session): b
   );
 }
 
+type DeviceLinkStatus = "linked" | "missing" | "unknown";
+
 /**
  * Check whether the current device session is still linked server-side.
- * The ordinary access-token request avoids rotating session tokens on every poll.
+ * This must stay read-only: subscription/HWID pings can create or refresh
+ * panel device rows, so they are intentionally not part of the remote-kick
+ * decision.
  */
-export async function isCurrentDeviceLinked(): Promise<boolean> {
+async function checkCurrentDeviceLinkStatus(): Promise<DeviceLinkStatus> {
   const { isLinked } = getSession();
-  if (!isLinked) return false;
+  if (!isLinked) return "missing";
   try {
-    await pingHwidOnly().catch(() => false);
     const aliases = await getCurrentDeviceAliases();
     const res = await apiGetDevices();
-    if (!res.success || !res.data) return getSession().isLinked;
-    return res.data.devices.some((device) => deviceMatchesAliases(device, aliases));
+    if (!res.success || !res.data) return "unknown";
+    return res.data.devices.some((device) => deviceMatchesAliases(device, aliases))
+      ? "linked"
+      : "missing";
   } catch (error) {
-    if (error instanceof ApiHttpError && error.status === 403) return false;
-    return getSession().isLinked; // network error → don't kick the user
+    if (error instanceof ApiHttpError && error.status === 403) return "missing";
+    return "unknown";
   }
 }
 
+export async function isCurrentDeviceLinked(): Promise<boolean> {
+  return (await checkCurrentDeviceLinkStatus()) !== "missing";
+}
+
 const DEVICE_LINK_POLL_MS = 60_000;
+const DEVICE_LINK_MISS_THRESHOLD = 3;
+const DEVICE_LINK_INITIAL_MISS_THRESHOLD = 5;
 let linkPollTimer: number | null = null;
+let linkPollCurrentDeviceSeen = false;
+let linkPollMissingCount = 0;
+
+function resetDeviceLinkPollState() {
+  linkPollCurrentDeviceSeen = false;
+  linkPollMissingCount = 0;
+}
 
 /**
  * Start polling to detect remote device removal.
@@ -1017,8 +1074,23 @@ export function startDeviceLinkPolling() {
       stopDeviceLinkPolling();
       return;
     }
-    const linked = await isCurrentDeviceLinked();
-    if (!linked) {
+    const status = await checkCurrentDeviceLinkStatus();
+    if (status === "linked") {
+      linkPollCurrentDeviceSeen = true;
+      linkPollMissingCount = 0;
+      linkPollTimer = window.setTimeout(tick, DEVICE_LINK_POLL_MS);
+      return;
+    }
+    if (status === "unknown") {
+      linkPollTimer = window.setTimeout(tick, DEVICE_LINK_POLL_MS);
+      return;
+    }
+
+    linkPollMissingCount += 1;
+    const threshold = linkPollCurrentDeviceSeen
+      ? DEVICE_LINK_MISS_THRESHOLD
+      : DEVICE_LINK_INITIAL_MISS_THRESHOLD;
+    if (linkPollMissingCount >= threshold) {
       // Tear down the tunnel before clearing identity — otherwise the OS-level
       // VPN keeps routing traffic after the user is bounced to the QR screen,
       // and the next pairing would re-enter Home with the connection still up.
@@ -1027,6 +1099,7 @@ export function startDeviceLinkPolling() {
       } catch {
         // ignore — proceed to wipe local state regardless
       }
+      clearVpnServersMemoryCache(session.shortUuid);
       clearIdentity();
       stopDeviceLinkPolling();
       return;
@@ -1042,10 +1115,11 @@ export function stopDeviceLinkPolling() {
     clearTimeout(linkPollTimer);
     linkPollTimer = null;
   }
+  resetDeviceLinkPollState();
 }
 
 export async function logout(): Promise<void> {
-  const { isLinked } = getSession();
+  const { isLinked, shortUuid } = getSession();
   // Always tear down the tunnel first — clearing identity alone would leave
   // a live VPN session orphaned in the background.
   try {
@@ -1068,6 +1142,7 @@ export async function logout(): Promise<void> {
   await clearSecureSession();
   clearPendingPurchase();
   clearPendingAuthToken();
+  clearVpnServersMemoryCache(shortUuid);
   clearDeviceSession();
 }
 
@@ -1148,6 +1223,11 @@ export function isSentinelServer(server: VpnServer): boolean {
   );
 }
 
+/** Server metadata allows the client to select and use this entry. */
+export function isAvailableVpnServer(server: VpnServer): boolean {
+  return server.isOnline && !isSentinelServer(server);
+}
+
 function parseVlessUrl(url: string): VpnServer | null {
   if (!url.startsWith("vless://")) return null;
   try {
@@ -1192,63 +1272,148 @@ function parseVlessUrl(url: string): VpnServer | null {
   }
 }
 
+function cloneVpnServers(servers: VpnServer[]): VpnServer[] {
+  return servers.map((server) => ({ ...server }));
+}
+
+function writeVpnServersMemoryCache(shortUuid: string, servers: VpnServer[]): number {
+  vpnServersCacheGeneration += 1;
+  vpnServersMemoryCache = {
+    shortUuid,
+    servers: cloneVpnServers(servers),
+  };
+  window.dispatchEvent(new Event(VPN_SERVERS_EVENT));
+  return vpnServersCacheGeneration;
+}
+
+function clearVpnServersMemoryCache(shortUuid: string | null): void {
+  if (!shortUuid || vpnServersMemoryCache?.shortUuid === shortUuid) {
+    vpnServersCacheGeneration += 1;
+    vpnServersMemoryCache = null;
+  }
+}
+
+function parseVpnServersFromLinks(links: string[]): VpnServer[] {
+  return links
+    .map(parseVlessUrl)
+    .filter((server): server is VpnServer => server !== null)
+    .filter((server) => !isSentinelServer(server));
+}
+
+function cacheVpnServersFromLinks(shortUuid: string, links: string[]): VpnServer[] {
+  const servers = parseVpnServersFromLinks(links);
+  if (servers.length === 0) {
+    clearVpnServersMemoryCache(shortUuid);
+    return servers;
+  }
+
+  const generation = writeVpnServersMemoryCache(shortUuid, servers);
+  void enrichVpnServersWithNodes(cloneVpnServers(servers))
+    .then((enriched) => {
+      if (
+        getSession().shortUuid === shortUuid &&
+        vpnServersCacheGeneration === generation
+      ) {
+        writeVpnServersMemoryCache(shortUuid, enriched);
+      }
+    })
+    .catch(() => {});
+  return servers;
+}
+
+export function getCachedVpnServers(): VpnServer[] {
+  const { shortUuid } = getSession();
+  if (!shortUuid || vpnServersMemoryCache?.shortUuid !== shortUuid) return [];
+  return cloneVpnServers(vpnServersMemoryCache.servers);
+}
+
+export function subscribeVpnServers(listener: () => void): () => void {
+  window.addEventListener(VPN_SERVERS_EVENT, listener);
+  return () => window.removeEventListener(VPN_SERVERS_EVENT, listener);
+}
+
+async function enrichVpnServersWithNodes(servers: VpnServer[]): Promise<VpnServer[]> {
+  const nodes = (await apiGetNodes()).response;
+  const countryByAddress = new Map(nodes.map((n) => [n.address, n.country_code]));
+  const disabledAddresses = new Set(
+    nodes.filter((n) => n.is_disabled || !n.is_connected).map((n) => n.address),
+  );
+
+  return servers.map((server) => ({
+    ...server,
+    country: countryByAddress.get(server.address) ?? server.country,
+    isOnline: server.isOnline && !disabledAddresses.has(server.address),
+  }));
+}
+
 /**
  * Fetch VPN servers from subscription links (VLESS URLs).
  * Mirrors TV's VpnRepository.refreshServers().
  */
-export async function fetchVpnServers(): Promise<VpnServer[]> {
+export async function fetchVpnServers(
+  opts: { skipAccessPing?: boolean } = {},
+): Promise<VpnServer[]> {
   const { shortUuid } = getSession();
   const debug = import.meta.env.DEV;
   if (!shortUuid) return [];
-  if (await pingHwidOnly().catch(() => getSubscriptionUsageBlocked())) return [];
-
-  const subInfo = (await getSubscriptionInfo(shortUuid)).response;
-  if (debug) console.log("[fetchVpnServers] is_found:", subInfo.is_found, "links count:", subInfo.links?.length ?? 0);
-  if (!subInfo.is_found || !subInfo.links?.length) return [];
-
-  const servers = subInfo.links
-    .map(parseVlessUrl)
-    .filter((s): s is VpnServer => s !== null)
-    // Drop the panel's "subscription expired" placeholder link. It looks
-    // like a valid VLESS URL to the parser but its uuid is all-zeros and
-    // the address is unreachable — feeding it to xray would crash the
-    // tunnel manager. Mirrors the phone's Server.isSentinel filter.
-    .filter((s) => !isSentinelServer(s));
-
-  if (debug) console.log("[fetchVpnServers] Parsed servers:", servers.length, "of", subInfo.links.length);
-
-  // Enrich with country from nodes API (mirrors phone's VpnRepository.refreshServers)
-  try {
-    const nodes = (await apiGetNodes()).response;
-    if (debug) console.log("[fetchVpnServers] Nodes count:", nodes.length);
-    const countryByAddress = new Map(nodes.map((n) => [n.address, n.country_code]));
-    const disabledIps = new Set(
-      nodes.filter((n) => n.is_disabled || !n.is_connected).map((n) => n.address),
-    );
-
-    await Promise.all(
-      servers.map(async (server) => {
-        let resolvedIp = server.address;
-        try {
-          const ip = await invoke<string>("resolve_host", { host: server.address });
-          if (ip) resolvedIp = ip;
-        } catch {
-          // Fallback to raw address
-        }
-        server.country =
-          countryByAddress.get(server.address) ??
-          countryByAddress.get(resolvedIp) ??
-          "";
-        server.isOnline =
-          !disabledIps.has(server.address) && !disabledIps.has(resolvedIp);
-      }),
-    );
-  } catch {
-    if (debug) console.warn("[fetchVpnServers] nodes enrichment failed");
-    // Fallback — keep servers without country info
+  if (getSubscriptionUsageBlocked()) {
+    clearVpnServersMemoryCache(shortUuid);
+    return [];
   }
 
-  return servers;
+  const blocked = opts.skipAccessPing
+    ? getSubscriptionUsageBlocked()
+    : await pingHwidOnly().catch(() => getSubscriptionUsageBlocked());
+  if (blocked) {
+    clearVpnServersMemoryCache(shortUuid);
+    return [];
+  }
+
+  // The HWID-tagged subscription request can change the effective links for
+  // this device. Read the JSON subscription only after that request completes.
+  const subInfoResponse = await getSubscriptionInfoShared(shortUuid);
+  const subInfo = subInfoResponse.response;
+  if (debug) console.log("[fetchVpnServers] is_found:", subInfo.is_found, "links count:", subInfo.links?.length ?? 0);
+  if (!subInfo.is_found || !subInfo.links?.length) {
+    clearVpnServersMemoryCache(shortUuid);
+    return [];
+  }
+
+  // Drop the panel's "subscription expired" placeholder link. It looks like
+  // a valid VLESS URL to the parser but its uuid is all-zeros and the address
+  // is unreachable — feeding it to xray would crash the tunnel manager.
+  const servers = parseVpnServersFromLinks(subInfo.links);
+
+  if (debug) console.log("[fetchVpnServers] Parsed servers:", servers.length, "of", subInfo.links.length);
+  const generation = writeVpnServersMemoryCache(shortUuid, servers);
+
+  const metadataTask = enrichVpnServersWithNodes(cloneVpnServers(servers));
+  metadataTask
+    .then((enriched) => {
+      if (
+        getSession().shortUuid === shortUuid &&
+        vpnServersCacheGeneration === generation
+      ) {
+        writeVpnServersMemoryCache(shortUuid, enriched);
+      }
+    })
+    .catch(() => {
+      if (debug) console.warn("[fetchVpnServers] nodes enrichment failed");
+    });
+
+  const enriched = await settleStartupStep(
+    "serverMetadata",
+    metadataTask,
+    SERVER_METADATA_TIMEOUT_MS,
+  );
+  if (enriched) {
+    if (vpnServersCacheGeneration === generation) {
+      writeVpnServersMemoryCache(shortUuid, enriched);
+    }
+    return cloneVpnServers(enriched);
+  }
+
+  return cloneVpnServers(servers);
 }
 
 export type { Session };

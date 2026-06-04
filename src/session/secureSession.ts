@@ -67,8 +67,11 @@ function parseSecrets(raw: string | null): SessionSecrets | null {
     const parsed = JSON.parse(raw) as Partial<SessionSecrets>;
     if (
       typeof parsed.deviceId !== "string" ||
+      !parsed.deviceId.trim() ||
       typeof parsed.accessToken !== "string" ||
+      !parsed.accessToken.trim() ||
       typeof parsed.refreshToken !== "string" ||
+      !parsed.refreshToken.trim() ||
       typeof parsed.accessTokenExpiresAt !== "number" ||
       typeof parsed.refreshTokenExpiresAt !== "number"
     ) {

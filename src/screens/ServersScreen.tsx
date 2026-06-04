@@ -1,21 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { t, type StringKey } from "../i18n";
 import {
   countryFlagForUi,
   serverCountryCodeForUi,
   serverDisplayName,
 } from "../components/serverDisplay";
-import { fetchVpnServers, syncSubscription, type VpnServer } from "../session/auth";
+import {
+  fetchVpnServers,
+  getCachedVpnServers,
+  isAvailableVpnServer,
+  subscribeVpnServers,
+  syncSubscription,
+  type VpnServer,
+} from "../session/auth";
 import { isSameServerSelection } from "../session/serverSelection";
-import { preparePingBypass } from "../session/vpn";
+import {
+  measureVpnServerPings,
+  selectBestVpnServer,
+  type MeasuredVpnServer,
+} from "../session/serverQuality";
 import Spinner from "../components/Spinner";
 import type { SelectedServer } from "../App";
 import "./ServersScreen.css";
 
-interface ServerItem extends VpnServer {
-  ping: number;
-}
+type ServerItem = MeasuredVpnServer;
 
 function countryName(code: string | null | undefined): string {
   if (!code) return "";
@@ -36,11 +44,15 @@ function pingColor(ping: number): string {
 export default function ServersScreen({
   onBack,
   onSelect,
+  onSelectAutomatic,
   selectedServer,
+  automaticServerSelection,
 }: {
   onBack: () => void;
-  onSelect: (server: SelectedServer) => void;
+  onSelect: (server: ServerItem) => void;
+  onSelectAutomatic: (server: ServerItem) => void;
   selectedServer: SelectedServer | null;
+  automaticServerSelection: boolean;
 }) {
   const [servers, setServers] = useState<ServerItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,10 +60,6 @@ export default function ServersScreen({
   const [flagsReady, setFlagsReady] = useState(false);
   const pingGenRef = useRef(0);
 
-  // Twemoji Country Flags is bundled via country-flag-emoji-polyfill but the
-  // browser fetches/parses the woff2 asynchronously. If we render the list
-  // before the font is ready, Windows momentarily shows raw "NL"/"RU" glyphs.
-  // Gate the list on the font being fully loaded.
   useEffect(() => {
     if (typeof document === "undefined" || !document.fonts) {
       setFlagsReady(true);
@@ -60,41 +68,44 @@ export default function ServersScreen({
     document.fonts
       .load('16px "Twemoji Country Flags"')
       .then(() => setFlagsReady(true))
-      .catch(() => setFlagsReady(true)); // fail open: better letters than a stuck spinner
+      .catch(() => setFlagsReady(true));
   }, []);
 
-  const runPings = useCallback(
-    (items: ServerItem[], gen: number, pingMap: Map<string, string>) => {
-      for (const s of items) {
-        if (!s.isOnline) continue;
-        // Pin tcp_ping to the IP that prepare_ping_bypass installed a route
-        // for. If we passed the hostname instead, tcp_ping would resolve a
-        // second time and could land on a different IP that isn't in the
-        // bypass set — that probe would then be tunnelled, returning the
-        // misleading "Недоступен" / inflated-RTT readings shown when the
-        // VPN is on.
-        const target = pingMap.get(s.address) ?? s.address;
-        invoke<number>("tcp_ping", { host: target, port: s.port, timeoutMs: 3000 })
-          .then((ms) => {
-            if (pingGenRef.current !== gen) return;
-            setServers((prev) =>
-              prev.map((srv) =>
-                srv.id === s.id ? { ...srv, ping: ms >= 0 ? ms : -1 } : srv,
-              ),
-            );
-          })
-          .catch(() => {
-            if (pingGenRef.current !== gen) return;
-            setServers((prev) =>
-              prev.map((srv) => (srv.id === s.id ? { ...srv, ping: -1 } : srv)),
-            );
-          });
+  const showServers = useCallback((vpnServers: VpnServer[]) => {
+    const items: ServerItem[] = vpnServers.map((s) => ({
+      ...s,
+      ping: 0,
+    }));
+    setServers(items);
+    const gen = ++pingGenRef.current;
+    void measureVpnServerPings(items, { force: true }).then((pings) => {
+      if (pingGenRef.current !== gen) return;
+      setServers((current) =>
+        current.map((server) => ({
+          ...server,
+          ping: pings.get(server.id) ?? -1,
+        })),
+      );
+    });
+  }, []);
+
+  const selectAutomatic = useCallback(() => {
+    void selectBestVpnServer(servers).then((best) => {
+      if (best) {
+        onSelectAutomatic(best);
       }
-    },
-    [],
+    });
+  }, [onSelectAutomatic, servers]);
+
+  const automaticEnabled = servers.some(
+    (server) => isAvailableVpnServer(server) && server.ping > 0,
   );
 
   const load = useCallback(async (opts: { force?: boolean } = {}) => {
+    const cachedServers = getCachedVpnServers();
+    if (cachedServers.length > 0) {
+      showServers(cachedServers);
+    }
     setLoading(true);
     setError(null);
     try {
@@ -105,31 +116,29 @@ export default function ServersScreen({
         await syncSubscription({ force: true }).catch(() => {});
       }
       const vpnServers = await fetchVpnServers();
-      const items: ServerItem[] = vpnServers.map((s) => ({
-        ...s,
-        ping: 0,
-      }));
-      setServers(items);
-      const gen = ++pingGenRef.current;
-      const pingHosts = items.filter((s) => s.isOnline).map((s) => s.address);
-      void preparePingBypass(pingHosts)
-        .then((pingMap) => {
-          if (pingGenRef.current === gen) runPings(items, gen, pingMap);
-        })
-        .catch(() => {
-          if (pingGenRef.current === gen) runPings(items, gen, new Map());
-        });
+      showServers(vpnServers);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setServers([]);
+      if (cachedServers.length === 0) {
+        setError(e instanceof Error ? e.message : String(e));
+        setServers([]);
+      }
     } finally {
       setLoading(false);
     }
-  }, [runPings]);
+  }, [showServers]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    return subscribeVpnServers(() => {
+      const cachedServers = getCachedVpnServers();
+      if (cachedServers.length > 0) {
+        showServers(cachedServers);
+      }
+    });
+  }, [showServers]);
 
   return (
     <div className="servers-root">
@@ -165,7 +174,7 @@ export default function ServersScreen({
       </div>
 
       {/* Server list / states */}
-      {loading || !flagsReady ? (
+      {loading && servers.length === 0 ? (
         <div className="servers-list spinner-center">
           <Spinner size={36} />
         </div>
@@ -188,16 +197,38 @@ export default function ServersScreen({
         </div>
       ) : (
         <div className="servers-list">
+          <div
+            className={[
+              "server-item",
+              "server-item--automatic",
+              automaticServerSelection ? "server-item--selected" : "",
+              !automaticEnabled ? "server-item--offline" : "",
+            ].filter(Boolean).join(" ")}
+            aria-current={automaticServerSelection ? "true" : undefined}
+            onClick={automaticEnabled ? selectAutomatic : undefined}
+          >
+            <span className="server-item__auto-icon">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M13 2 4.5 13.2h6.1L10.9 22 19.5 10.8h-6.1L13 2Z" />
+              </svg>
+            </span>
+            <div className="server-item__info">
+              <div className="server-item__name">{t("server_auto")}</div>
+              <div className="server-item__country">{t("server_auto_description")}</div>
+            </div>
+          </div>
           {servers.map((server) => {
-            const selected = isSameServerSelection(selectedServer, server);
             // ping === 0 means "not measured yet" (initial state before the
             // probe lands). ping < 0 means the probe completed and failed —
             // the server is genuinely unreachable from this network. Block
             // the click in that case so the user can't kick off a VPN
             // switch that will tear down the current tunnel and then fail
             // to establish a new one (the "DNS resolve failed" cascade).
-            const probeFailed = server.ping < 0;
-            const clickable = server.isOnline && !probeFailed;
+            const clickable = isAvailableVpnServer(server) && server.ping > 0;
+            const selected =
+              !automaticServerSelection &&
+              clickable &&
+              isSameServerSelection(selectedServer, server);
             const className = [
               "server-item",
               selected ? "server-item--selected" : "",
@@ -211,28 +242,12 @@ export default function ServersScreen({
                 aria-current={selected ? "true" : undefined}
                 onClick={() => {
                   if (clickable) {
-                    onSelect({
-                      name: server.name,
-                      country: server.country,
-                      address: server.address,
-                      port: server.port,
-                      uuid: server.uuid,
-                      flow: server.flow,
-                      security: server.security,
-                      sni: server.sni,
-                      fingerprint: server.fingerprint,
-                      public_key: server.public_key,
-                      short_id: server.short_id,
-                      network: server.network,
-                      path: server.path,
-                      mode: server.mode,
-                      spx: server.spx,
-                    });
+                    onSelect(server);
                   }
                 }}
               >
                 <span className="server-item__flag">
-                  {countryFlagForUi(server.country, server.name)}
+                  {flagsReady ? countryFlagForUi(server.country, server.name) : ""}
                 </span>
                 <div className="server-item__info">
                   <div className="server-item__name">
