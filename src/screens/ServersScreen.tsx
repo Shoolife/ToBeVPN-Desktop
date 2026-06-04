@@ -57,10 +57,12 @@ export default function ServersScreen({
   automaticServerSelection: boolean;
 }) {
   const [servers, setServers] = useState<ServerItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [serverLoading, setServerLoading] = useState(true);
+  const [pingLoading, setPingLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flagsReady, setFlagsReady] = useState(areCountryFlagsReady);
   const pingGenRef = useRef(0);
+  const loading = serverLoading || pingLoading;
 
   useEffect(() => {
     if (flagsReady) return;
@@ -85,15 +87,31 @@ export default function ServersScreen({
       })),
     );
     const gen = ++pingGenRef.current;
-    void measureVpnServerPings(items, { force: true }).then((pings) => {
-      if (pingGenRef.current !== gen) return;
-      setServers((current) =>
-        current.map((server) => ({
-          ...server,
-          ping: pings.get(server.id) ?? -1,
-        })),
-      );
-    });
+    setPingLoading(true);
+    void measureVpnServerPings(items, { force: true })
+      .then((pings) => {
+        if (pingGenRef.current !== gen) return;
+        setServers((current) =>
+          current.map((server) => ({
+            ...server,
+            ping: pings.get(server.id) ?? -1,
+          })),
+        );
+      })
+      .catch(() => {
+        if (pingGenRef.current !== gen) return;
+        setServers((current) =>
+          current.map((server) => ({
+            ...server,
+            ping: -1,
+          })),
+        );
+      })
+      .finally(() => {
+        if (pingGenRef.current === gen) {
+          setPingLoading(false);
+        }
+      });
   }, []);
 
   const selectAutomatic = useCallback(() => {
@@ -111,7 +129,7 @@ export default function ServersScreen({
     if (cachedServers.length > 0) {
       showServers(cachedServers);
     }
-    setLoading(true);
+    setServerLoading(true);
     setError(null);
     try {
       // Force the subscription sync only when the user explicitly hit the
@@ -128,7 +146,7 @@ export default function ServersScreen({
         setServers([]);
       }
     } finally {
-      setLoading(false);
+      setServerLoading(false);
     }
   }, [showServers]);
 
