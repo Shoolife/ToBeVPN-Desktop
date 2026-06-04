@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { t, type StringKey } from "../i18n";
 import {
+  areCountryFlagsReady,
   countryFlagForUi,
+  ensureCountryFlagsReady,
   serverCountryCodeForUi,
   serverDisplayName,
 } from "../components/serverDisplay";
@@ -57,26 +59,31 @@ export default function ServersScreen({
   const [servers, setServers] = useState<ServerItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [flagsReady, setFlagsReady] = useState(false);
+  const [flagsReady, setFlagsReady] = useState(areCountryFlagsReady);
   const pingGenRef = useRef(0);
 
   useEffect(() => {
-    if (typeof document === "undefined" || !document.fonts) {
-      setFlagsReady(true);
-      return;
-    }
-    document.fonts
-      .load('16px "Twemoji Country Flags"')
-      .then(() => setFlagsReady(true))
-      .catch(() => setFlagsReady(true));
-  }, []);
+    if (flagsReady) return;
+    let cancelled = false;
+    ensureCountryFlagsReady().then(() => {
+      if (!cancelled) setFlagsReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [flagsReady]);
 
   const showServers = useCallback((vpnServers: VpnServer[]) => {
     const items: ServerItem[] = vpnServers.map((s) => ({
       ...s,
       ping: 0,
     }));
-    setServers(items);
+    setServers((current) =>
+      items.map((item) => ({
+        ...item,
+        ping: current.find((server) => server.id === item.id)?.ping ?? item.ping,
+      })),
+    );
     const gen = ++pingGenRef.current;
     void measureVpnServerPings(items, { force: true }).then((pings) => {
       if (pingGenRef.current !== gen) return;
@@ -97,9 +104,7 @@ export default function ServersScreen({
     });
   }, [onSelectAutomatic, servers]);
 
-  const automaticEnabled = servers.some(
-    (server) => isAvailableVpnServer(server) && server.ping > 0,
-  );
+  const automaticEnabled = servers.some(isAvailableVpnServer);
 
   const load = useCallback(async (opts: { force?: boolean } = {}) => {
     const cachedServers = getCachedVpnServers();
@@ -219,12 +224,11 @@ export default function ServersScreen({
           </div>
           {servers.map((server) => {
             // ping === 0 means "not measured yet" (initial state before the
-            // probe lands). ping < 0 means the probe completed and failed —
-            // the server is genuinely unreachable from this network. Block
-            // the click in that case so the user can't kick off a VPN
-            // switch that will tear down the current tunnel and then fail
-            // to establish a new one (the "DNS resolve failed" cascade).
-            const clickable = isAvailableVpnServer(server) && server.ping > 0;
+            // probe lands). Keep the row selectable in that state so opening
+            // the list doesn't lock the whole screen until pings finish.
+            // ping < 0 means the probe completed and failed — only then block
+            // the click to avoid switching to a known unreachable server.
+            const clickable = isAvailableVpnServer(server) && server.ping >= 0;
             const selected =
               !automaticServerSelection &&
               clickable &&

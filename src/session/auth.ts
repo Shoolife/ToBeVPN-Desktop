@@ -1300,8 +1300,28 @@ function parseVpnServersFromLinks(links: string[]): VpnServer[] {
     .filter((server) => !isSentinelServer(server));
 }
 
+function reuseCachedVpnServerMetadata(shortUuid: string, servers: VpnServer[]): VpnServer[] {
+  if (vpnServersMemoryCache?.shortUuid !== shortUuid) return servers;
+
+  const cachedById = new Map(
+    vpnServersMemoryCache.servers.map((server) => [server.id, server]),
+  );
+  return servers.map((server) => {
+    const cached = cachedById.get(server.id);
+    if (!cached) return server;
+    return {
+      ...server,
+      country: server.country || cached.country,
+      isOnline: cached.isOnline,
+    };
+  });
+}
+
 function cacheVpnServersFromLinks(shortUuid: string, links: string[]): VpnServer[] {
-  const servers = parseVpnServersFromLinks(links);
+  const servers = reuseCachedVpnServerMetadata(
+    shortUuid,
+    parseVpnServersFromLinks(links),
+  );
   if (servers.length === 0) {
     clearVpnServersMemoryCache(shortUuid);
     return servers;
@@ -1382,7 +1402,10 @@ export async function fetchVpnServers(
   // Drop the panel's "subscription expired" placeholder link. It looks like
   // a valid VLESS URL to the parser but its uuid is all-zeros and the address
   // is unreachable — feeding it to xray would crash the tunnel manager.
-  const servers = parseVpnServersFromLinks(subInfo.links);
+  const servers = reuseCachedVpnServerMetadata(
+    shortUuid,
+    parseVpnServersFromLinks(subInfo.links),
+  );
 
   if (debug) console.log("[fetchVpnServers] Parsed servers:", servers.length, "of", subInfo.links.length);
   const generation = writeVpnServersMemoryCache(shortUuid, servers);

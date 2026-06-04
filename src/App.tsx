@@ -265,26 +265,12 @@ export default function App() {
         setSelectedServer(resolved);
         saveLastServer(resolved);
 
-        const runtime = getVpnRuntime();
-        if (vpnConfigChanged && runtime.connected) {
-          void connectVpn({
-            address: resolved.address,
-            port: resolved.port,
-            uuid: resolved.uuid,
-            flow: resolved.flow,
-            security: resolved.security,
-            sni: resolved.sni,
-            fingerprint: resolved.fingerprint,
-            public_key: resolved.public_key,
-            short_id: resolved.short_id,
-            network: resolved.network,
-            path: resolved.path,
-            mode: resolved.mode,
-            spx: resolved.spx,
-          }).catch((e) => {
-            console.error("[VPN] refreshed server config reconnect failed:", e);
-          });
-        }
+        // Background subscription refreshes can rotate links or fill metadata
+        // while the user is only opening Settings/Subscription. Do not restart
+        // a live tunnel from this passive event: explicit server selection and
+        // manual connect still refresh the config before starting, and the
+        // health-recovery path refreshes before reconnecting after a real
+        // failure.
       };
 
       if (matching) {
@@ -427,7 +413,7 @@ export default function App() {
             onSelect={(vpnServer) => {
               // Keep a second guard behind ServersScreen so a stale click
               // cannot persist or live-switch to a server that just went down.
-              if (!isAvailableVpnServer(vpnServer) || vpnServer.ping <= 0) return;
+              if (!isAvailableVpnServer(vpnServer) || vpnServer.ping < 0) return;
               const server = toSelectedServer(vpnServer);
               const prev = selectedServer;
               automaticServerSelectionRef.current = false;

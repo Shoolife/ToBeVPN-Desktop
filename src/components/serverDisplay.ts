@@ -1,10 +1,15 @@
 const GLOBE_FLAG = "\u{1F310}";
+const COUNTRY_FLAGS_FONT = '16px "Twemoji Country Flags"';
+const COUNTRY_FLAGS_TEST_TEXT = "\u{1F1F3}\u{1F1F1}";
 const REGIONAL_INDICATOR_START = 0x1f1e6;
 const REGIONAL_INDICATOR_END = 0x1f1ff;
 const EDGE_DECORATION = new Set(["-", "|", "/", "\\", ":"]);
 const LETTER_OR_NUMBER = /[\p{L}\p{N}]/u;
 const WHITESPACE = /\s/u;
 const DECORATIVE = /[\p{S}\p{M}\p{Cf}]/u;
+
+let countryFlagsReady = false;
+let countryFlagsReadyPromise: Promise<boolean> | null = null;
 
 interface PrefixInfo {
   endIndex: number;
@@ -22,6 +27,41 @@ export function countryFlagForUi(
     GLOBE_FLAG
   );
 }
+
+export function areCountryFlagsReady(): boolean {
+  if (countryFlagsReady) return true;
+  if (typeof document === "undefined" || !document.fonts) {
+    countryFlagsReady = true;
+    return true;
+  }
+  if (document.fonts.check(COUNTRY_FLAGS_FONT, COUNTRY_FLAGS_TEST_TEXT)) {
+    countryFlagsReady = true;
+    return true;
+  }
+  return false;
+}
+
+export function ensureCountryFlagsReady(): Promise<boolean> {
+  if (areCountryFlagsReady()) return Promise.resolve(true);
+  if (typeof document === "undefined" || !document.fonts) {
+    countryFlagsReady = true;
+    return Promise.resolve(true);
+  }
+
+  countryFlagsReadyPromise ??= document.fonts
+    .load(COUNTRY_FLAGS_FONT, COUNTRY_FLAGS_TEST_TEXT)
+    .then(() => {
+      countryFlagsReady = true;
+      return true;
+    })
+    .catch(() => {
+      countryFlagsReady = true;
+      return true;
+    });
+  return countryFlagsReadyPromise;
+}
+
+void ensureCountryFlagsReady();
 
 export function serverCountryCodeForUi(
   countryCode: string | null | undefined,
