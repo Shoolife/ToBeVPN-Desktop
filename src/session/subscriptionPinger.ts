@@ -114,6 +114,9 @@ async function primaryThenFallback(
   if (primaryUnavailableUntil > Date.now()) {
     try {
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      if (await isProxyGatewayAuthError(response)) {
+        throw new Error("Fallback route rejected request");
+      }
       return readResult(response);
     } catch {
       const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
@@ -140,7 +143,11 @@ async function primaryThenFallback(
   });
   const fallbackPromise: Promise<HedgedResponse> = (async () => {
     await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    return timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+    const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+    if (await isProxyGatewayAuthError(response)) {
+      throw new Error("Fallback route rejected request");
+    }
+    return response;
   })().then((response) => ({ source: "fallback", response }));
 
   let winner: HedgedResponse;
@@ -159,6 +166,28 @@ async function primaryThenFallback(
     primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
   }
   return readResult(winner.response);
+}
+
+async function isProxyGatewayAuthError(response: Response): Promise<boolean> {
+  if (response.status !== FALLBACK_HTTP_STATUS) return false;
+  try {
+    const text = await response.clone().text();
+    if (!text) return false;
+    const parsed = JSON.parse(text) as {
+      errorCode?: unknown;
+      errorMessage?: unknown;
+      errorType?: unknown;
+    };
+    const message = typeof parsed.errorMessage === "string" ? parsed.errorMessage : "";
+    const type = typeof parsed.errorType === "string" ? parsed.errorType : "";
+    return (
+      parsed.errorCode === FALLBACK_HTTP_STATUS &&
+      /forbidden:\s*not authorized/i.test(message) &&
+      /clienterror/i.test(type)
+    );
+  } catch {
+    return false;
+  }
 }
 
 const MIN_INTERVAL_HOURS = 1;

@@ -249,6 +249,33 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function isTechnicalVpnErrorMessage(message: string): boolean {
+  return (
+    /"errorCode"\s*:\s*403/i.test(message) ||
+    /forbidden:\s*not authorized/i.test(message) ||
+    /clienterror/i.test(message) ||
+    /fallback route rejected/i.test(message) ||
+    /primary route rejected/i.test(message) ||
+    /network request failed/i.test(message) ||
+    /request timed out/i.test(message) ||
+    /not authorized/i.test(message) ||
+    /not authenticated/i.test(message) ||
+    /http\s*403/i.test(message)
+  );
+}
+
+function userFacingVpnError(error: unknown, fallback = t("vpn_error_connect")): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  const message = raw.replace(/[\n\r\t]+/g, " ").trim();
+  if (!message) return fallback;
+  if (/subscription expired/i.test(message)) return t("subscription_expired_connect");
+  if (/vpn tunnel stopped|vpn process stopped|xray/i.test(message)) {
+    return t("vpn_error_tunnel_stopped");
+  }
+  if (isTechnicalVpnErrorMessage(message)) return fallback;
+  return message.slice(0, 200);
+}
+
 export async function connectVpn(server: ServerVpnConfig): Promise<void> {
   return connectVpnInternal(server, true);
 }
@@ -267,7 +294,7 @@ async function connectVpnInternal(
     server.address === "127.0.0.1" ||
     server.address === "0.0.0.0"
   ) {
-    const msg = "Subscription expired. Renew it to connect.";
+    const msg = t("subscription_expired_connect");
     setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
     throw new Error(msg);
   }
@@ -276,7 +303,7 @@ async function connectVpnInternal(
   // and even if some other code path supplies a real server, the panel
   // won't authorize the session — fail fast with a friendly error.
   if (getSession().userPlan === "EXPIRED") {
-    const msg = "Subscription expired. Renew it to connect.";
+    const msg = t("subscription_expired_connect");
     setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
     throw new Error(msg);
   }
@@ -332,7 +359,7 @@ async function connectVpnInternal(
     startPolling();
     startTunnelHealthCheck(gen);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = userFacingVpnError(e);
     if (gen === connectionGeneration) {
       if (serverStartAttempted) {
         await recordServerConnectionFailure(serverToStart);
@@ -443,7 +470,7 @@ async function recoverTunnelAfterHealthFailure(gen: number): Promise<void> {
   if (gen !== connectionGeneration || !state.connected) return;
   const server = currentServerForRecovery;
   if (!server || watchdogRecoveryAttempts >= MAX_TUNNEL_RECOVERY_ATTEMPTS) {
-    await stopVpnWithError("VPN tunnel stopped forwarding traffic");
+    await stopVpnWithError(t("vpn_error_tunnel_stopped"));
     return;
   }
 
@@ -477,7 +504,7 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
     if (gen !== connectionGeneration) return;
     await connectVpnInternal(server, true);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = userFacingVpnError(e);
     if (gen === connectionGeneration) {
       setState({ connected: false, connecting: false, disconnecting: false, lastError: msg });
     }
@@ -583,6 +610,9 @@ function ensureVpnDiedListener() {
   if (vpnDiedListenerRegistered) return;
   vpnDiedListenerRegistered = true;
   listen<string>("vpn-died", (event) => {
+    if (event.payload) {
+      console.warn("[VPN] process stopped unexpectedly:", event.payload);
+    }
     const failedServer = currentServerForRecovery;
     connectionGeneration++;
     currentServerForRecovery = null;
@@ -598,7 +628,7 @@ function ensureVpnDiedListener() {
       disconnecting: false,
       sessionStartTime: null,
       sessionBytes: 0,
-      lastError: event.payload || "VPN process stopped unexpectedly",
+      lastError: t("vpn_error_tunnel_stopped"),
     });
     statsSessionEnd();
     if (failedServer) {

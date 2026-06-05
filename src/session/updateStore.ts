@@ -14,6 +14,7 @@ import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { t } from "../i18n";
 
 export interface DesktopUpdateInfo {
   version: string;
@@ -271,15 +272,15 @@ export async function startUpdateDownload(): Promise<void> {
       setState({ kind: "ready", info });
       await relaunch();
     } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
-      setState({ kind: "failed", reason, info });
+      console.warn("[updateStore] Linux update install failed:", e);
+      setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
     }
     return;
   }
 
   const update = cachedUpdate ?? (await check());
   if (!update) {
-    setState({ kind: "failed", reason: "No update available", info });
+    setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
     return;
   }
 
@@ -331,8 +332,8 @@ export async function startUpdateDownload(): Promise<void> {
     setState({ kind: "ready", info });
     await relaunch();
   } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
-    setState({ kind: "failed", reason, info });
+    console.warn("[updateStore] update download/install failed:", e);
+    setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
   }
 }
 

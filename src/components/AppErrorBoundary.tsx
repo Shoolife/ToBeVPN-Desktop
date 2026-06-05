@@ -39,7 +39,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
             {t("servers_load_error")}
           </div>
           <div className="app-error__details">
-            {this.state.error.message || "Unknown error"}
+            {t("app_error_details")}
           </div>
           <button className="cta-pill" onClick={this.handleReload}>
             {t("language_restart_button")}

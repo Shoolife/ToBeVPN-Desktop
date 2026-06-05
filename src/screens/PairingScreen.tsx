@@ -298,8 +298,21 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
 }
 
 function messageOf(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return String(e);
+  const message = e instanceof Error ? e.message : String(e);
+  if (
+    /forbidden:\s*not authorized/i.test(message) ||
+    /"errorCode"\s*:\s*403/i.test(message) ||
+    /clienterror/i.test(message) ||
+    /fallback route rejected/i.test(message) ||
+    /network request failed/i.test(message) ||
+    /request timed out/i.test(message) ||
+    /not authorized/i.test(message) ||
+    /not authenticated/i.test(message) ||
+    /http\s*403/i.test(message)
+  ) {
+    return t("pairing_load_error");
+  }
+  return message.trim() ? message : t("pairing_load_error");
 }
 
 function createPairingDeepLink(code: string): string {

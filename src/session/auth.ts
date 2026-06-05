@@ -1022,6 +1022,25 @@ function paymentLooksApplied(pending: PendingPurchaseState, session: Session): b
 
 type DeviceLinkStatus = "linked" | "missing" | "unknown";
 
+function isRemoteDeviceUnlinkedError(error: unknown): boolean {
+  if (!(error instanceof ApiHttpError)) return false;
+  const message = error.message.trim().toLocaleLowerCase("en-US");
+  if (!message) return false;
+  if (error.status === 400) {
+    return (
+      message.includes("telegram_id is required") ||
+      message.includes("current device session is not linked")
+    );
+  }
+  if (error.status === 403) {
+    return (
+      message.includes("telegram_id not authenticated") ||
+      message.includes("current device session is not linked")
+    );
+  }
+  return false;
+}
+
 /**
  * Check whether the current device session is still linked server-side.
  * This must stay read-only: subscription/HWID pings can create or refresh
@@ -1039,8 +1058,7 @@ async function checkCurrentDeviceLinkStatus(): Promise<DeviceLinkStatus> {
       ? "linked"
       : "missing";
   } catch (error) {
-    if (error instanceof ApiHttpError && error.status === 403) return "missing";
-    return "unknown";
+    return isRemoteDeviceUnlinkedError(error) ? "missing" : "unknown";
   }
 }
 

@@ -44,6 +44,9 @@ const httpFetch: typeof fetch = import.meta.env.DEV ? window.fetch.bind(window) 
 
 type AuthMode = "access" | "none";
 const DEVICE_ID_NAMESPACE = "tobevpn:desktop:device-id:v1";
+const DIRECT_AUTH_HEADER = "Authorization";
+const FALLBACK_AUTH_PREFIX = ["X", "Proxy"].join("-");
+const FALLBACK_AUTH_HEADER = `${FALLBACK_AUTH_PREFIX}-${DIRECT_AUTH_HEADER}`;
 
 export class ApiHttpError extends Error {
   constructor(
@@ -137,7 +140,11 @@ function runTokenOperation(
 }
 
 function isInvalidSessionTokenError(error: unknown): boolean {
-  return error instanceof ApiHttpError && (error.status === 401 || error.status === 403);
+  return error instanceof ApiHttpError && isInvalidSessionStatus(error.status);
+}
+
+function isInvalidSessionStatus(status: number): boolean {
+  return status === 401 || status === 403;
 }
 
 // Single attempt against one base URL with its own abort controller. Lifting
@@ -195,14 +202,16 @@ function firstSuccessful<T>(promises: Promise<T>[]): Promise<T> {
 async function fallbackFirstFetch(
   primaryUrl: string,
   fallbackUrl: string,
-  init: RequestInit,
+  primaryInit: RequestInit,
+  fallbackInit: RequestInit,
   userSignal: AbortSignal | null | undefined,
 ): Promise<Response> {
   try {
-    return await attemptFetch(fallbackUrl, init, FALLBACK_TIMEOUT_MS, userSignal);
+    const response = await attemptFetch(fallbackUrl, fallbackInit, FALLBACK_TIMEOUT_MS, userSignal);
+    return await rejectProxyGatewayAuthError(response);
   } catch (fallbackError) {
     if (userSignal?.aborted) throw fallbackError;
-    const response = await attemptFetch(primaryUrl, init, PRIMARY_TIMEOUT_MS, userSignal);
+    const response = await attemptFetch(primaryUrl, primaryInit, PRIMARY_TIMEOUT_MS, userSignal);
     primaryUnavailableUntil = 0;
     return response;
   }
@@ -211,7 +220,8 @@ async function fallbackFirstFetch(
 async function hedgedGetFetch(
   primaryUrl: string,
   fallbackUrl: string,
-  init: RequestInit,
+  primaryInit: RequestInit,
+  fallbackInit: RequestInit,
   userSignal: AbortSignal | null | undefined,
 ): Promise<Response> {
   type HedgedResponse = {
@@ -233,7 +243,7 @@ async function hedgedGetFetch(
 
   const primaryPromise: Promise<HedgedResponse> = attemptFetch(
     primaryUrl,
-    init,
+    primaryInit,
     PRIMARY_TIMEOUT_MS,
     primaryController.signal,
   ).then((response) => {
@@ -245,12 +255,13 @@ async function hedgedGetFetch(
   });
   const fallbackPromise: Promise<HedgedResponse> = (async () => {
     await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    return attemptFetch(
+    const response = await attemptFetch(
       fallbackUrl,
-      init,
+      fallbackInit,
       FALLBACK_TIMEOUT_MS,
       fallbackController.signal,
     );
+    return await rejectProxyGatewayAuthError(response);
   })().then((response) => ({ source: "fallback" as const, response }));
 
   try {
@@ -270,6 +281,33 @@ async function hedgedGetFetch(
   }
 }
 
+function splitPrimaryFallbackInit(init: RequestInit, headers: Headers): {
+  primaryInit: RequestInit;
+  fallbackInit: RequestInit;
+} {
+  const primaryHeaders = new Headers(headers);
+  primaryHeaders.delete(FALLBACK_AUTH_HEADER);
+
+  const fallbackHeaders = new Headers(headers);
+  const bearer = fallbackHeaders.get(DIRECT_AUTH_HEADER);
+  fallbackHeaders.delete(DIRECT_AUTH_HEADER);
+  fallbackHeaders.delete(FALLBACK_AUTH_HEADER);
+  if (bearer) {
+    fallbackHeaders.set(FALLBACK_AUTH_HEADER, bearer);
+  }
+
+  return {
+    primaryInit: { ...init, headers: primaryHeaders },
+    fallbackInit: { ...init, headers: fallbackHeaders },
+  };
+}
+
+async function rejectProxyGatewayAuthError(response: Response): Promise<Response> {
+  if (response.status !== FALLBACK_HTTP_STATUS) return response;
+  if (!(await isProxyGatewayAuthError(response))) return response;
+  throw new Error("Fallback route rejected request");
+}
+
 async function performFetch(
   path: string,
   init: RequestInit = {},
@@ -286,7 +324,7 @@ async function performFetch(
   }
 
   const userSignal = init.signal ?? null;
-  const baseInit: RequestInit = { ...init, headers };
+  const { primaryInit, fallbackInit } = splitPrimaryFallbackInit(init, headers);
   const primaryUrl = buildUrl(path, query, BOT_API_BASE_URL);
   const fallbackUrl = BOT_API_FALLBACK_URL
     ? buildFallbackBotUrl(path, query, BOT_API_FALLBACK_URL)
@@ -294,17 +332,17 @@ async function performFetch(
   const method = (init.method ?? "GET").toUpperCase();
 
   if (fallbackUrl && primaryUnavailableUntil > Date.now()) {
-    return fallbackFirstFetch(primaryUrl, fallbackUrl, baseInit, userSignal);
+    return fallbackFirstFetch(primaryUrl, fallbackUrl, primaryInit, fallbackInit, userSignal);
   }
 
   if (fallbackUrl && (method === "GET" || method === "HEAD")) {
-    return hedgedGetFetch(primaryUrl, fallbackUrl, baseInit, userSignal);
+    return hedgedGetFetch(primaryUrl, fallbackUrl, primaryInit, fallbackInit, userSignal);
   }
 
   try {
     return await attemptFetch(
       primaryUrl,
-      baseInit,
+      primaryInit,
       BOT_API_FALLBACK_URL ? PRIMARY_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
       userSignal,
     );
@@ -314,12 +352,35 @@ async function performFetch(
     console.warn(`[bot-api] primary request to ${path} failed, retrying via fallback`);
     if (!fallbackUrl) throw primaryError;
     primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
-    return await attemptFetch(
+    const response = await attemptFetch(
       fallbackUrl,
-      baseInit,
+      fallbackInit,
       FALLBACK_TIMEOUT_MS,
       userSignal,
     );
+    return await rejectProxyGatewayAuthError(response);
+  }
+}
+
+async function isProxyGatewayAuthError(response: Response): Promise<boolean> {
+  if (response.status !== FALLBACK_HTTP_STATUS) return false;
+  try {
+    const text = await response.clone().text();
+    if (!text) return false;
+    const parsed = JSON.parse(text) as {
+      errorCode?: unknown;
+      errorMessage?: unknown;
+      errorType?: unknown;
+    };
+    const message = typeof parsed.errorMessage === "string" ? parsed.errorMessage : "";
+    const type = typeof parsed.errorType === "string" ? parsed.errorType : "";
+    return (
+      parsed.errorCode === FALLBACK_HTTP_STATUS &&
+      /forbidden:\s*not authorized/i.test(message) &&
+      /clienterror/i.test(type)
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -331,11 +392,13 @@ async function parseErrorMessage(response: Response): Promise<string> {
     const text = await response.text();
     if (!text) return `HTTP ${response.status}`;
     try {
-      const parsed = JSON.parse(text) as { message?: string; detail?: string };
+      const parsed = JSON.parse(text) as { message?: string; detail?: string; errorMessage?: string };
       if (typeof parsed.message === "string" && parsed.message.trim())
         return publicErrorMessage(parsed.message);
       if (typeof parsed.detail === "string" && parsed.detail.trim())
         return publicErrorMessage(parsed.detail);
+      if (typeof parsed.errorMessage === "string" && parsed.errorMessage.trim())
+        return publicErrorMessage(parsed.errorMessage);
     } catch {
       // Not JSON — fall back to raw text.
     }
@@ -526,7 +589,7 @@ async function request<T>(
   init: RequestInit = {},
   query?: Record<string, string | number | undefined>,
   authMode: AuthMode = "access",
-  retryOn401 = true,
+  retryOnAuthFailure = true,
 ): Promise<T> {
   const headers = new Headers(init.headers);
   let accessToken: string | null = null;
@@ -534,12 +597,16 @@ async function request<T>(
   if (authMode === "access") {
     accessToken = await getAccessTokenForRequest();
     if (accessToken) {
-      headers.set("Authorization", `Bearer ${accessToken}`);
+      headers.set(DIRECT_AUTH_HEADER, `Bearer ${accessToken}`);
     }
   }
 
   const response = await performFetch(path, { ...init, headers }, query);
-  if (response.status === 401 && authMode === "access" && retryOn401) {
+  if (
+    isInvalidSessionStatus(response.status) &&
+    authMode === "access" &&
+    retryOnAuthFailure
+  ) {
     const recoveredToken = await recoverAccessTokenAfter401(accessToken);
     if (recoveredToken) {
       return request(path, init, query, authMode, false);

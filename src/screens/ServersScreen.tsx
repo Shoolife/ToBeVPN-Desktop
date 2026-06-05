@@ -43,6 +43,11 @@ function pingColor(ping: number): string {
   return "#F44336";
 }
 
+function loadErrorText(error: unknown): string {
+  console.warn("[servers] load failed", error);
+  return t("servers_load_error_details");
+}
+
 export default function ServersScreen({
   onBack,
   onSelect,
@@ -142,7 +147,7 @@ export default function ServersScreen({
       showServers(vpnServers);
     } catch (e) {
       if (cachedServers.length === 0) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(loadErrorText(e));
         setServers([]);
       }
     } finally {
