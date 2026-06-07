@@ -222,13 +222,18 @@ export default function HomeScreen({
   // Ping for the selected server (refreshed when selection changes).
   const [ping, setPing] = useState(0);
 
-  const isPaidOrAdmin = session.userPlan === "PAID" || session.userPlan === "ADMIN";
   const reminder = subscriptionReminder(session.userPlan, session.planExpiresAt);
   const reminderKey = `${session.userPlan}:${session.planExpiresAt ?? ""}`;
   const showSubscriptionReminder =
     !subscriptionUsageBlocked &&
     reminder !== null &&
     dismissedReminderKey !== reminderKey;
+  const subscriptionTrafficUsedBytes = Math.max(0, session.trafficUsedBytes);
+  const subscriptionTrafficLimitBytes = Math.max(0, session.trafficLimitBytes);
+  const hasSubscriptionTrafficLimit = subscriptionTrafficLimitBytes > 0;
+  const subscriptionTrafficProgress = hasSubscriptionTrafficLimit
+    ? Math.min(subscriptionTrafficUsedBytes / subscriptionTrafficLimitBytes, 1)
+    : 0;
 
   useEffect(() => {
     // Force-sync on mount so the block state lands before the user can act,
@@ -544,40 +549,16 @@ export default function HomeScreen({
             </svg>
           </div>
 
-          {isPaidOrAdmin ? (
-            <div className="home-session__metrics">
-              <div className="home-session__metric">
-                <div className="home-session__value">{formatSessionBytes(session.trafficUsedBytes + sessionBytes)}</div>
-                <div className="home-session__label">{t("downloaded")}</div>
-              </div>
-              <div className="home-session__metric">
-                <div className="home-session__value">{formatElapsed(elapsed)}</div>
-                <div className="home-session__label">{t("session_time")}</div>
-              </div>
+          <div className="home-session__metrics">
+            <div className="home-session__metric">
+              <div className="home-session__value">{formatSessionBytes(sessionBytes)}</div>
+              <div className="home-session__label">{t("downloaded")}</div>
             </div>
-          ) : (
-            <>
-              <div className="home-traffic__row">
-                <span className="home-traffic__label">{t("traffic")}</span>
-                <span className="home-traffic__label">
-                  {session.trafficLimitBytes > 0
-                    ? `${formatTrafficBytes(session.trafficUsedBytes + sessionBytes)} / ${formatTrafficBytes(session.trafficLimitBytes)}`
-                    : formatTrafficBytes(session.trafficUsedBytes + sessionBytes)}
-                </span>
-              </div>
-              {session.trafficLimitBytes > 0 && (
-                <div className="home-progress" style={{ marginTop: 6 }}>
-                  <div
-                    className="home-progress__fill"
-                    style={{
-                      width: `${Math.min(((session.trafficUsedBytes + sessionBytes) / session.trafficLimitBytes) * 100, 100)}%`,
-                      background: trafficProgressColor((session.trafficUsedBytes + sessionBytes) / session.trafficLimitBytes),
-                    }}
-                  />
-                </div>
-              )}
-            </>
-          )}
+            <div className="home-session__metric">
+              <div className="home-session__value">{formatElapsed(elapsed)}</div>
+              <div className="home-session__label">{t("session_time")}</div>
+            </div>
+          </div>
         </div>
 
         {/* Speed test card */}
@@ -638,6 +619,25 @@ export default function HomeScreen({
                     : planHint(session.userPlan, session.planExpiresAt)}
                 </div>
               </div>
+              {hasSubscriptionTrafficLimit && (
+                <div className="home-sub-usage" aria-label={t("traffic")}>
+                  <div
+                    className="home-sub-usage__value"
+                    title={`${formatTrafficBytes(subscriptionTrafficUsedBytes)} / ${formatTrafficBytes(subscriptionTrafficLimitBytes)}`}
+                  >
+                    {formatTrafficBytes(subscriptionTrafficUsedBytes)} / {formatTrafficBytes(subscriptionTrafficLimitBytes)}
+                  </div>
+                  <div className="home-sub-usage__progress">
+                    <div
+                      className="home-sub-usage__fill"
+                      style={{
+                        width: `${subscriptionTrafficProgress * 100}%`,
+                        background: trafficProgressColor(subscriptionTrafficProgress),
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
               <svg className="home-card__arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="9 18 15 12 9 6"/>
               </svg>

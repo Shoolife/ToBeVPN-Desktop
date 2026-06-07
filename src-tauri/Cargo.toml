@@ -1,6 +1,6 @@
 [package]
 name = "tobevpn-desktop"
-version = "1.0.40"
+version = "1.0.41"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
