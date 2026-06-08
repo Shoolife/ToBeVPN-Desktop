@@ -552,7 +552,7 @@ export default function HomeScreen({
           <div className="home-session__metrics">
             <div className="home-session__metric">
               <div className="home-session__value">{formatSessionBytes(sessionBytes)}</div>
-              <div className="home-session__label">{t("downloaded")}</div>
+              <div className="home-session__label">{t("traffic")}</div>
             </div>
             <div className="home-session__metric">
               <div className="home-session__value">{formatElapsed(elapsed)}</div>
