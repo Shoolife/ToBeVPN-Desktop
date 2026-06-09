@@ -16,6 +16,7 @@ import {
   logoutDevice,
   requestAuth,
   registerDevice,
+  resetSubscription,
   saveEmail as apiSaveEmail,
   unlinkDevice,
 } from "../api/client";
@@ -49,7 +50,11 @@ import {
   saveSecureSession,
 } from "./secureSession";
 import { disconnectVpn } from "./vpnState";
-import { pingSubscriptionUrl, type SubscriptionPingResult } from "./subscriptionPinger";
+import {
+  fetchSubscriptionProfile,
+  pingSubscriptionUrl,
+  type SubscriptionProfileResult,
+} from "./subscriptionPinger";
 import { getDeviceFingerprint } from "./fingerprint";
 
 const DEVICE_TYPE = "desktop";
@@ -412,6 +417,7 @@ interface CurrentSubscriptionPlanInfo {
   isTrial: boolean | null;
   isUnlimited: boolean | null;
   hasPlanData: boolean;
+  subscriptionUrl: string | null;
 }
 
 function normalizePlanTrafficLimit(value: number | null | undefined): number | null {
@@ -467,6 +473,7 @@ function currentPlanInfoFromDto(dto: CurrentPlanDto | null | undefined): Current
     isTrial: subscription?.is_trial ?? snapshot?.is_trial ?? null,
     isUnlimited: subscription?.is_unlimited ?? (snapshot?.type ? snapshot.type.toUpperCase() === "UNLIMITED" : null),
     hasPlanData,
+    subscriptionUrl: (subscription?.url ?? "").trim() || null,
   };
 }
 
@@ -795,6 +802,13 @@ export async function pingHwidOnly(): Promise<boolean> {
 async function readOrFetchSubscriptionUrl(shortUuid: string): Promise<string | null> {
   const cached = readCachedSubscriptionUrl(shortUuid);
   if (cached) return cached;
+  if (getSession().isLinked) {
+    const currentPlanInfo = await fetchCurrentSubscriptionPlan();
+    if (currentPlanInfo?.subscriptionUrl) {
+      writeCachedSubscriptionUrl(shortUuid, currentPlanInfo.subscriptionUrl);
+      return currentPlanInfo.subscriptionUrl;
+    }
+  }
   try {
     const subInfo = (await getSubscriptionInfoShared(shortUuid)).response;
     if (!subInfo.is_found || !subInfo.user) {
@@ -847,65 +861,108 @@ async function runSyncSubscription(): Promise<void> {
   const shortUuid = session.shortUuid;
   if (!shortUuid) return;
 
-  let subUser;
-  let subscriptionUrl: string | null = null;
+  let legacySubInfo: PanelSubInfoDto | null = null;
+  let subUser: PanelSubInfoDto["user"] = null;
+  let subscriptionUrl: string | null =
+    currentPlanInfo?.subscriptionUrl ??
+    panelUser?.subscription_url ??
+    readCachedSubscriptionUrl(shortUuid);
   let serverLinks: string[] = [];
-  try {
-    const subInfo = (await getSubscriptionInfoShared(shortUuid)).response;
-    if (!subInfo.is_found || !subInfo.user) {
-      writeCachedSubscriptionUrl(shortUuid, null);
-      clearVpnServersMemoryCache(shortUuid);
-      updateSession({
-        userPlan: "EXPIRED",
-        planDisplayName: null,
-        planExpiresAt: null,
-        trafficLimitBytes: 0,
-        trafficUsedBytes: 0,
-      });
-      return;
+  let profileResult: SubscriptionProfileResult | null = null;
+
+  const loadLegacyInfo = async (): Promise<PanelSubInfoDto | null> => {
+    const info = (await getSubscriptionInfoShared(shortUuid)).response;
+    if (!info.is_found || !info.user) return null;
+    return info;
+  };
+
+  // Keep the old JSON endpoint only as a compatibility path for metadata or
+  // older sessions that don't yet expose a subscription URL.
+  if (!subscriptionUrl || (!currentPlanInfo && !panelUser)) {
+    try {
+      legacySubInfo = await loadLegacyInfo();
+      subUser = legacySubInfo?.user ?? null;
+      subscriptionUrl = subscriptionUrl ?? legacySubInfo?.subscription_url ?? null;
+      serverLinks = legacySubInfo?.links ?? [];
+    } catch {
+      if (!subscriptionUrl) return;
     }
-    subUser = subInfo.user;
-    subscriptionUrl = subInfo.subscription_url ?? panelUser?.subscription_url ?? null;
-    serverLinks = subInfo.links ?? [];
-  } catch {
+  }
+
+  if (subscriptionUrl) {
+    try {
+      profileResult = await fetchSubscriptionProfile(subscriptionUrl);
+    } catch {
+      profileResult = null;
+    }
+  }
+
+  if (profileResult) {
+    setSubscriptionUsageBlocked(shortUuid, profileResult.isUsageBlocked);
+    setUpdateRequired(profileResult.isUpdateRequired);
+    writeSubSyncState(profileResult.intervalMs);
+    if (profileResult.links.length > 0) {
+      serverLinks = profileResult.links;
+    } else if (profileResult.isSuccessful || profileResult.isUsageBlocked) {
+      serverLinks = [];
+    }
+  } else if (subscriptionUrl) {
+    clearSubSyncTimestamp();
+  }
+
+  if (!subUser && !currentPlanInfo && !legacySubInfo) {
+    try {
+      legacySubInfo = await loadLegacyInfo();
+      subUser = legacySubInfo?.user ?? null;
+      subscriptionUrl = subscriptionUrl ?? legacySubInfo?.subscription_url ?? null;
+      if (serverLinks.length === 0) serverLinks = legacySubInfo?.links ?? [];
+    } catch {
+      // Keep profile-derived links/traffic if legacy metadata is unavailable.
+    }
+  }
+
+  if (!subscriptionUrl && !subUser && !currentPlanInfo) {
+    writeCachedSubscriptionUrl(shortUuid, null);
+    clearVpnServersMemoryCache(shortUuid);
+    updateSession({
+      userPlan: "EXPIRED",
+      planDisplayName: null,
+      planExpiresAt: null,
+      trafficLimitBytes: 0,
+      trafficUsedBytes: 0,
+    });
     return;
   }
 
-  // Direct hit on the panel's public sub URL with HWID headers — only request
-  // the panel actually parses for HWID device tracking. The response also
-  // carries the panel-recommended auto-refresh cadence (`profile-update-interval`),
-  // which we feed back into the throttle window. We await it (rather than
-  // fire-and-forget as before) so the throttle bookkeeping below sees the
-  // fresh interval — pingSubscriptionUrl already enforces its own timeout.
-  let pingResult: SubscriptionPingResult | null = null;
-  try {
-    pingResult = await pingSubscriptionUrl(subscriptionUrl);
-  } catch {
-    // ignore — pingSubscriptionUrl swallows its own errors and returns null
-  }
-  if (pingResult) {
-    setSubscriptionUsageBlocked(shortUuid, pingResult.isUsageBlocked);
-    writeSubSyncState(pingResult.intervalMs);
-    // HWID binding can change the effective links while preserving the same
-    // visible server address. Refresh links after the tagged subscription hit.
-    try {
-      const refreshed = (await getSubscriptionInfoShared(shortUuid)).response;
-      if (refreshed.is_found && refreshed.user) {
-        serverLinks = refreshed.links ?? serverLinks;
-        subscriptionUrl = refreshed.subscription_url ?? subscriptionUrl;
-      }
-    } catch {
-      // Keep the pre-ping links if the follow-up read is unavailable.
-    }
-  } else {
-    clearSubSyncTimestamp();
-  }
   writeCachedSubscriptionUrl(shortUuid, subscriptionUrl);
-  if (pingResult?.isUsageBlocked) {
+  if (profileResult?.isUsageBlocked) {
     clearVpnServersMemoryCache(shortUuid);
-  } else {
+  } else if (serverLinks.length > 0 || profileResult?.isSuccessful) {
     cacheVpnServersFromLinks(shortUuid, serverLinks);
   }
+
+  if (!subUser && currentPlanInfo) {
+    updateSession({
+      userPlan: resolvePlanFromCurrentPlan(session.userPlan, currentPlanInfo),
+      planDisplayName:
+        currentPlanInfo.displayName ??
+        (session.userPlan !== "EXPIRED" ? session.planDisplayName : null),
+      planExpiresAt: currentPlanInfo.expiresAtMillis,
+      trafficLimitBytes:
+        profileResult?.trafficLimitBytes ??
+        currentPlanInfo.trafficLimitBytes ??
+        session.trafficLimitBytes,
+      trafficUsedBytes: profileResult?.trafficUsedBytes ?? session.trafficUsedBytes,
+    });
+    try {
+      await registerCurrentDevice();
+    } catch {
+      // ignore
+    }
+    return;
+  }
+
+  if (!subUser) return;
 
   const isActive = subUser.is_active && subUser.user_status === "ACTIVE";
   const cachedPlan = session.userPlan;
@@ -935,8 +992,13 @@ async function runSyncSubscription(): Promise<void> {
   }
 
   const expiresAtMillis = currentPlanInfo?.expiresAtMillis ?? parseExpiresAtMillis(subUser.expires_at);
-  const trafficLimitBytes = currentPlanInfo?.trafficLimitBytes ?? (Number(subUser.traffic_limit_bytes) || 0);
-  const trafficUsedBytes = Number(subUser.traffic_used_bytes) || 0;
+  const trafficLimitBytes =
+    profileResult?.trafficLimitBytes ??
+    currentPlanInfo?.trafficLimitBytes ??
+    (Number(subUser.traffic_limit_bytes) || 0);
+  const trafficUsedBytes =
+    profileResult?.trafficUsedBytes ??
+    (Number(subUser.traffic_used_bytes) || 0);
 
   updateSession({
     userPlan: plan,
@@ -1184,6 +1246,40 @@ export async function unlinkOtherDevice(deviceId: string): Promise<void> {
   if (!isLinked) throw new Error("Not authenticated");
   const res = await unlinkDevice({ device_id: deviceId });
   if (!res.success) throw new Error(res.message ?? "Could not unlink device");
+  await resetSubscriptionAfterDeviceUnlink();
+}
+
+async function resetSubscriptionAfterDeviceUnlink(): Promise<void> {
+  const session = getSession();
+  const oldShortUuid = session.shortUuid;
+  if (!oldShortUuid) return;
+
+  const res = await resetSubscription(oldShortUuid);
+  if (!res.success || !res.data) {
+    throw new Error(res.message ?? "Could not reset subscription link");
+  }
+
+  const data = res.data;
+  const nextShortUuid = data.short_uuid?.trim() || oldShortUuid;
+  const nextUrl = data.subscription_url?.trim() || null;
+
+  if (nextShortUuid !== oldShortUuid) {
+    writeCachedSubscriptionUrl(oldShortUuid, null);
+    clearVpnServersMemoryCache(oldShortUuid);
+  }
+  writeCachedSubscriptionUrl(nextShortUuid, nextUrl);
+  clearVpnServersMemoryCache(nextShortUuid);
+  clearSubSyncTimestamp();
+
+  updateSession({
+    shortUuid: nextShortUuid,
+    panelUserUuid: data.panel_user_uuid ?? session.panelUserUuid,
+    telegramId: data.telegram_id ?? session.telegramId,
+    trafficLimitBytes: data.traffic_limit_bytes ?? session.trafficLimitBytes,
+    trafficUsedBytes: data.traffic_used_bytes ?? session.trafficUsedBytes,
+  });
+
+  await fetchVpnServers({ skipAccessPing: true }).catch(() => []);
 }
 
 export async function saveEmail(email: string): Promise<void> {
@@ -1407,25 +1503,50 @@ export async function fetchVpnServers(
     return [];
   }
 
-  // The HWID-tagged subscription request can change the effective links for
-  // this device. Read the JSON subscription only after that request completes.
-  const subInfoResponse = await getSubscriptionInfoShared(shortUuid);
-  const subInfo = subInfoResponse.response;
-  if (debug) console.log("[fetchVpnServers] is_found:", subInfo.is_found, "links count:", subInfo.links?.length ?? 0);
-  if (!subInfo.is_found || !subInfo.links?.length) {
+  let links: string[] = [];
+  const subscriptionUrl = await readOrFetchSubscriptionUrl(shortUuid);
+  const profile = await fetchSubscriptionProfile(subscriptionUrl);
+  if (profile) {
+    setSubscriptionUsageBlocked(shortUuid, profile.isUsageBlocked);
+    setUpdateRequired(profile.isUpdateRequired);
+    writeSubSyncState(profile.intervalMs);
+    if (profile.trafficLimitBytes !== null || profile.trafficUsedBytes !== null) {
+      updateSession({
+        trafficLimitBytes: profile.trafficLimitBytes ?? getSession().trafficLimitBytes,
+        trafficUsedBytes: profile.trafficUsedBytes ?? getSession().trafficUsedBytes,
+      });
+    }
+    if (profile.isUsageBlocked) {
+      clearVpnServersMemoryCache(shortUuid);
+      return [];
+    }
+    links = profile.links;
+    if (debug) console.log("[fetchVpnServers] profile links count:", links.length);
+  }
+
+  if (links.length === 0 && !profile?.isSuccessful) {
+    const subInfoResponse = await getSubscriptionInfoShared(shortUuid);
+    const subInfo = subInfoResponse.response;
+    if (debug) console.log("[fetchVpnServers] legacy is_found:", subInfo.is_found, "links count:", subInfo.links?.length ?? 0);
+    if (!subInfo.is_found || !subInfo.links?.length) {
+      clearVpnServersMemoryCache(shortUuid);
+      return [];
+    }
+    writeCachedSubscriptionUrl(shortUuid, subInfo.subscription_url ?? subscriptionUrl);
+    links = subInfo.links;
+  }
+
+  if (links.length === 0) {
     clearVpnServersMemoryCache(shortUuid);
     return [];
   }
 
-  // Drop the panel's "subscription expired" placeholder link. It looks like
-  // a valid VLESS URL to the parser but its uuid is all-zeros and the address
-  // is unreachable — feeding it to xray would crash the tunnel manager.
   const servers = reuseCachedVpnServerMetadata(
     shortUuid,
-    parseVpnServersFromLinks(subInfo.links),
+    parseVpnServersFromLinks(links),
   );
 
-  if (debug) console.log("[fetchVpnServers] Parsed servers:", servers.length, "of", subInfo.links.length);
+  if (debug) console.log("[fetchVpnServers] Parsed servers:", servers.length, "of", links.length);
   const generation = writeVpnServersMemoryCache(shortUuid, servers);
 
   const metadataTask = enrichVpnServersWithNodes(cloneVpnServers(servers));

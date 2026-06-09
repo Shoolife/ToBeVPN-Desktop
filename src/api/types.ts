@@ -212,6 +212,18 @@ export interface CurrentPlanSubscriptionDto {
   device_limit?: number | null;
   created_at?: string | null;
   created_at_ts?: number | null;
+  url?: string | null;
+}
+
+export interface ResetSubscriptionDto {
+  short_uuid?: string | null;
+  panel_user_uuid?: string | null;
+  traffic_limit_bytes?: number | null;
+  traffic_used_bytes?: number | null;
+  anon_traffic_bytes?: number | null;
+  max_devices?: number | null;
+  telegram_id?: number | null;
+  subscription_url?: string | null;
 }
 
 export interface CurrentPlanDto {

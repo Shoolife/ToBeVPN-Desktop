@@ -309,7 +309,7 @@ export default function HomeScreen({
   const vpnError = localError ?? lastError;
 
   const prepareServerForConnect = async (): Promise<SelectedServer | null> => {
-    if (!automaticServerSelection && (!selectedServer || ping < 0)) return null;
+    if (!automaticServerSelection && !selectedServer) return null;
 
     await syncSubscription({ force: true }).catch(() => {});
     const freshServers = (await fetchVpnServers().catch(() => []))
@@ -318,10 +318,8 @@ export default function HomeScreen({
       ? await selectBestVpnServer(freshServers, { forceProbe: true })
       : freshServers.find((server) => isSameServerSelection(selectedServer, server)) ?? null;
     if (!fresh) return null;
-    if (!automaticServerSelection &&
-        await measureVpnServerPing(fresh, { force: true }) < 0
-    ) {
-      return null;
+    if (!automaticServerSelection) {
+      await measureVpnServerPing(fresh, { force: true }).catch(() => -1);
     }
 
     const resolved = toSelectedServer(fresh);

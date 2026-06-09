@@ -246,12 +246,7 @@ export default function ServersScreen({
             </div>
           </div>
           {servers.map((server) => {
-            // ping === 0 means "not measured yet" (initial state before the
-            // probe lands). Keep the row selectable in that state so opening
-            // the list doesn't lock the whole screen until pings finish.
-            // ping < 0 means the probe completed and failed — only then block
-            // the click to avoid switching to a known unreachable server.
-            const clickable = isAvailableVpnServer(server) && server.ping >= 0;
+            const clickable = isAvailableVpnServer(server);
             const selected =
               !automaticServerSelection &&
               clickable &&

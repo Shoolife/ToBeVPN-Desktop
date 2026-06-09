@@ -27,6 +27,7 @@ import type {
   PanelNodeDto,
   PanelResponse,
   PanelSubInfoDto,
+  ResetSubscriptionDto,
   PanelUserDto,
   PurchasePlansDto,
   RefreshRequestDto,
@@ -686,6 +687,12 @@ export function getSubscriptionInfo(
   shortUuid: string,
 ): Promise<PanelResponse<PanelSubInfoDto>> {
   return request(`api/panel/sub/${shortUuid}/info`, { method: "GET" });
+}
+
+export function resetSubscription(
+  shortUuid: string,
+): Promise<ApiResponse<ResetSubscriptionDto>> {
+  return request(`api/panel/sub/${shortUuid}/reset`, { method: "POST" });
 }
 
 export function getCurrentPlan(): Promise<ApiResponse<CurrentPlanDto>> {

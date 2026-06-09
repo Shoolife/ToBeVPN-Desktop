@@ -24,6 +24,7 @@ const FALLBACK_HTTP_STATUS = 403;
 const BLOCK_HEADER = "is-hack";
 const BLOCK_VALUE = "yes";
 const UPDATE_REQUIRED_HEADER = "update-required";
+const SUBSCRIPTION_USERINFO_HEADER = "subscription-userinfo";
 
 let primaryUnavailableUntil = 0;
 
@@ -31,6 +32,13 @@ export interface SubscriptionPingResult {
   intervalMs: number | null;
   isUsageBlocked: boolean;
   isUpdateRequired: boolean;
+}
+
+export interface SubscriptionProfileResult extends SubscriptionPingResult {
+  links: string[];
+  trafficUsedBytes: number | null;
+  trafficLimitBytes: number | null;
+  isSuccessful: boolean;
 }
 
 /**
@@ -47,21 +55,39 @@ export async function pingSubscriptionUrl(
 ): Promise<SubscriptionPingResult | null> {
   if (!subscriptionUrl) return null;
   try {
-    const fp = await getDeviceFingerprint();
-    const headers: HeadersInit = {
-      "x-device-os": fp.platform,
-      "x-ver-os": fp.osVersion,
-      "x-device-model": fp.model,
-      "User-Agent": fp.userAgent,
-    };
-    if (fp.hwid) (headers as Record<string, string>)["x-hwid"] = fp.hwid;
-
+    const headers = await buildSubscriptionHeaders();
     const fallbackUrl = buildFallbackUrl(subscriptionUrl);
     return await primaryThenFallback(subscriptionUrl, fallbackUrl, headers);
   } catch {
     console.warn("[pingSubscriptionUrl] failed");
     return null;
   }
+}
+
+export async function fetchSubscriptionProfile(
+  subscriptionUrl: string | null | undefined,
+): Promise<SubscriptionProfileResult | null> {
+  if (!subscriptionUrl) return null;
+  try {
+    const headers = await buildSubscriptionHeaders();
+    const fallbackUrl = buildFallbackUrl(subscriptionUrl);
+    return await primaryThenFallbackProfile(subscriptionUrl, fallbackUrl, headers);
+  } catch {
+    console.warn("[fetchSubscriptionProfile] failed");
+    return null;
+  }
+}
+
+async function buildSubscriptionHeaders(): Promise<HeadersInit> {
+  const fp = await getDeviceFingerprint();
+  const headers: HeadersInit = {
+    "x-device-os": fp.platform,
+    "x-ver-os": fp.osVersion,
+    "x-device-model": fp.model,
+    "User-Agent": fp.userAgent,
+  };
+  if (fp.hwid) (headers as Record<string, string>)["x-hwid"] = fp.hwid;
+  return headers;
 }
 
 async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
@@ -168,6 +194,72 @@ async function primaryThenFallback(
   return readResult(winner.response);
 }
 
+async function primaryThenFallbackProfile(
+  primaryUrl: string,
+  fallbackUrl: string | null,
+  headers: HeadersInit,
+): Promise<SubscriptionProfileResult> {
+  if (!fallbackUrl) {
+    return readProfileResult(await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS));
+  }
+
+  if (primaryUnavailableUntil > Date.now()) {
+    try {
+      const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      if (await isProxyGatewayAuthError(response)) {
+        throw new Error("Fallback route rejected request");
+      }
+      return readProfileResult(response);
+    } catch {
+      const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
+      primaryUnavailableUntil = 0;
+      return readProfileResult(response);
+    }
+  }
+
+  type HedgedResponse = {
+    source: "primary" | "fallback";
+    response: Response;
+  };
+  let rejectedPrimaryResult: SubscriptionProfileResult | null = null;
+  const primaryPromise: Promise<HedgedResponse> = timedFetch(
+    primaryUrl,
+    headers,
+    PRIMARY_TIMEOUT_MS,
+  ).then(async (response) => {
+    if (response.status === FALLBACK_HTTP_STATUS) {
+      rejectedPrimaryResult = await readProfileResult(response);
+      throw new Error("Primary subscription route rejected request");
+    }
+    return { source: "primary", response };
+  });
+  const fallbackPromise: Promise<HedgedResponse> = (async () => {
+    await delayMs(FALLBACK_HEDGE_DELAY_MS);
+    const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+    if (await isProxyGatewayAuthError(response)) {
+      throw new Error("Fallback route rejected request");
+    }
+    return response;
+  })().then((response) => ({ source: "fallback", response }));
+
+  let winner: HedgedResponse;
+  try {
+    winner = await firstSuccessful([primaryPromise, fallbackPromise]);
+  } catch (error) {
+    if (rejectedPrimaryResult) {
+      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      return rejectedPrimaryResult;
+    }
+    throw error;
+  }
+  if (winner.source === "primary") {
+    primaryUnavailableUntil = 0;
+  } else {
+    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+  }
+  return readProfileResult(winner.response);
+}
+
 async function isProxyGatewayAuthError(response: Response): Promise<boolean> {
   if (response.status !== FALLBACK_HTTP_STATUS) return false;
   try {
@@ -202,9 +294,74 @@ function readResult(response: Response): SubscriptionPingResult {
   };
 }
 
+async function readProfileResult(response: Response): Promise<SubscriptionProfileResult> {
+  const body = await response.text().catch(() => "");
+  const userInfo = readSubscriptionUserInfo(response.headers.get(SUBSCRIPTION_USERINFO_HEADER));
+  return {
+    ...readResult(response),
+    links: parseProfileLinks(body),
+    trafficUsedBytes: userInfo.usedBytes,
+    trafficLimitBytes: userInfo.totalBytes,
+    isSuccessful: response.ok,
+  };
+}
+
 function readUsageBlocked(headers: Headers): boolean {
   const raw = headers.get(BLOCK_HEADER) ?? headers.get("is_hack");
   return raw?.trim().toLowerCase() === BLOCK_VALUE;
+}
+
+function readSubscriptionUserInfo(raw: string | null): {
+  usedBytes: number | null;
+  totalBytes: number | null;
+} {
+  if (!raw) return { usedBytes: null, totalBytes: null };
+  const parts = new Map(
+    raw
+      .split(";")
+      .map((part) => part.trim().split("=", 2))
+      .filter((pair): pair is [string, string] => pair.length === 2)
+      .map(([key, value]) => [key.trim().toLowerCase(), value.trim()]),
+  );
+  const upload = parseIntegerHeader(parts.get("upload"));
+  const download = parseIntegerHeader(parts.get("download"));
+  const total = parseIntegerHeader(parts.get("total"));
+  const used = [upload, download]
+    .filter((value): value is number => value !== null)
+    .reduce((sum, value) => sum + value, 0);
+  return {
+    usedBytes: upload === null && download === null ? null : used,
+    totalBytes: total,
+  };
+}
+
+function parseIntegerHeader(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+}
+
+function parseProfileLinks(body: string): string[] {
+  const direct = extractVlessLinks(body);
+  if (direct.length > 0) return direct;
+  const decoded = decodeBase64Profile(body);
+  return decoded ? extractVlessLinks(decoded) : [];
+}
+
+function extractVlessLinks(text: string): string[] {
+  return Array.from(new Set(text.match(/vless:\/\/[^\s<>"']+/g) ?? []));
+}
+
+function decodeBase64Profile(raw: string): string | null {
+  const compact = raw.replace(/\s+/g, "");
+  if (!compact) return null;
+  const normalized = compact.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), "=");
+  try {
+    return atob(padded);
+  } catch {
+    return null;
+  }
 }
 
 function readIntervalMs(raw: string | null): number | null {

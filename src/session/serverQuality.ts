@@ -312,10 +312,16 @@ export async function selectBestVpnServer(
           a.score - b.score ||
           a.server.ping - b.server.ping ||
           a.server.name.localeCompare(b.server.name),
-      );
+    );
     return ranked[0]?.server ?? null;
   };
-  return rank(candidates) ?? rank(available);
+  return (
+    rank(candidates) ??
+    rank(available) ??
+    (candidates[0]
+      ? { ...candidates[0], ping: pings.get(candidates[0].id) ?? -1 }
+      : null)
+  );
 }
 
 export function recordServerConnectionSuccess(server: ServerQualityIdentity): Promise<void> {

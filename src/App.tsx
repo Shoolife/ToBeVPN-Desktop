@@ -413,7 +413,7 @@ export default function App() {
             onSelect={(vpnServer) => {
               // Keep a second guard behind ServersScreen so a stale click
               // cannot persist or live-switch to a server that just went down.
-              if (!isAvailableVpnServer(vpnServer) || vpnServer.ping < 0) return;
+              if (!isAvailableVpnServer(vpnServer)) return;
               const server = toSelectedServer(vpnServer);
               const prev = selectedServer;
               automaticServerSelectionRef.current = false;
