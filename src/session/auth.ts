@@ -11,7 +11,6 @@ import {
   getDevices as apiGetDevices,
   getNodes as apiGetNodes,
   getPurchasePlans as apiGetPurchasePlans,
-  getSubscriptionInfo,
   getUserByTelegramId,
   logoutDevice,
   requestAuth,
@@ -26,8 +25,6 @@ import type {
   LinkedDeviceDto,
   LinkedDevicesDto,
   PanelNodeDto,
-  PanelResponse,
-  PanelSubInfoDto,
   PanelUserDto,
   PurchasePlansDto,
   TvPairStatusDto,
@@ -92,11 +89,9 @@ const PURCHASE_PENDING_MAX_AGE_MS = 30 * 60 * 1000;
 const SERVER_METADATA_TIMEOUT_MS = 250;
 
 // Single in-flight syncSubscription. Concurrent callers (vpnState.connectVpn,
-// HomeScreen useEffect, manual refresh) all await the same promise so we
-// never fire two parallel /api/panel/sub/.../info round-trips.
+// HomeScreen useEffect, manual refresh) all await the same promise.
 let syncInFlight: Promise<void> | null = null;
 let pendingPurchaseRefresh: Promise<void> | null = null;
-const subscriptionInfoInFlight = new Map<string, Promise<PanelResponse<PanelSubInfoDto>>>();
 let vpnServersMemoryCache: {
   shortUuid: string;
   servers: VpnServer[];
@@ -249,19 +244,6 @@ function clearSubSyncTimestamp(): void {
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function getSubscriptionInfoShared(shortUuid: string): Promise<PanelResponse<PanelSubInfoDto>> {
-  const existing = subscriptionInfoInFlight.get(shortUuid);
-  if (existing) return existing;
-
-  const task = getSubscriptionInfo(shortUuid).finally(() => {
-    if (subscriptionInfoInFlight.get(shortUuid) === task) {
-      subscriptionInfoInFlight.delete(shortUuid);
-    }
-  });
-  subscriptionInfoInFlight.set(shortUuid, task);
-  return task;
 }
 
 function readPendingPurchaseState(): PendingPurchaseState | null {
@@ -613,23 +595,10 @@ function deviceMatchesAliases(device: LinkedDeviceDto, aliases: string[]): boole
 }
 
 export async function unlinkCurrentDevice(): Promise<void> {
-  const aliases = await getCurrentDeviceAliases();
-  let lastError: Error | null = null;
-  let succeeded = false;
-  for (const deviceId of aliases) {
-    try {
-      const res = await unlinkDevice({ device_id: deviceId });
-      if (res.success) {
-        succeeded = true;
-        continue;
-      }
-      lastError = new Error(res.message ?? "Could not unlink device");
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error("Could not unlink device");
-    }
-  }
-  if (succeeded) return;
-  throw lastError ?? new Error("Could not unlink device");
+  const deviceId = getSession().deviceId.trim();
+  if (!deviceId) throw new Error("Current device identity is missing");
+  const res = await unlinkDevice({ device_id: deviceId });
+  if (!res.success) throw new Error(res.message ?? "Could not unlink device");
 }
 
 export interface PairingCode {
@@ -776,20 +745,17 @@ export function startPendingPurchaseRefreshIfNeeded(): void {
 }
 
 /**
- * Bare HWID-marker ping — used by the connect path so the panel registers
- * the device on every VPN start. It prefers the subscription URL cached by
- * syncSubscription, but resolves it through the JSON panel endpoint when the
- * cache is empty. Otherwise a fresh install / startup race could connect
- * before the access-block header is ever checked.
+ * Bare HWID-marker ping used by the connect path so the subscription service
+ * sees the device on every VPN start. A cached full URL is preferred; the
+ * pinger can reconstruct the direct URL from the subscription key.
  */
 export async function pingHwidOnly(): Promise<boolean> {
   const shortUuid = getSession().shortUuid;
   const wasBlocked = isSubscriptionUsageBlocked(shortUuid);
   if (!shortUuid) return wasBlocked;
-  const url = await readOrFetchSubscriptionUrl(shortUuid);
-  if (!url) return wasBlocked;
+  const url = await readSubscriptionUrl(shortUuid);
   try {
-    const result = await pingSubscriptionUrl(url);
+    const result = await pingSubscriptionUrl(url, shortUuid);
     if (!result) return wasBlocked;
     setSubscriptionUsageBlocked(shortUuid, result.isUsageBlocked);
     setUpdateRequired(result.isUpdateRequired);
@@ -799,7 +765,7 @@ export async function pingHwidOnly(): Promise<boolean> {
   }
 }
 
-async function readOrFetchSubscriptionUrl(shortUuid: string): Promise<string | null> {
+async function readSubscriptionUrl(shortUuid: string): Promise<string | null> {
   const cached = readCachedSubscriptionUrl(shortUuid);
   if (cached) return cached;
   if (getSession().isLinked) {
@@ -809,25 +775,7 @@ async function readOrFetchSubscriptionUrl(shortUuid: string): Promise<string | n
       return currentPlanInfo.subscriptionUrl;
     }
   }
-  try {
-    const subInfo = (await getSubscriptionInfoShared(shortUuid)).response;
-    if (!subInfo.is_found || !subInfo.user) {
-      writeCachedSubscriptionUrl(shortUuid, null);
-      if (getSession().shortUuid === shortUuid) {
-        updateSession({
-          userPlan: "EXPIRED",
-          planExpiresAt: null,
-          trafficLimitBytes: 0,
-          trafficUsedBytes: 0,
-        });
-      }
-      return null;
-    }
-    writeCachedSubscriptionUrl(shortUuid, subInfo.subscription_url);
-    return subInfo.subscription_url;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 async function runSyncSubscription(): Promise<void> {
@@ -861,87 +809,36 @@ async function runSyncSubscription(): Promise<void> {
   const shortUuid = session.shortUuid;
   if (!shortUuid) return;
 
-  let legacySubInfo: PanelSubInfoDto | null = null;
-  let subUser: PanelSubInfoDto["user"] = null;
-  let subscriptionUrl: string | null =
+  const subscriptionUrl: string | null =
     currentPlanInfo?.subscriptionUrl ??
     panelUser?.subscription_url ??
     readCachedSubscriptionUrl(shortUuid);
-  let serverLinks: string[] = [];
+  if (subscriptionUrl) writeCachedSubscriptionUrl(shortUuid, subscriptionUrl);
+
   let profileResult: SubscriptionProfileResult | null = null;
-
-  const loadLegacyInfo = async (): Promise<PanelSubInfoDto | null> => {
-    const info = (await getSubscriptionInfoShared(shortUuid)).response;
-    if (!info.is_found || !info.user) return null;
-    return info;
-  };
-
-  // Keep the old JSON endpoint only as a compatibility path for metadata or
-  // older sessions that don't yet expose a subscription URL.
-  if (!subscriptionUrl || (!currentPlanInfo && !panelUser)) {
-    try {
-      legacySubInfo = await loadLegacyInfo();
-      subUser = legacySubInfo?.user ?? null;
-      subscriptionUrl = subscriptionUrl ?? legacySubInfo?.subscription_url ?? null;
-      serverLinks = legacySubInfo?.links ?? [];
-    } catch {
-      if (!subscriptionUrl) return;
-    }
-  }
-
-  if (subscriptionUrl) {
-    try {
-      profileResult = await fetchSubscriptionProfile(subscriptionUrl);
-    } catch {
-      profileResult = null;
-    }
+  try {
+    profileResult = await fetchSubscriptionProfile(subscriptionUrl, shortUuid);
+  } catch {
+    profileResult = null;
   }
 
   if (profileResult) {
     setSubscriptionUsageBlocked(shortUuid, profileResult.isUsageBlocked);
     setUpdateRequired(profileResult.isUpdateRequired);
     writeSubSyncState(profileResult.intervalMs);
-    if (profileResult.links.length > 0) {
-      serverLinks = profileResult.links;
-    } else if (profileResult.isSuccessful || profileResult.isUsageBlocked) {
-      serverLinks = [];
-    }
-  } else if (subscriptionUrl) {
+  } else {
     clearSubSyncTimestamp();
   }
 
-  if (!subUser && !currentPlanInfo && !legacySubInfo) {
-    try {
-      legacySubInfo = await loadLegacyInfo();
-      subUser = legacySubInfo?.user ?? null;
-      subscriptionUrl = subscriptionUrl ?? legacySubInfo?.subscription_url ?? null;
-      if (serverLinks.length === 0) serverLinks = legacySubInfo?.links ?? [];
-    } catch {
-      // Keep profile-derived links/traffic if legacy metadata is unavailable.
-    }
-  }
-
-  if (!subscriptionUrl && !subUser && !currentPlanInfo) {
-    writeCachedSubscriptionUrl(shortUuid, null);
-    clearVpnServersMemoryCache(shortUuid);
-    updateSession({
-      userPlan: "EXPIRED",
-      planDisplayName: null,
-      planExpiresAt: null,
-      trafficLimitBytes: 0,
-      trafficUsedBytes: 0,
-    });
-    return;
-  }
-
-  writeCachedSubscriptionUrl(shortUuid, subscriptionUrl);
   if (profileResult?.isUsageBlocked) {
     clearVpnServersMemoryCache(shortUuid);
-  } else if (serverLinks.length > 0 || profileResult?.isSuccessful) {
-    cacheVpnServersFromLinks(shortUuid, serverLinks);
+  } else if (profileResult?.links.length) {
+    cacheVpnServersFromLinks(shortUuid, profileResult.links);
+  } else if (profileResult?.isSuccessful) {
+    clearVpnServersMemoryCache(shortUuid);
   }
 
-  if (!subUser && currentPlanInfo) {
+  if (currentPlanInfo) {
     updateSession({
       userPlan: resolvePlanFromCurrentPlan(session.userPlan, currentPlanInfo),
       planDisplayName:
@@ -962,59 +859,46 @@ async function runSyncSubscription(): Promise<void> {
     return;
   }
 
-  if (!subUser) return;
-
-  const isActive = subUser.is_active && subUser.user_status === "ACTIVE";
-  const cachedPlan = session.userPlan;
-
-  // Plan derivation order:
-  //   1. Inactive subscription => EXPIRED, regardless of cache.
-  //   2. Panel data with a non-trivial squad (ADMIN / PAID) wins.
-  //   3. MONTH-strategy traffic limit is the canonical "paid" signal in the
-  //      subscription payload — trust it even if the panel payload arrived
-  //      without a squad list.
-  //   4. Never silently downgrade an already-PAID/ADMIN cached plan to
-  //      FREE_TRIAL on a transient/ambiguous response (this used to flip
-  //      the badge to "Пробный" while server-switching).
-  let plan: UserPlan;
-  if (currentPlanInfo) {
-    plan = resolvePlanFromCurrentPlan(cachedPlan, currentPlanInfo);
-  } else if (!isActive) {
-    plan = "EXPIRED";
-  } else if (panelUser && planForPanelUser(panelUser) !== "FREE_TRIAL") {
-    plan = planForPanelUser(panelUser);
-  } else if (subUser.traffic_limit_strategy === "MONTH") {
-    plan = "PAID";
-  } else if (cachedPlan === "PAID" || cachedPlan === "ADMIN") {
-    plan = cachedPlan;
-  } else {
-    plan = "FREE_TRIAL";
+  if (panelUser) {
+    const panelPlan = planForPanelUser(panelUser);
+    const isActive = panelUser.status.toUpperCase() === "ACTIVE";
+    const plan: UserPlan = !isActive
+      ? "EXPIRED"
+      : panelPlan !== "FREE_TRIAL"
+        ? panelPlan
+        : panelUser.traffic_limit_strategy.toUpperCase() === "MONTH"
+          ? "PAID"
+          : session.userPlan === "PAID" || session.userPlan === "ADMIN"
+            ? session.userPlan
+            : "FREE_TRIAL";
+    updateSession({
+      userPlan: plan,
+      planDisplayName:
+        session.userPlan === plan && plan !== "EXPIRED" ? session.planDisplayName : null,
+      planExpiresAt: parseExpiresAtMillis(panelUser.expire_at),
+      trafficLimitBytes:
+        profileResult?.trafficLimitBytes ?? panelUser.traffic_limit_bytes,
+      trafficUsedBytes:
+        profileResult?.trafficUsedBytes ??
+        panelUser.user_traffic?.used_traffic_bytes ??
+        session.trafficUsedBytes,
+    });
+  } else if (profileResult) {
+    updateSession({
+      trafficLimitBytes:
+        profileResult.trafficLimitBytes ?? session.trafficLimitBytes,
+      trafficUsedBytes:
+        profileResult.trafficUsedBytes ?? session.trafficUsedBytes,
+    });
   }
 
-  const expiresAtMillis = currentPlanInfo?.expiresAtMillis ?? parseExpiresAtMillis(subUser.expires_at);
-  const trafficLimitBytes =
-    profileResult?.trafficLimitBytes ??
-    currentPlanInfo?.trafficLimitBytes ??
-    (Number(subUser.traffic_limit_bytes) || 0);
-  const trafficUsedBytes =
-    profileResult?.trafficUsedBytes ??
-    (Number(subUser.traffic_used_bytes) || 0);
-
-  updateSession({
-    userPlan: plan,
-    planDisplayName:
-      currentPlanInfo?.displayName ??
-      (session.userPlan === plan && plan !== "EXPIRED" ? session.planDisplayName : null),
-    planExpiresAt: expiresAtMillis,
-    trafficLimitBytes,
-    trafficUsedBytes,
-  });
-
   // Refresh "last seen" on the device row so it surfaces in linked-devices listings.
-  try {
-    await registerCurrentDevice();
-  } catch {
-    // ignore
+  if (session.isLinked) {
+    try {
+      await registerCurrentDevice();
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -1503,9 +1387,8 @@ export async function fetchVpnServers(
     return [];
   }
 
-  let links: string[] = [];
-  const subscriptionUrl = await readOrFetchSubscriptionUrl(shortUuid);
-  const profile = await fetchSubscriptionProfile(subscriptionUrl);
+  const subscriptionUrl = await readSubscriptionUrl(shortUuid);
+  const profile = await fetchSubscriptionProfile(subscriptionUrl, shortUuid);
   if (profile) {
     setSubscriptionUsageBlocked(shortUuid, profile.isUsageBlocked);
     setUpdateRequired(profile.isUpdateRequired);
@@ -1520,22 +1403,14 @@ export async function fetchVpnServers(
       clearVpnServersMemoryCache(shortUuid);
       return [];
     }
-    links = profile.links;
-    if (debug) console.log("[fetchVpnServers] profile links count:", links.length);
+    if (debug) console.log("[fetchVpnServers] profile links count:", profile.links.length);
   }
 
-  if (links.length === 0 && !profile?.isSuccessful) {
-    const subInfoResponse = await getSubscriptionInfoShared(shortUuid);
-    const subInfo = subInfoResponse.response;
-    if (debug) console.log("[fetchVpnServers] legacy is_found:", subInfo.is_found, "links count:", subInfo.links?.length ?? 0);
-    if (!subInfo.is_found || !subInfo.links?.length) {
-      clearVpnServersMemoryCache(shortUuid);
-      return [];
-    }
-    writeCachedSubscriptionUrl(shortUuid, subInfo.subscription_url ?? subscriptionUrl);
-    links = subInfo.links;
+  if (!profile) {
+    return getCachedVpnServers();
   }
 
+  const links = profile.links;
   if (links.length === 0) {
     clearVpnServersMemoryCache(shortUuid);
     return [];

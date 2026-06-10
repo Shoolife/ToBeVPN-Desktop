@@ -3,8 +3,9 @@
 // HWID device record; the bot's /api/* endpoints don't expose it to the panel.
 // We hit the URL (a) before each VPN connect, (b) on subscription refresh.
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
-import { SUBS_FALLBACK_URL } from "../api/config";
+import { SUBSCRIPTION_BASE_URL, SUBS_FALLBACK_URL } from "../api/config";
 import { getDeviceFingerprint } from "./fingerprint";
+import { getSession } from "./store";
 
 // Response access headers are not browser-safelisted. Use the Rust-side HTTP
 // plugin whenever the app runs inside Tauri, including development builds, so
@@ -42,9 +43,9 @@ export interface SubscriptionProfileResult extends SubscriptionPingResult {
 }
 
 /**
- * Best-effort device ping against the subscription URL. Tries the original
- * URL first; on network failure, timeout, or a route-rejection response,
- * retries the same key against the configured fallback endpoint.
+ * Device ping against the subscription URL. If only a key is available, the
+ * configured primary base restores the direct HWID-tagged request. Network
+ * failures and route rejections then use the configured fallback.
  *
  * Returns the panel-recommended auto-refresh cadence and the access state
  * from the response. Returns `null` when the URL is missing or both legs
@@ -52,10 +53,21 @@ export interface SubscriptionProfileResult extends SubscriptionPingResult {
  */
 export async function pingSubscriptionUrl(
   subscriptionUrl: string | null | undefined,
+  subscriptionKey?: string | null,
 ): Promise<SubscriptionPingResult | null> {
-  if (!subscriptionUrl) return null;
   try {
     const headers = await buildSubscriptionHeaders();
+    if (!subscriptionUrl) {
+      const primaryUrl = buildPrimaryUrlFromKey(subscriptionKey);
+      const fallbackUrl = buildFallbackUrlFromKey(subscriptionKey);
+      if (primaryUrl) {
+        return await primaryThenFallback(primaryUrl, fallbackUrl, headers);
+      }
+      if (!fallbackUrl) return null;
+      const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      if (await isProxyGatewayAuthError(response)) return null;
+      return readResult(response);
+    }
     const fallbackUrl = buildFallbackUrl(subscriptionUrl);
     return await primaryThenFallback(subscriptionUrl, fallbackUrl, headers);
   } catch {
@@ -66,10 +78,21 @@ export async function pingSubscriptionUrl(
 
 export async function fetchSubscriptionProfile(
   subscriptionUrl: string | null | undefined,
+  subscriptionKey?: string | null,
 ): Promise<SubscriptionProfileResult | null> {
-  if (!subscriptionUrl) return null;
   try {
     const headers = await buildSubscriptionHeaders();
+    if (!subscriptionUrl) {
+      const primaryUrl = buildPrimaryUrlFromKey(subscriptionKey);
+      const fallbackUrl = buildFallbackUrlFromKey(subscriptionKey);
+      if (primaryUrl) {
+        return await primaryThenFallbackProfile(primaryUrl, fallbackUrl, headers);
+      }
+      if (!fallbackUrl) return null;
+      const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      if (await isProxyGatewayAuthError(response)) return null;
+      return await readProfileResult(response);
+    }
     const fallbackUrl = buildFallbackUrl(subscriptionUrl);
     return await primaryThenFallbackProfile(subscriptionUrl, fallbackUrl, headers);
   } catch {
@@ -80,13 +103,14 @@ export async function fetchSubscriptionProfile(
 
 async function buildSubscriptionHeaders(): Promise<HeadersInit> {
   const fp = await getDeviceFingerprint();
+  const deviceId = getSession().deviceId.trim();
   const headers: HeadersInit = {
     "x-device-os": fp.platform,
     "x-ver-os": fp.osVersion,
     "x-device-model": fp.model,
     "User-Agent": fp.userAgent,
   };
-  if (fp.hwid) (headers as Record<string, string>)["x-hwid"] = fp.hwid;
+  if (deviceId) (headers as Record<string, string>)["x-hwid"] = deviceId;
   return headers;
 }
 
@@ -97,6 +121,19 @@ async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number):
     return await httpFetch(url, { method: "GET", headers, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+function buildPrimaryUrlFromKey(rawKey: string | null | undefined): string | null {
+  const key = rawKey?.trim();
+  if (!SUBSCRIPTION_BASE_URL || !key) return null;
+  try {
+    const base = SUBSCRIPTION_BASE_URL.endsWith("/")
+      ? SUBSCRIPTION_BASE_URL
+      : `${SUBSCRIPTION_BASE_URL}/`;
+    return new URL(encodeURIComponent(key), base).toString();
+  } catch {
+    return null;
   }
 }
 
@@ -373,7 +410,6 @@ function readIntervalMs(raw: string | null): number | null {
 }
 
 function buildFallbackUrl(panelUrl: string): string | null {
-  if (!SUBS_FALLBACK_URL) return null;
   let key: string;
   try {
     const u = new URL(panelUrl);
@@ -382,6 +418,12 @@ function buildFallbackUrl(panelUrl: string): string | null {
   } catch {
     return null;
   }
+  return buildFallbackUrlFromKey(key);
+}
+
+function buildFallbackUrlFromKey(subscriptionKey: string | null | undefined): string | null {
+  if (!SUBS_FALLBACK_URL) return null;
+  const key = subscriptionKey?.trim();
   if (!key) return null;
   return `${SUBS_FALLBACK_URL}${encodeURIComponent(key)}`;
 }

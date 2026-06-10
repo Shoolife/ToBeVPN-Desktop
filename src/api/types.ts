@@ -18,11 +18,6 @@ export interface BootstrapRequestDto {
   device_id: string;
   platform: string;
   integrity_token?: string | null;
-  hwid?: string | null;
-  device_os?: string | null;
-  ver_os?: string | null;
-  device_model?: string | null;
-  user_agent?: string | null;
 }
 
 export interface RefreshRequestDto {
@@ -156,30 +151,6 @@ export interface PanelNodeDto {
   is_disabled: boolean;
   country_code: string;
   view_position: number;
-}
-
-// --- Subscription info ---
-
-export interface PanelSubUserDto {
-  short_uuid: string;
-  days_left: number;
-  traffic_used: string;
-  traffic_limit: string;
-  traffic_used_bytes: string;
-  traffic_limit_bytes: string;
-  lifetime_traffic_used_bytes: string;
-  username: string;
-  expires_at: string | null;
-  is_active: boolean;
-  user_status: string;
-  traffic_limit_strategy: string;
-}
-
-export interface PanelSubInfoDto {
-  is_found: boolean;
-  user: PanelSubUserDto | null;
-  links: string[] | null;
-  subscription_url: string | null;
 }
 
 export interface CurrentPlanSnapshotDto {

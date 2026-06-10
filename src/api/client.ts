@@ -26,7 +26,6 @@ import type {
   LinkedDevicesDto,
   PanelNodeDto,
   PanelResponse,
-  PanelSubInfoDto,
   ResetSubscriptionDto,
   PanelUserDto,
   PurchasePlansDto,
@@ -460,15 +459,9 @@ async function resolveBootstrapDeviceId(): Promise<string> {
 
 async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
   const deviceId = await resolveBootstrapDeviceId();
-  const fingerprint = await getDeviceFingerprint();
   const requestBody: BootstrapRequestDto = {
     device_id: deviceId,
     platform: "desktop",
-    hwid: fingerprint.hwid,
-    device_os: fingerprint.platform,
-    ver_os: fingerprint.osVersion,
-    device_model: fingerprint.model,
-    user_agent: fingerprint.userAgent,
   };
   const response = await performFetch("api/device/bootstrap", {
     method: "POST",
@@ -681,12 +674,6 @@ export function getUserByTelegramId(
 
 export function getNodes(): Promise<PanelResponse<PanelNodeDto[]>> {
   return request("api/panel/nodes", { method: "GET" });
-}
-
-export function getSubscriptionInfo(
-  shortUuid: string,
-): Promise<PanelResponse<PanelSubInfoDto>> {
-  return request(`api/panel/sub/${shortUuid}/info`, { method: "GET" });
 }
 
 export function resetSubscription(
