@@ -15,14 +15,13 @@ import {
   logoutDevice,
   requestAuth,
   registerDevice,
-  resetSubscription,
   saveEmail as apiSaveEmail,
   unlinkDevice,
 } from "../api/client";
 import type {
   AuthStatusDto,
   CurrentPlanDto,
-  LinkedDeviceDto,
+  DeviceUnlinkResponseDto,
   LinkedDevicesDto,
   PanelNodeDto,
   PanelUserDto,
@@ -31,7 +30,6 @@ import type {
 } from "../api/types";
 import {
   clearDeviceSession,
-  clearIdentity,
   applySessionSecrets,
   getSession,
   getSessionSecrets,
@@ -71,7 +69,10 @@ const SUB_INTERVAL_KEY = "tobevpn_sub_interval_ms_v1";
 const LEGACY_SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v1";
 const SUB_URL_CACHE_KEY = "tobevpn_subscription_url_v2";
 const BLOCKED_SUBSCRIPTION_KEY = "tobevpn_blocked_subscription_v1";
-const UPDATE_REQUIRED_KEY = "tobevpn_update_required_v1";
+// A forced-update decision belongs to the installed build. Changing the key
+// with the app version prevents an already-updated client from inheriting the
+// previous build's persisted block before its first subscription refresh.
+const UPDATE_REQUIRED_KEY = `tobevpn_minimum_version_required_${__APP_VERSION__}`;
 const SUBSCRIPTION_ACCESS_EVENT = "tobevpn:subscription-access-changed";
 const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
 const PENDING_AUTH_TOKEN_KEY = "tobevpn_pending_auth_token_v1";
@@ -584,16 +585,6 @@ export async function getCurrentDeviceAliases(): Promise<string[]> {
   return Array.from(aliases);
 }
 
-function deviceMatchesAliases(device: LinkedDeviceDto, aliases: string[]): boolean {
-  const normalized = new Set(
-    aliases.map((alias) => alias.trim().toLocaleLowerCase("en-US")).filter(Boolean),
-  );
-  return [device.device_id, device.hwid].some((value) => {
-    const normalizedValue = value?.trim().toLocaleLowerCase("en-US");
-    return !!normalizedValue && normalized.has(normalizedValue);
-  });
-}
-
 export async function unlinkCurrentDevice(): Promise<void> {
   const deviceId = getSession().deviceId.trim();
   if (!deviceId) throw new Error("Current device identity is missing");
@@ -970,6 +961,7 @@ type DeviceLinkStatus = "linked" | "missing" | "unknown";
 
 function isRemoteDeviceUnlinkedError(error: unknown): boolean {
   if (!(error instanceof ApiHttpError)) return false;
+  if (error.status === 401) return true;
   const message = error.message.trim().toLocaleLowerCase("en-US");
   if (!message) return false;
   if (error.status === 400) {
@@ -997,51 +989,84 @@ async function checkCurrentDeviceLinkStatus(): Promise<DeviceLinkStatus> {
   const { isLinked } = getSession();
   if (!isLinked) return "missing";
   try {
-    const aliases = await getCurrentDeviceAliases();
-    const res = await apiGetDevices();
-    if (!res.success || !res.data) return "unknown";
-    return res.data.devices.some((device) => deviceMatchesAliases(device, aliases))
-      ? "linked"
-      : "missing";
+    const res = await getCurrentPlan();
+    if (res.success) {
+      await applyCurrentPlanHeartbeat(res.data).catch(() => {});
+    }
+    return res.success ? "linked" : "unknown";
   } catch (error) {
     return isRemoteDeviceUnlinkedError(error) ? "missing" : "unknown";
   }
+}
+
+async function applyCurrentPlanHeartbeat(
+  data: CurrentPlanDto | null | undefined,
+): Promise<void> {
+  const planInfo = currentPlanInfoFromDto(data);
+  if (!planInfo) return;
+
+  const sessionBefore = getSession();
+  const oldShortUuid = sessionBefore.shortUuid;
+  const cachedUrl = oldShortUuid ? readCachedSubscriptionUrl(oldShortUuid) : null;
+  const nextUrl = planInfo.subscriptionUrl;
+  const subscriptionUrlChanged = Boolean(nextUrl && nextUrl !== cachedUrl);
+
+  if (subscriptionUrlChanged) {
+    await bootstrapDeviceSession().catch(() => {});
+  }
+  const refreshedSession = getSession();
+  updateSession({
+    userPlan: resolvePlanFromCurrentPlan(refreshedSession.userPlan, planInfo),
+    planDisplayName:
+      planInfo.isExpired === true
+        ? null
+        : (planInfo.displayName ?? refreshedSession.planDisplayName),
+    planExpiresAt: planInfo.expiresAtMillis,
+    trafficLimitBytes: planInfo.trafficLimitBytes ?? refreshedSession.trafficLimitBytes,
+  });
+
+  if (!subscriptionUrlChanged) return;
+  const nextShortUuid = getSession().shortUuid ?? oldShortUuid;
+  if (oldShortUuid && oldShortUuid !== nextShortUuid) {
+    writeCachedSubscriptionUrl(oldShortUuid, null);
+    clearVpnServersMemoryCache(oldShortUuid);
+  }
+  if (nextShortUuid) {
+    writeCachedSubscriptionUrl(nextShortUuid, nextUrl);
+    clearVpnServersMemoryCache(nextShortUuid);
+  }
+  clearSubSyncTimestamp();
+  await syncSubscription({ force: true }).catch(() => {});
+  await fetchVpnServers({ skipAccessPing: true }).catch(() => []);
 }
 
 export async function isCurrentDeviceLinked(): Promise<boolean> {
   return (await checkCurrentDeviceLinkStatus()) !== "missing";
 }
 
-const DEVICE_LINK_POLL_MS = 60_000;
-const DEVICE_LINK_MISS_THRESHOLD = 3;
-const DEVICE_LINK_INITIAL_MISS_THRESHOLD = 5;
+const DEVICE_LINK_POLL_MS = 5 * 60_000;
 let linkPollTimer: number | null = null;
-let linkPollCurrentDeviceSeen = false;
-let linkPollMissingCount = 0;
-
-function resetDeviceLinkPollState() {
-  linkPollCurrentDeviceSeen = false;
-  linkPollMissingCount = 0;
-}
+let linkPollGeneration = 0;
 
 /**
  * Start polling to detect remote device removal.
- * When the device is no longer linked, clears local session via clearIdentity().
+ * When the device is no longer linked, clears the local device session.
  * Navigation is handled reactively by App.tsx observing useSession().
  */
 export function startDeviceLinkPolling() {
   stopDeviceLinkPolling();
+  const generation = ++linkPollGeneration;
 
   const tick = async () => {
+    if (generation !== linkPollGeneration) return;
     const session = getSession();
     if (!session.isLinked) {
       stopDeviceLinkPolling();
       return;
     }
     const status = await checkCurrentDeviceLinkStatus();
+    if (generation !== linkPollGeneration) return;
     if (status === "linked") {
-      linkPollCurrentDeviceSeen = true;
-      linkPollMissingCount = 0;
       linkPollTimer = window.setTimeout(tick, DEVICE_LINK_POLL_MS);
       return;
     }
@@ -1050,36 +1075,32 @@ export function startDeviceLinkPolling() {
       return;
     }
 
-    linkPollMissingCount += 1;
-    const threshold = linkPollCurrentDeviceSeen
-      ? DEVICE_LINK_MISS_THRESHOLD
-      : DEVICE_LINK_INITIAL_MISS_THRESHOLD;
-    if (linkPollMissingCount >= threshold) {
-      // Tear down the tunnel before clearing identity — otherwise the OS-level
-      // VPN keeps routing traffic after the user is bounced to the QR screen,
-      // and the next pairing would re-enter Home with the connection still up.
-      try {
-        await disconnectVpn();
-      } catch {
-        // ignore — proceed to wipe local state regardless
-      }
-      clearVpnServersMemoryCache(session.shortUuid);
-      clearIdentity();
-      stopDeviceLinkPolling();
-      return;
+    // Tear down the tunnel before clearing identity — otherwise the OS-level
+    // VPN keeps routing traffic after the user is bounced to the QR screen.
+    try {
+      await disconnectVpn();
+    } catch {
+      // ignore — proceed to wipe local state regardless
     }
-    linkPollTimer = window.setTimeout(tick, DEVICE_LINK_POLL_MS);
+    clearVpnServersMemoryCache(session.shortUuid);
+    if (session.shortUuid) {
+      writeCachedSubscriptionUrl(session.shortUuid, null);
+    }
+    clearSubSyncTimestamp();
+    await clearSecureSession();
+    clearDeviceSession();
+    stopDeviceLinkPolling();
   };
 
-  linkPollTimer = window.setTimeout(tick, DEVICE_LINK_POLL_MS);
+  void tick();
 }
 
 export function stopDeviceLinkPolling() {
+  linkPollGeneration += 1;
   if (linkPollTimer !== null) {
     clearTimeout(linkPollTimer);
     linkPollTimer = null;
   }
-  resetDeviceLinkPollState();
 }
 
 export async function logout(): Promise<void> {
@@ -1130,39 +1151,46 @@ export async function unlinkOtherDevice(deviceId: string): Promise<void> {
   if (!isLinked) throw new Error("Not authenticated");
   const res = await unlinkDevice({ device_id: deviceId });
   if (!res.success) throw new Error(res.message ?? "Could not unlink device");
-  await resetSubscriptionAfterDeviceUnlink();
+  await refreshAfterDeviceUnlink(res.data);
 }
 
-async function resetSubscriptionAfterDeviceUnlink(): Promise<void> {
-  const session = getSession();
-  const oldShortUuid = session.shortUuid;
-  if (!oldShortUuid) return;
+async function refreshAfterDeviceUnlink(
+  data: DeviceUnlinkResponseDto | null | undefined,
+): Promise<void> {
+  const sessionBefore = getSession();
+  const oldShortUuid = sessionBefore.shortUuid;
+  await bootstrapDeviceSession().catch(() => {});
 
-  const res = await resetSubscription(oldShortUuid);
-  if (!res.success || !res.data) {
-    throw new Error(res.message ?? "Could not reset subscription link");
-  }
-
-  const data = res.data;
-  const nextShortUuid = data.short_uuid?.trim() || oldShortUuid;
-  const nextUrl = data.subscription_url?.trim() || null;
-
-  if (nextShortUuid !== oldShortUuid) {
+  const refreshedSession = getSession();
+  const nextShortUuid = refreshedSession.shortUuid ?? oldShortUuid;
+  const nextUrl =
+    data?.subscription_url?.trim() ||
+    data?.subscription?.url?.trim() ||
+    null;
+  if (oldShortUuid && nextShortUuid !== oldShortUuid) {
     writeCachedSubscriptionUrl(oldShortUuid, null);
     clearVpnServersMemoryCache(oldShortUuid);
   }
-  writeCachedSubscriptionUrl(nextShortUuid, nextUrl);
-  clearVpnServersMemoryCache(nextShortUuid);
+  if (nextShortUuid) {
+    writeCachedSubscriptionUrl(nextShortUuid, nextUrl);
+    clearVpnServersMemoryCache(nextShortUuid);
+  }
   clearSubSyncTimestamp();
 
-  updateSession({
-    shortUuid: nextShortUuid,
-    panelUserUuid: data.panel_user_uuid ?? session.panelUserUuid,
-    telegramId: data.telegram_id ?? session.telegramId,
-    trafficLimitBytes: data.traffic_limit_bytes ?? session.trafficLimitBytes,
-    trafficUsedBytes: data.traffic_used_bytes ?? session.trafficUsedBytes,
-  });
+  const planInfo =
+    data?.current_plan || data?.subscription
+      ? currentPlanInfoFromDto(data)
+      : null;
+  if (planInfo) {
+    updateSession({
+      userPlan: resolvePlanFromCurrentPlan(refreshedSession.userPlan, planInfo),
+      planDisplayName: planInfo.displayName ?? refreshedSession.planDisplayName,
+      planExpiresAt: planInfo.expiresAtMillis,
+      trafficLimitBytes: planInfo.trafficLimitBytes ?? refreshedSession.trafficLimitBytes,
+    });
+  }
 
+  await syncSubscription({ force: true }).catch(() => {});
   await fetchVpnServers({ skipAccessPing: true }).catch(() => []);
 }
 

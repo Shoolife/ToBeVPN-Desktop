@@ -23,10 +23,10 @@ import type {
   CurrentPlanDto,
   DeviceRegisterRequestDto,
   DeviceUnlinkRequestDto,
+  DeviceUnlinkResponseDto,
   LinkedDevicesDto,
   PanelNodeDto,
   PanelResponse,
-  ResetSubscriptionDto,
   PanelUserDto,
   PurchasePlansDto,
   RefreshRequestDto,
@@ -634,7 +634,9 @@ export function registerDevice(req: DeviceRegisterRequestDto): Promise<ApiRespon
   });
 }
 
-export function unlinkDevice(req: DeviceUnlinkRequestDto): Promise<ApiResponse<unknown>> {
+export function unlinkDevice(
+  req: DeviceUnlinkRequestDto,
+): Promise<ApiResponse<DeviceUnlinkResponseDto>> {
   return request("api/device/unlink", {
     method: "POST",
     body: JSON.stringify(req),
@@ -674,12 +676,6 @@ export function getUserByTelegramId(
 
 export function getNodes(): Promise<PanelResponse<PanelNodeDto[]>> {
   return request("api/panel/nodes", { method: "GET" });
-}
-
-export function resetSubscription(
-  shortUuid: string,
-): Promise<ApiResponse<ResetSubscriptionDto>> {
-  return request(`api/panel/sub/${shortUuid}/reset`, { method: "POST" });
 }
 
 export function getCurrentPlan(): Promise<ApiResponse<CurrentPlanDto>> {

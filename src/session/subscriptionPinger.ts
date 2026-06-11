@@ -24,8 +24,10 @@ const PRIMARY_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
 const FALLBACK_HTTP_STATUS = 403;
 const BLOCK_HEADER = "is-hack";
 const BLOCK_VALUE = "yes";
-const UPDATE_REQUIRED_HEADER = "update-required";
 const SUBSCRIPTION_USERINFO_HEADER = "subscription-userinfo";
+const VERSION_PATTERN = /^\d+(?:\.\d+)*$/;
+
+declare const __APP_VERSION__: string;
 
 let primaryUnavailableUntil = 0;
 
@@ -56,20 +58,30 @@ export async function pingSubscriptionUrl(
   subscriptionKey?: string | null,
 ): Promise<SubscriptionPingResult | null> {
   try {
-    const headers = await buildSubscriptionHeaders();
+    const { headers, minimumVersionHeader } = await buildSubscriptionRequestContext();
     if (!subscriptionUrl) {
       const primaryUrl = buildPrimaryUrlFromKey(subscriptionKey);
       const fallbackUrl = buildFallbackUrlFromKey(subscriptionKey);
       if (primaryUrl) {
-        return await primaryThenFallback(primaryUrl, fallbackUrl, headers);
+        return await primaryThenFallback(
+          primaryUrl,
+          fallbackUrl,
+          headers,
+          minimumVersionHeader,
+        );
       }
       if (!fallbackUrl) return null;
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) return null;
-      return readResult(response);
+      return readResult(response, minimumVersionHeader);
     }
     const fallbackUrl = buildFallbackUrl(subscriptionUrl);
-    return await primaryThenFallback(subscriptionUrl, fallbackUrl, headers);
+    return await primaryThenFallback(
+      subscriptionUrl,
+      fallbackUrl,
+      headers,
+      minimumVersionHeader,
+    );
   } catch {
     console.warn("[pingSubscriptionUrl] failed");
     return null;
@@ -81,27 +93,42 @@ export async function fetchSubscriptionProfile(
   subscriptionKey?: string | null,
 ): Promise<SubscriptionProfileResult | null> {
   try {
-    const headers = await buildSubscriptionHeaders();
+    const { headers, minimumVersionHeader } = await buildSubscriptionRequestContext();
     if (!subscriptionUrl) {
       const primaryUrl = buildPrimaryUrlFromKey(subscriptionKey);
       const fallbackUrl = buildFallbackUrlFromKey(subscriptionKey);
       if (primaryUrl) {
-        return await primaryThenFallbackProfile(primaryUrl, fallbackUrl, headers);
+        return await primaryThenFallbackProfile(
+          primaryUrl,
+          fallbackUrl,
+          headers,
+          minimumVersionHeader,
+        );
       }
       if (!fallbackUrl) return null;
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) return null;
-      return await readProfileResult(response);
+      return await readProfileResult(response, minimumVersionHeader);
     }
     const fallbackUrl = buildFallbackUrl(subscriptionUrl);
-    return await primaryThenFallbackProfile(subscriptionUrl, fallbackUrl, headers);
+    return await primaryThenFallbackProfile(
+      subscriptionUrl,
+      fallbackUrl,
+      headers,
+      minimumVersionHeader,
+    );
   } catch {
     console.warn("[fetchSubscriptionProfile] failed");
     return null;
   }
 }
 
-async function buildSubscriptionHeaders(): Promise<HeadersInit> {
+interface SubscriptionRequestContext {
+  headers: HeadersInit;
+  minimumVersionHeader: string | null;
+}
+
+async function buildSubscriptionRequestContext(): Promise<SubscriptionRequestContext> {
   const fp = await getDeviceFingerprint();
   const deviceId = getSession().deviceId.trim();
   const headers: HeadersInit = {
@@ -111,7 +138,10 @@ async function buildSubscriptionHeaders(): Promise<HeadersInit> {
     "User-Agent": fp.userAgent,
   };
   if (deviceId) (headers as Record<string, string>)["x-hwid"] = deviceId;
-  return headers;
+  return {
+    headers,
+    minimumVersionHeader: minimumVersionHeaderForPlatform(fp.platform),
+  };
 }
 
 async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
@@ -169,9 +199,13 @@ async function primaryThenFallback(
   primaryUrl: string,
   fallbackUrl: string | null,
   headers: HeadersInit,
+  minimumVersionHeader: string | null,
 ): Promise<SubscriptionPingResult> {
   if (!fallbackUrl) {
-    return readResult(await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS));
+    return readResult(
+      await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS),
+      minimumVersionHeader,
+    );
   }
 
   if (primaryUnavailableUntil > Date.now()) {
@@ -180,11 +214,11 @@ async function primaryThenFallback(
       if (await isProxyGatewayAuthError(response)) {
         throw new Error("Fallback route rejected request");
       }
-      return readResult(response);
+      return readResult(response, minimumVersionHeader);
     } catch {
       const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
       primaryUnavailableUntil = 0;
-      return readResult(response);
+      return readResult(response, minimumVersionHeader);
     }
   }
 
@@ -199,7 +233,7 @@ async function primaryThenFallback(
     PRIMARY_TIMEOUT_MS,
   ).then((response) => {
     if (response.status === FALLBACK_HTTP_STATUS) {
-      rejectedPrimaryResult = readResult(response);
+      rejectedPrimaryResult = readResult(response, minimumVersionHeader);
       throw new Error("Primary subscription route rejected request");
     }
     return { source: "primary", response };
@@ -228,16 +262,20 @@ async function primaryThenFallback(
   } else {
     primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
   }
-  return readResult(winner.response);
+  return readResult(winner.response, minimumVersionHeader);
 }
 
 async function primaryThenFallbackProfile(
   primaryUrl: string,
   fallbackUrl: string | null,
   headers: HeadersInit,
+  minimumVersionHeader: string | null,
 ): Promise<SubscriptionProfileResult> {
   if (!fallbackUrl) {
-    return readProfileResult(await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS));
+    return readProfileResult(
+      await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS),
+      minimumVersionHeader,
+    );
   }
 
   if (primaryUnavailableUntil > Date.now()) {
@@ -246,11 +284,11 @@ async function primaryThenFallbackProfile(
       if (await isProxyGatewayAuthError(response)) {
         throw new Error("Fallback route rejected request");
       }
-      return readProfileResult(response);
+      return readProfileResult(response, minimumVersionHeader);
     } catch {
       const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
       primaryUnavailableUntil = 0;
-      return readProfileResult(response);
+      return readProfileResult(response, minimumVersionHeader);
     }
   }
 
@@ -265,7 +303,7 @@ async function primaryThenFallbackProfile(
     PRIMARY_TIMEOUT_MS,
   ).then(async (response) => {
     if (response.status === FALLBACK_HTTP_STATUS) {
-      rejectedPrimaryResult = await readProfileResult(response);
+      rejectedPrimaryResult = await readProfileResult(response, minimumVersionHeader);
       throw new Error("Primary subscription route rejected request");
     }
     return { source: "primary", response };
@@ -294,7 +332,7 @@ async function primaryThenFallbackProfile(
   } else {
     primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
   }
-  return readProfileResult(winner.response);
+  return readProfileResult(winner.response, minimumVersionHeader);
 }
 
 async function isProxyGatewayAuthError(response: Response): Promise<boolean> {
@@ -322,25 +360,70 @@ async function isProxyGatewayAuthError(response: Response): Promise<boolean> {
 const MIN_INTERVAL_HOURS = 1;
 const MAX_INTERVAL_HOURS = 24 * 7;
 
-function readResult(response: Response): SubscriptionPingResult {
+function readResult(
+  response: Response,
+  minimumVersionHeader: string | null,
+): SubscriptionPingResult {
   return {
     intervalMs: readIntervalMs(response.headers.get("profile-update-interval")),
     isUsageBlocked: readUsageBlocked(response.headers),
-    isUpdateRequired:
-      (response.headers.get(UPDATE_REQUIRED_HEADER) ?? "").trim().toLowerCase() === BLOCK_VALUE,
+    isUpdateRequired: isVersionBelowMinimum(
+      minimumVersionHeader ? response.headers.get(minimumVersionHeader) : null,
+    ),
   };
 }
 
-async function readProfileResult(response: Response): Promise<SubscriptionProfileResult> {
+async function readProfileResult(
+  response: Response,
+  minimumVersionHeader: string | null,
+): Promise<SubscriptionProfileResult> {
   const body = await response.text().catch(() => "");
   const userInfo = readSubscriptionUserInfo(response.headers.get(SUBSCRIPTION_USERINFO_HEADER));
   return {
-    ...readResult(response),
+    ...readResult(response, minimumVersionHeader),
     links: parseProfileLinks(body),
     trafficUsedBytes: userInfo.usedBytes,
     trafficLimitBytes: userInfo.totalBytes,
     isSuccessful: response.ok,
   };
+}
+
+function minimumVersionHeaderForPlatform(platform: string): string | null {
+  switch (platform.trim().toLowerCase()) {
+    case "windows":
+      return "min-windows";
+    case "linux":
+      return "min-linux";
+    default:
+      return null;
+  }
+}
+
+function isVersionBelowMinimum(rawMinimum: string | null): boolean {
+  const minimum = parseVersion(rawMinimum);
+  const current = parseVersion(
+    typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : null,
+  );
+  if (!minimum || !current) return false;
+
+  const size = Math.max(minimum.length, current.length);
+  for (let index = 0; index < size; index += 1) {
+    const currentPart = current[index] ?? 0;
+    const minimumPart = minimum[index] ?? 0;
+    if (currentPart !== minimumPart) return currentPart < minimumPart;
+  }
+  return false;
+}
+
+function parseVersion(raw: string | null): number[] | null {
+  const normalized = raw
+    ?.trim()
+    .replace(/^[vV]/, "")
+    .split(/[-+]/, 1)[0];
+  if (!normalized || !VERSION_PATTERN.test(normalized)) return null;
+
+  const parts = normalized.split(".").map((part) => Number(part));
+  return parts.every((part) => Number.isSafeInteger(part)) ? parts : null;
 }
 
 function readUsageBlocked(headers: Headers): boolean {
