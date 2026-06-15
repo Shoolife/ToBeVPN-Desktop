@@ -181,6 +181,7 @@ export default function HomeScreen({
   onSpeedTest,
   selectedServer,
   automaticServerSelection,
+  browserPreview = false,
   onServerChange,
 }: {
   onLogout: () => void;
@@ -190,6 +191,7 @@ export default function HomeScreen({
   onSpeedTest: () => void;
   selectedServer: SelectedServer | null;
   automaticServerSelection: boolean;
+  browserPreview?: boolean;
   onServerChange: (server: SelectedServer) => void;
 }) {
   const session = useSession();
@@ -236,6 +238,7 @@ export default function HomeScreen({
     : 0;
 
   useEffect(() => {
+    if (browserPreview) return;
     // Force-sync on mount so the block state lands before the user can act,
     // bypassing the 12h throttle of the unforced syncSubscription.
     void syncSubscription({ force: true });
@@ -250,7 +253,7 @@ export default function HomeScreen({
       clearInterval(timer);
       window.removeEventListener("focus", checkBlock);
     };
-  }, []);
+  }, [browserPreview]);
 
   useEffect(() => {
     if (subscriptionUsageBlocked) {
@@ -285,6 +288,10 @@ export default function HomeScreen({
 
   // Ping the selected server so the home card mirrors phone (latency on the right).
   useEffect(() => {
+    if (browserPreview) {
+      setPing(0);
+      return;
+    }
     if (!selectedServer) {
       setPing(0);
       return;
@@ -303,7 +310,7 @@ export default function HomeScreen({
     return () => {
       cancelled = true;
     };
-  }, [selectedServer]);
+  }, [browserPreview, selectedServer]);
 
   const [localError, setLocalError] = useState<string | null>(null);
   const vpnError = localError ?? lastError;
@@ -330,6 +337,7 @@ export default function HomeScreen({
   };
 
   const handleToggle = async () => {
+    if (browserPreview) return;
     if (disconnecting) return;
     if (preparingConnection && !connecting && !connected) {
       toggleGeneration.current++;

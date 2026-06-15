@@ -414,6 +414,12 @@ export async function disconnectVpn(): Promise<void> {
   }
 }
 
+export async function reapplyRoutingSettings(): Promise<void> {
+  const server = currentServerForRecovery;
+  if (!server || (!state.connected && !state.connecting)) return;
+  await connectVpnInternal(server, true);
+}
+
 function startTunnelHealthCheck(gen: number) {
   stopTunnelHealthCheck();
   healthTimer = window.setTimeout(() => {

@@ -4,6 +4,7 @@ import { logout, saveEmail } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { getXrayVersion } from "../session/vpn";
 import { formatDateDots } from "../session/dateFormat";
+import { loadRoutingSettings, type RoutingMode } from "../session/routingSettings";
 import UpdateCheckRow from "../components/UpdateCheckRow";
 import "./SettingsScreen.css";
 
@@ -35,20 +36,37 @@ function planValueClass(plan: UserPlan): string {
   }
 }
 
+function routingModeLabel(mode: RoutingMode): string {
+  switch (mode) {
+    case "selective":
+      return t("routing_mode_selective");
+    case "all_vpn":
+      return t("routing_mode_all_vpn");
+    case "blocked_only":
+    default:
+      return t("routing_mode_blocked_only");
+  }
+}
+
 export default function SettingsScreen({
   onBack,
   onLoggedOut,
   onDevices,
+  onRouting,
 }: {
   onBack: () => void;
   onLoggedOut: () => void;
   onDevices: () => void;
+  onRouting: () => void;
 }) {
   const session = useSession();
   const currentLang = getSavedLang();
   const [pendingLang, setPendingLang] = useState<Lang | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [xrayVersion, setXrayVersion] = useState("Xray-core ...");
+  const [routingMode, setRoutingMode] = useState<RoutingMode>(
+    () => loadRoutingSettings().mode,
+  );
 
   // Email editing
   const [editingEmail, setEditingEmail] = useState(false);
@@ -118,6 +136,13 @@ export default function SettingsScreen({
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    const refreshRoutingMode = () => setRoutingMode(loadRoutingSettings().mode);
+    refreshRoutingMode();
+    window.addEventListener("focus", refreshRoutingMode);
+    return () => window.removeEventListener("focus", refreshRoutingMode);
   }, []);
 
   return (
@@ -219,6 +244,20 @@ export default function SettingsScreen({
             <div className="settings-card__col">
               <div className="settings-card__header">{t("devices_title")}</div>
               <div className="settings-card__hint">{t("devices_manage_hint")}</div>
+            </div>
+            <div className="settings-card__arrow">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        <div className="settings-card settings-card--clickable" onClick={onRouting}>
+          <div className="settings-card__row">
+            <div className="settings-card__col">
+              <div className="settings-card__header">{t("routing_title")}</div>
+              <div className="settings-card__hint">{routingModeLabel(routingMode)}</div>
             </div>
             <div className="settings-card__arrow">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

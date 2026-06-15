@@ -101,18 +101,114 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Download Linux sidecar binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           mkdir -p src-tauri/bin
+          mkdir -p public/routing
+
+          download_verified_release_asset() {
+            local repo="$1"
+            local asset_name="$2"
+            local output="$3"
+            local metadata
+            metadata=$(gh api "repos/${repo}/releases/latest")
+            local url
+            local digest
+            url=$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$metadata")
+            digest=$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .digest' <<<"$metadata")
+            if [ -z "$url" ] || [ "$url" = "null" ] || [[ "$digest" != sha256:* ]]; then
+              echo "::error::Could not resolve a verified ${repo}/${asset_name} release asset"
+              exit 1
+            fi
+            curl -fsSL -o "$output" "$url"
+            echo "${digest#sha256:}  ${output}" | sha256sum -c -
+          }
+
+          extract_plain_category_domains() {
+            local input="$1"
+            local output="$2"
+            shift 2
+            local categories="$*"
+            awk -v categories="$categories" '
+              BEGIN {
+                split(categories, items, " ")
+                for (i in items) {
+                  keep[items[i]] = 1
+                }
+              }
+              /^  - name: / { in_category = ($3 in keep); next }
+              in_category && /^      - "/ {
+                rule=$0
+                sub(/^      - "/, "", rule)
+                sub(/"$/, "", rule)
+                split(rule, parts, ":")
+                if ((parts[1] == "domain" || parts[1] == "full") && parts[2] != "") {
+                  if (parts[2] !~ /\./) print "*." parts[2]
+                  else print parts[2]
+                }
+              }
+            ' "$input" | sort -u > "$output"
+            grep -qx 'avito.ru' "$output"
+            grep -qx 'ozon.ru' "$output"
+            grep -qx 'wildberries.ru' "$output"
+            grep -qx '*.ru' "$output"
+          }
+
+          append_plain_domain_list() {
+            local input="$1"
+            local output="$2"
+            awk '
+              {
+                sub(/[[:space:]]+#.*$/, "")
+                for (i = 1; i <= NF; i++) {
+                  domain = tolower($i)
+                  sub(/^\*\./, "", domain)
+                  if (domain ~ /^include:/ || domain !~ /\./) next
+                  if (domain ~ /^[a-z0-9_.-]+$/) print domain
+                }
+              }
+            ' "$input" >> "$output"
+            sort -u -o "$output" "$output"
+            grep -qx 'yandex.ru' "$output"
+            grep -qx 'ozon.ru' "$output"
+          }
 
           echo "Downloading Xray-core (Linux x64)..."
           curl -fsSL -o xray.zip \
             https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -o xray.zip -d xray-extracted
           cp xray-extracted/xray src-tauri/bin/xray-x86_64-unknown-linux-gnu
-          cp xray-extracted/geoip.dat src-tauri/bin/
-          cp xray-extracted/geosite.dat src-tauri/bin/
           chmod +x src-tauri/bin/xray-x86_64-unknown-linux-gnu
+
+          echo "Downloading automatic routing rules..."
+          download_verified_release_asset \
+            runetfreedom/russia-v2ray-rules-dat geosite.dat src-tauri/bin/geosite.dat
+          download_verified_release_asset \
+            runetfreedom/russia-v2ray-rules-dat geoip.dat src-tauri/bin/geoip.dat
+          download_verified_release_asset \
+            v2fly/domain-list-community dlc.dat_plain.yml dlc.dat_plain.yml
+          curl -fsSL -o ru-available-only-inside.txt \
+            https://raw.githubusercontent.com/runetfreedom/russia-domains-list/main/ru-available-only-inside
+          extract_plain_category_domains \
+            dlc.dat_plain.yml public/routing/ru-services.txt \
+            category-bank-ru \
+            category-betting-ru \
+            category-ecommerce-ru \
+            category-entertainment-ru \
+            category-gov-ru \
+            category-media-ru \
+            category-medicine-ru \
+            category-retail-ru \
+            category-ru \
+            category-travel-ru
+          append_plain_domain_list \
+            ru-available-only-inside.txt public/routing/ru-services.txt
+
+          XRAY_LOCATION_ASSET=src-tauri/bin \
+            src-tauri/bin/xray-x86_64-unknown-linux-gnu \
+            run -test -config scripts/xray-routing-assets-test.json
 
           echo "Downloading tun2socks (Linux amd64)..."
           curl -fsSL -o tun2socks.zip \
@@ -199,16 +295,149 @@ jobs:
 
       - name: Download Windows sidecar binaries
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
+          New-Item -ItemType Directory -Force -Path public/routing | Out-Null
+
+          function Download-VerifiedReleaseAsset {
+            param(
+              [string]$Repository,
+              [string]$AssetName,
+              [string]$Output
+            )
+            $release = gh api "repos/$Repository/releases/latest" | ConvertFrom-Json
+            $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
+            if (-not $asset -or -not $asset.digest -or -not $asset.digest.StartsWith("sha256:")) {
+              throw "Could not resolve a verified $Repository/$AssetName release asset"
+            }
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $Output
+            $expected = $asset.digest.Substring(7).ToLowerInvariant()
+            $actual = (Get-FileHash -Algorithm SHA256 $Output).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+              throw "SHA-256 mismatch for $Repository/$AssetName"
+            }
+          }
+
+          function Export-PlainCategoryDomains {
+            param(
+              [string[]]$Categories,
+              [string]$InputPath,
+              [string]$OutputPath
+            )
+            $inCategory = $false
+            $domains = [System.Collections.Generic.HashSet[string]]::new()
+            Get-Content $InputPath | ForEach-Object {
+              if ($_ -match '^  - name: (.+)$') {
+                $inCategory = $Categories -contains $Matches[1]
+                return
+              }
+              if ($inCategory -and $_ -match '^      - "(domain|full):([^":]+)(?::[^"]*)?"$') {
+                $domain = $Matches[2]
+                if (-not $domain.Contains(".")) {
+                  $domain = "*.$domain"
+                }
+                [void]$domains.Add($domain)
+              }
+            }
+            $sorted = $domains | Sort-Object
+            $outputDir = (Resolve-Path (Split-Path $OutputPath -Parent)).Path
+            $outputFile = Join-Path $outputDir (Split-Path $OutputPath -Leaf)
+            [System.IO.File]::WriteAllLines($outputFile, $sorted, [System.Text.UTF8Encoding]::new($false))
+            foreach ($required in @("avito.ru", "ozon.ru", "wildberries.ru")) {
+              if (-not $domains.Contains($required)) {
+                throw "Missing required domain $required in Russian services list"
+              }
+            }
+            if (-not $domains.Contains("*.ru")) {
+              throw "Missing required wildcard *.ru in Russian services list"
+            }
+          }
+
+          function Add-PlainDomainList {
+            param(
+              [string]$InputPath,
+              [string]$OutputPath
+            )
+            $domains = [System.Collections.Generic.HashSet[string]]::new()
+            if (Test-Path $OutputPath) {
+              Get-Content $OutputPath | ForEach-Object {
+                $domain = $_.Trim().ToLowerInvariant()
+                if ($domain) { [void]$domains.Add($domain) }
+              }
+            }
+            Get-Content $InputPath | ForEach-Object {
+              $line = ($_ -replace '\s+#.*$', '').Trim()
+              if ($line) {
+                foreach ($part in ($line -split '\s+')) {
+                  $domain = $part.Trim().TrimStart([char[]]"*.").ToLowerInvariant()
+                  if ($domain.StartsWith("include:") -or -not $domain.Contains(".")) { continue }
+                  if ($domain -match '^[a-z0-9_.-]+$') {
+                    [void]$domains.Add($domain)
+                  }
+                }
+              }
+            }
+            $sorted = $domains | Sort-Object
+            $outputDir = (Resolve-Path (Split-Path $OutputPath -Parent)).Path
+            $outputFile = Join-Path $outputDir (Split-Path $OutputPath -Leaf)
+            [System.IO.File]::WriteAllLines($outputFile, $sorted, [System.Text.UTF8Encoding]::new($false))
+            foreach ($required in @("yandex.ru", "ozon.ru")) {
+              if (-not $domains.Contains($required)) {
+                throw "Missing required domain $required in Russian services list"
+              }
+            }
+          }
 
           Write-Host "Downloading Xray-core (Windows x64)..."
           Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip" -OutFile xray.zip
           Expand-Archive -Path xray.zip -DestinationPath xray-extracted -Force
           Copy-Item xray-extracted/xray.exe src-tauri/bin/xray-x86_64-pc-windows-msvc.exe
-          Copy-Item xray-extracted/geoip.dat src-tauri/bin/ -Force
-          Copy-Item xray-extracted/geosite.dat src-tauri/bin/ -Force
+
+          Write-Host "Downloading automatic routing rules..."
+          Download-VerifiedReleaseAsset `
+            -Repository "runetfreedom/russia-v2ray-rules-dat" `
+            -AssetName "geosite.dat" `
+            -Output "src-tauri/bin/geosite.dat"
+          Download-VerifiedReleaseAsset `
+            -Repository "runetfreedom/russia-v2ray-rules-dat" `
+            -AssetName "geoip.dat" `
+            -Output "src-tauri/bin/geoip.dat"
+          Download-VerifiedReleaseAsset `
+            -Repository "v2fly/domain-list-community" `
+            -AssetName "dlc.dat_plain.yml" `
+            -Output "dlc.dat_plain.yml"
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/runetfreedom/russia-domains-list/main/ru-available-only-inside" `
+            -OutFile "ru-available-only-inside.txt"
+          $ruCategories = @(
+            "category-bank-ru",
+            "category-betting-ru",
+            "category-ecommerce-ru",
+            "category-entertainment-ru",
+            "category-gov-ru",
+            "category-media-ru",
+            "category-medicine-ru",
+            "category-retail-ru",
+            "category-ru",
+            "category-travel-ru"
+          )
+          Export-PlainCategoryDomains `
+            -Categories $ruCategories `
+            -InputPath "dlc.dat_plain.yml" `
+            -OutputPath "public/routing/ru-services.txt"
+          Add-PlainDomainList `
+            -InputPath "ru-available-only-inside.txt" `
+            -OutputPath "public/routing/ru-services.txt"
+
+          $env:XRAY_LOCATION_ASSET = (Resolve-Path "src-tauri/bin").Path
+          & src-tauri/bin/xray-x86_64-pc-windows-msvc.exe `
+            run -test -config scripts/xray-routing-assets-test.json
+          if ($LASTEXITCODE -ne 0) {
+            throw "XRay rejected the automatic routing assets"
+          }
 
           Write-Host "Downloading tun2socks (Windows amd64)..."
           Invoke-WebRequest -Uri "https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-windows-amd64.zip" -OutFile tun2socks.zip

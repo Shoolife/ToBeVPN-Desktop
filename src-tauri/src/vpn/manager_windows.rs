@@ -258,6 +258,15 @@ impl VpnManager {
             "[VPN-WIN] Resolved {} configured direct-access destinations",
             control_bypass_ips.len()
         );
+        let direct_interface = if server.requires_direct_interface() {
+            let interface = get_default_interface_name()
+                .await
+                .ok_or("Could not detect the physical network interface")?;
+            log_win!("[VPN-WIN] Direct routing interface detected");
+            Some(interface)
+        } else {
+            None
+        };
         if attempt.is_cancelled() {
             return Err(CONNECT_CANCELLED.into());
         }
@@ -282,6 +291,9 @@ impl VpnManager {
             server.sni = server.address.clone();
         }
         server.address = server_ip.clone();
+        if let Some(interface) = direct_interface {
+            server.direct_interface = interface;
+        }
         *self.server_ip.lock().await = Some(server_ip.clone());
         *self.control_bypass_ips.lock().await = control_bypass_ips.clone();
 
@@ -1302,6 +1314,35 @@ async fn get_default_gateway() -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// Returns the alias of the physical interface selected by Windows for the
+/// lowest-metric IPv4 default route. XRay resolves this alias to an interface
+/// index and applies IP_UNICAST_IF/IPV6_UNICAST_IF to direct outbound sockets.
+async fn get_default_interface_name() -> Option<String> {
+    let cmd = format!(
+        "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.InterfaceAlias -ne '{adapter}' }} | \
+         Sort-Object RouteMetric | Select-Object -First 1; \
+         if ($r) {{ [Console]::Out.Write($r.InterfaceAlias) }}",
+        adapter = WINTUN_ADAPTER
+    );
+    let mut command = Command::new("powershell");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+        .creation_flags(CREATE_NO_WINDOW)
+        .kill_on_drop(true);
+    match timeout(SUBPROC_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            let interface = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if interface.is_empty() || interface == WINTUN_ADAPTER {
+                None
+            } else {
+                Some(interface)
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Returns the wintun adapter's InterfaceIndex as a string suitable for

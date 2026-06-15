@@ -1,6 +1,7 @@
 // VPN engine bridge — calls Rust Tauri commands for xray-core + tun2socks.
 import { invoke } from "@tauri-apps/api/core";
 import { CONTROL_PLANE_BYPASS_HOSTS } from "../api/config";
+import { loadRoutingSettings, type RoutingMode } from "./routingSettings";
 
 export interface ServerVpnConfig {
   address: string;
@@ -17,6 +18,12 @@ export interface ServerVpnConfig {
   mode?: string;
   spx?: string;
   bypass_hosts?: string[];
+  routing_mode?: RoutingMode;
+  select_all_services?: boolean;
+  selected_service_domains?: string[];
+  excluded_service_domains?: string[];
+  direct_domains?: string[];
+  proxy_domains?: string[];
 }
 
 export type VpnStatus = "Disconnected" | "Connecting" | "Connected" | "Disconnecting" | "Error";
@@ -32,10 +39,17 @@ export interface TrafficStats {
 }
 
 export async function startVpn(server: ServerVpnConfig): Promise<void> {
+  const routing = loadRoutingSettings();
   await invoke("start_vpn", {
     server: {
       ...server,
       bypass_hosts: CONTROL_PLANE_BYPASS_HOSTS,
+      routing_mode: routing.mode,
+      select_all_services: routing.selectAllServices,
+      selected_service_domains: routing.selectedServiceDomains,
+      excluded_service_domains: routing.excludedServiceDomains,
+      direct_domains: routing.directDomains,
+      proxy_domains: routing.proxyDomains,
     },
   });
 }

@@ -10,6 +10,7 @@ import ServersScreen from "./screens/ServersScreen";
 import StatsScreen from "./screens/StatsScreen";
 import SpeedTestScreen from "./screens/SpeedTestScreen";
 import DevicesScreen from "./screens/DevicesScreen";
+import RoutingScreen from "./screens/RoutingScreen";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import UpdateBanner from "./components/UpdateBanner";
 import {
@@ -36,7 +37,7 @@ import {
 import { selectBestVpnServer } from "./session/serverQuality";
 import "./App.css";
 
-export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices";
+export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing";
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
 
@@ -96,8 +97,14 @@ export interface SelectedServer {
 
 type Direction = "forward" | "backward" | "none";
 
-export default function App() {
-  const [currentScreen, setCurrentScreen] = useState<Screen>("splash");
+export default function App({
+  initialScreen = "splash",
+  browserPreview = false,
+}: {
+  initialScreen?: Screen;
+  browserPreview?: boolean;
+}) {
+  const [currentScreen, setCurrentScreen] = useState<Screen>(initialScreen);
   const [prevScreen, setPrevScreen] = useState<Screen | null>(null);
   const [direction, setDirection] = useState<Direction>("none");
   const [animating, setAnimating] = useState(false);
@@ -291,11 +298,11 @@ export default function App() {
 
   // Start device-link polling when already authenticated on mount.
   useEffect(() => {
-    if (isPaired()) {
+    if (!browserPreview && isPaired()) {
       startDeviceLinkPolling();
     }
     return () => stopDeviceLinkPolling();
-  }, []);
+  }, [browserPreview]);
 
   // Adaptive scaling for laptops whose screen height is below the design
   // target of 895px (1366x768 / 1280x720 / netbooks). The CSS frame is
@@ -387,6 +394,7 @@ export default function App() {
             onSpeedTest={() => goForward("speedtest")}
             selectedServer={selectedServer}
             automaticServerSelection={automaticServerSelection}
+            browserPreview={browserPreview}
             onServerChange={(server) => {
               selectedServerRef.current = server;
               setSelectedServer(server);
@@ -400,10 +408,13 @@ export default function App() {
             onBack={() => goBack("home")}
             onLoggedOut={() => { stopDeviceLinkPolling(); forceGoToPairing(); }}
             onDevices={() => goForward("devices")}
+            onRouting={() => goForward("routing")}
           />
         );
       case "devices":
         return <DevicesScreen onBack={() => goBack("settings")} />;
+      case "routing":
+        return <RoutingScreen onBack={() => goBack("settings")} />;
       case "servers":
         return (
           <ServersScreen
@@ -534,7 +545,7 @@ export default function App() {
             sits outside the .app container's overflow:hidden and the
             screen-transition transforms — both create new containing
             blocks that break position:fixed under WebKitGTK on Linux. */}
-        {!updateRequired && currentScreen !== "splash" && currentScreen !== "onboarding" && currentScreen !== "pairing" &&
+        {!browserPreview && !updateRequired && currentScreen !== "splash" && currentScreen !== "onboarding" && currentScreen !== "pairing" &&
           (() => {
             const target = document.getElementById("overlay-root") ?? document.body;
             return createPortal(

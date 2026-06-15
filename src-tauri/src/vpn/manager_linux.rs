@@ -25,6 +25,7 @@ const FWMARK: &str = "0x1";
 // "Connecting" indefinitely.
 const PKEXEC_TIMEOUT: Duration = Duration::from_secs(60);
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
+const ROUTE_DETECT_TIMEOUT: Duration = Duration::from_secs(3);
 const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 
 // Path of the installed polkit helper. When present, pkexec invocations match
@@ -281,6 +282,37 @@ impl VpnManager {
         false
     }
 
+    async fn detect_default_interface(attempt: &ConnectAttempt) -> Result<String, String> {
+        attempt.ensure_active()?;
+        let mut cmd = Command::new("ip");
+        cmd.args(["-4", "route", "show", "default"])
+            .kill_on_drop(true);
+        let output = timeout(ROUTE_DETECT_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| "Timed out while detecting the physical network interface".to_string())?
+            .map_err(|e| format!("Failed to detect the physical network interface: {e}"))?;
+        attempt.ensure_active()?;
+        if !output.status.success() {
+            return Err("Could not detect the physical network interface".into());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.first() != Some(&"default") {
+                continue;
+            }
+            if let Some(index) = fields.iter().position(|field| *field == "dev") {
+                if let Some(interface) = fields.get(index + 1) {
+                    if !interface.is_empty() && *interface != TUN_NAME {
+                        return Ok((*interface).to_string());
+                    }
+                }
+            }
+        }
+        Err("Could not find an active physical network interface".into())
+    }
+
     /// Start full VPN: xray-core → tun2socks → routing.
     pub async fn start(
         &self,
@@ -323,6 +355,13 @@ impl VpnManager {
             "[VPN] Resolved {} configured direct-access destinations",
             control_bypass_ips.len()
         );
+        let direct_interface = if server.requires_direct_interface() {
+            let interface = Self::detect_default_interface(attempt).await?;
+            eprintln!("[VPN] Direct routing interface detected");
+            Some(interface)
+        } else {
+            None
+        };
         if attempt.is_cancelled() {
             return Err(CONNECT_CANCELLED.into());
         }
@@ -355,6 +394,9 @@ impl VpnManager {
             eprintln!("[VPN] Filled missing SNI from server address");
         }
         server.address = server_ip.clone();
+        if let Some(interface) = direct_interface {
+            server.direct_interface = interface;
+        }
 
         // 1. Write xray config to per-user cache dir (mode 0600).
         // Contains the user's UUID and reality keys — under no circumstances
