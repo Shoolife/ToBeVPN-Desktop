@@ -104,11 +104,12 @@ pub struct VpnManager {
     /// fire vpn-died against a new one.
     session_gen: Arc<Mutex<u64>>,
     bin_dir: PathBuf,
+    asset_dir: PathBuf,
     app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 impl VpnManager {
-    pub fn new(bin_dir: PathBuf) -> Self {
+    pub fn new(bin_dir: PathBuf, asset_dir: PathBuf) -> Self {
         Self {
             state: Arc::new(Mutex::new(VpnState::Disconnected)),
             xray_process: Arc::new(Mutex::new(None)),
@@ -117,6 +118,7 @@ impl VpnManager {
             control_bypass_ips: Arc::new(Mutex::new(Vec::new())),
             session_gen: Arc::new(Mutex::new(0)),
             bin_dir,
+            asset_dir,
             app_handle: Arc::new(Mutex::new(None)),
         }
     }
@@ -166,8 +168,9 @@ impl VpnManager {
             }
             seen.into_iter().collect()
         };
-        new_ips
-            .retain(|ip| active_server_ip.as_ref() != Some(ip) && !existing_bypass_ips.contains(ip));
+        new_ips.retain(|ip| {
+            active_server_ip.as_ref() != Some(ip) && !existing_bypass_ips.contains(ip)
+        });
         if new_ips.is_empty() {
             return Ok(mapping);
         }
@@ -311,6 +314,21 @@ impl VpnManager {
         }
 
         let asset_dir = self.find_asset_dir();
+        log_win!(
+            "[VPN-WIN] asset dir: {:?} (geoip.dat: {}, geosite.dat: {})",
+            asset_dir,
+            asset_dir.join("geoip.dat").exists(),
+            asset_dir.join("geosite.dat").exists()
+        );
+        if server.requires_geosite_assets() && !asset_dir.join("geosite.dat").is_file() {
+            let message = format!("Routing database is missing from {}", asset_dir.display());
+            log_win!("[VPN-WIN] ERROR: {message}");
+            self.set_state(VpnState::Error {
+                message: message.clone(),
+            })
+            .await;
+            return Err(message);
+        }
 
         // 2. xray.exe
         let xray_bin = self.resolve_bin("xray");
@@ -331,8 +349,8 @@ impl VpnManager {
         if let Some(stderr) = xray_child.stderr.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(_line)) = lines.next_line().await {
-                    log_win!("[xray] diagnostic output received");
+                while let Ok(Some(line)) = lines.next_line().await {
+                    log_win!("[xray] {line}");
                 }
             });
         }
@@ -446,6 +464,7 @@ impl VpnManager {
             control_bypass_ips: self.control_bypass_ips.clone(),
             session_gen: self.session_gen.clone(),
             bin_dir: self.bin_dir.clone(),
+            asset_dir: self.asset_dir.clone(),
             app_handle: self.app_handle.clone(),
         };
         tauri::async_runtime::spawn(async move {
@@ -626,6 +645,10 @@ impl VpnManager {
     }
 
     fn find_asset_dir(&self) -> PathBuf {
+        if self.asset_dir.join("geoip.dat").exists() || self.asset_dir.join("geosite.dat").exists()
+        {
+            return self.asset_dir.clone();
+        }
         let beside = self.bin_dir.join("geoip.dat");
         if beside.exists() {
             return self.bin_dir.clone();

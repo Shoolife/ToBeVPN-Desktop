@@ -160,11 +160,12 @@ pub struct VpnManager {
     /// session can't fire `disconnect-due-to-crash` against the new one.
     session_gen: Arc<Mutex<u64>>,
     bin_dir: PathBuf,
+    asset_dir: PathBuf,
     app_handle: Option<tauri::AppHandle>,
 }
 
 impl VpnManager {
-    pub fn new(bin_dir: PathBuf) -> Self {
+    pub fn new(bin_dir: PathBuf, asset_dir: PathBuf) -> Self {
         Self {
             state: Arc::new(Mutex::new(VpnState::Disconnected)),
             xray_process: Arc::new(Mutex::new(None)),
@@ -172,6 +173,7 @@ impl VpnManager {
             stats_running: Arc::new(Mutex::new(false)),
             session_gen: Arc::new(Mutex::new(0)),
             bin_dir,
+            asset_dir,
             app_handle: None,
         }
     }
@@ -413,25 +415,24 @@ impl VpnManager {
             return Err(CONNECT_CANCELLED.into());
         }
 
-        // xray needs geoip.dat/geosite.dat
-        let asset_dir = {
-            let beside = self.bin_dir.join("geoip.dat");
-            if beside.exists() {
-                self.bin_dir.clone()
-            } else {
-                let sub = self.bin_dir.join("bin");
-                if sub.join("geoip.dat").exists() {
-                    sub
-                } else {
-                    self.bin_dir.clone()
-                }
-            }
-        };
+        // Tauri installs sidecar executables and resources into different
+        // directories on Linux (/usr/bin vs /usr/lib/<app>/bin).
+        let asset_dir = &self.asset_dir;
         eprintln!(
-            "[VPN] Asset dir: {:?} (geoip.dat exists: {})",
+            "[VPN] Asset dir: {:?} (geoip.dat: {}, geosite.dat: {})",
             asset_dir,
-            asset_dir.join("geoip.dat").exists()
+            asset_dir.join("geoip.dat").exists(),
+            asset_dir.join("geosite.dat").exists()
         );
+        if server.requires_geosite_assets() && !asset_dir.join("geosite.dat").is_file() {
+            let message = format!("Routing database is missing from {}", asset_dir.display());
+            eprintln!("[VPN] ERROR: {message}");
+            self.set_state(VpnState::Error {
+                message: message.clone(),
+            })
+            .await;
+            return Err(message);
+        }
 
         // 2. Start xray-core
         let xray_bin = self.resolve_bin("xray");
@@ -445,7 +446,7 @@ impl VpnManager {
             .arg("run")
             .arg("-config")
             .arg(&config_path)
-            .env("XRAY_LOCATION_ASSET", &asset_dir)
+            .env("XRAY_LOCATION_ASSET", asset_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -463,8 +464,8 @@ impl VpnManager {
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
-                while let Ok(Some(_line)) = lines.next_line().await {
-                    eprintln!("[xray] diagnostic output received");
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("[xray] {line}");
                 }
             });
         }
@@ -581,6 +582,7 @@ impl VpnManager {
             stats_running: self.stats_running.clone(),
             session_gen: self.session_gen.clone(),
             bin_dir: self.bin_dir.clone(),
+            asset_dir: self.asset_dir.clone(),
             app_handle: self.app_handle.clone(),
         };
         tauri::async_runtime::spawn(async move {

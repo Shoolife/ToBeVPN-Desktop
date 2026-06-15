@@ -64,6 +64,11 @@ impl ServerConfig {
         matches!(self.routing_mode.as_str(), "blocked_only" | "selective")
             || !self.direct_domains.is_empty()
     }
+
+    pub fn requires_geosite_assets(&self) -> bool {
+        self.routing_mode == "blocked_only"
+            || (self.routing_mode == "selective" && self.select_all_services)
+    }
 }
 
 pub const SOCKS_PORT: u16 = 10809;
@@ -441,10 +446,7 @@ mod tests {
         assert_eq!(rules[4]["outboundTag"], "direct");
         assert_eq!(rules[4]["domain"][0], "geosite:category-bank-ru");
         assert_eq!(rules[4]["domain"][8], "geosite:category-ru");
-        assert_eq!(
-            rules[4]["domain"][10],
-            "geosite:ru-available-only-inside"
-        );
+        assert_eq!(rules[4]["domain"][10], "geosite:ru-available-only-inside");
         assert_eq!(rules[5]["outboundTag"], "proxy");
         assert_eq!(rules[5]["network"], "tcp,udp");
         assert_eq!(config["routing"]["domainStrategy"], "IPIfNonMatch");
@@ -500,10 +502,7 @@ mod tests {
         assert_eq!(rules[2]["outboundTag"], "proxy");
         assert_eq!(rules[3]["domain"][0], "geosite:category-bank-ru");
         assert_eq!(rules[3]["domain"][8], "geosite:category-ru");
-        assert_eq!(
-            rules[3]["domain"][10],
-            "geosite:ru-available-only-inside"
-        );
+        assert_eq!(rules[3]["domain"][10], "geosite:ru-available-only-inside");
         assert_eq!(rules[3]["outboundTag"], "direct");
     }
 }

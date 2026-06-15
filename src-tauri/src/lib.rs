@@ -274,7 +274,11 @@ fn clean_device_model_part(value: &str) -> Option<String> {
 fn compose_vendor_model(vendor: Option<String>, model: Option<String>) -> Option<String> {
     let model = model?;
     match vendor {
-        Some(vendor) if !model.to_ascii_lowercase().starts_with(&vendor.to_ascii_lowercase()) => {
+        Some(vendor)
+            if !model
+                .to_ascii_lowercase()
+                .starts_with(&vendor.to_ascii_lowercase()) =>
+        {
             Some(format!("{vendor} {model}"))
         }
         _ => Some(model),
@@ -686,22 +690,26 @@ pub fn run() {
                 .and_then(|p| p.parent().map(|p| p.to_path_buf()))
                 .unwrap_or_default();
 
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .unwrap_or_else(|_| exe_dir.clone());
+            let resource_bin_dir = resource_dir.join("bin");
+
             let xray_in_exe_dir = exe_dir.join("xray").exists()
                 || exe_dir.join("xray.exe").exists()
                 || exe_dir.join("xray-x86_64-unknown-linux-gnu").exists()
                 || exe_dir.join("xray-x86_64-pc-windows-msvc.exe").exists();
             let bin_dir = if xray_in_exe_dir {
-                exe_dir
+                exe_dir.clone()
             } else {
-                app.path()
-                    .resource_dir()
-                    .map(|d| d.join("bin"))
-                    .unwrap_or(exe_dir)
+                resource_bin_dir.clone()
             };
 
             eprintln!("VPN bin dir: {:?}", bin_dir);
+            eprintln!("VPN asset dir: {:?}", resource_bin_dir);
 
-            let mut manager = VpnManager::new(bin_dir);
+            let mut manager = VpnManager::new(bin_dir, resource_bin_dir);
             manager.set_app_handle(app.handle().clone());
             let shared = Arc::new(Mutex::new(Some(manager)));
             app.manage(AppVpn(shared.clone()));
