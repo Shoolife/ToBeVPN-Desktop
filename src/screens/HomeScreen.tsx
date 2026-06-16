@@ -46,9 +46,9 @@ function countryName(code: string | null | undefined): string {
 }
 
 function pingColor(ping: number): string {
-  if (ping < 100) return "#4CAF50";
-  if (ping < 200) return "#FF9800";
-  return "#F44336";
+  if (ping < 100) return "var(--success)";
+  if (ping < 200) return "var(--warning)";
+  return "var(--danger)";
 }
 
 function planLabel(plan: UserPlan, displayName?: string | null): string {
@@ -106,9 +106,9 @@ function formatTrafficBytes(bytes: number): string {
 }
 
 function trafficProgressColor(progress: number): string {
-  if (progress >= 0.9) return "#F44336";
-  if (progress >= 0.7) return "#FF9800";
-  return "#4CAF50";
+  if (progress >= 0.9) return "var(--danger)";
+  if (progress >= 0.7) return "var(--warning)";
+  return "var(--success)";
 }
 
 function planHint(plan: UserPlan, expiresAt: number | null): string {

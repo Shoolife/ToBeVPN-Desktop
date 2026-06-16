@@ -89,8 +89,8 @@
 }
 
 .routing-segmented button.routing-segmented__active {
-  background: #3f434c;
-  color: #fff;
+  background: var(--chip-active-bg);
+  color: var(--chip-active-text);
 }
 
 .routing-auto {
@@ -113,7 +113,7 @@
   flex-shrink: 0;
   border-radius: 50%;
   background: var(--surface-2);
-  color: #4caf50;
+  color: var(--success);
 }
 
 .routing-auto__content {
@@ -135,7 +135,7 @@
 
 .routing-auto__database {
   margin-top: 8px;
-  color: #4caf50;
+  color: var(--success);
   font-size: 11px;
 }
 
@@ -164,7 +164,7 @@
 
 .routing-selective__count {
   flex-shrink: 0;
-  color: #4caf50;
+  color: var(--success);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -242,7 +242,7 @@
   width: 17px;
   height: 17px;
   flex-shrink: 0;
-  accent-color: #4caf50;
+  accent-color: var(--success);
 }
 
 .routing-database-row span {
@@ -266,7 +266,7 @@
 }
 
 .routing-database-state--error {
-  color: #f44336;
+  color: var(--danger);
   cursor: pointer;
 }
 
@@ -304,7 +304,7 @@
 }
 
 .routing-domain-input--invalid {
-  border-color: #f44336;
+  border-color: var(--danger);
 }
 
 .routing-domain-input input {
@@ -334,7 +334,7 @@
 
 .routing-domain-error {
   margin-top: 6px;
-  color: #f44336;
+  color: var(--danger);
   font-size: 12px;
 }
 
@@ -385,8 +385,8 @@
   height: 46px;
   border: 0;
   border-radius: 8px;
-  background: #dadce5;
-  color: #2d2f37;
+  background: var(--cta-bg);
+  color: var(--cta-text);
   font: inherit;
   font-size: 15px;
   font-weight: 700;

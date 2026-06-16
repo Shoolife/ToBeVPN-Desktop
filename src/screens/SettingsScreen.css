@@ -121,20 +121,20 @@
 }
 
 .settings-info-row__value--green {
-  color: #4CAF50;
+  color: var(--success);
 }
 
 .settings-info-row__value--orange {
-  color: #FF9800;
+  color: var(--warning);
 }
 
 .settings-info-row__value--red {
-  color: #F44336;
+  color: var(--danger);
 }
 
 .settings-card__renew-hint {
   font-size: 13px;
-  color: #F44336;
+  color: var(--danger);
   margin-top: 6px;
 }
 
@@ -148,7 +148,7 @@
   height: 32px;
   padding: 0 16px;
   border-radius: 8px;
-  border: 1px solid #5C5C61;
+  border: 1px solid var(--border);
   background: transparent;
   color: var(--text);
   font-size: 14px;
@@ -158,16 +158,31 @@
 }
 
 .settings-chip:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-2);
 }
 
 .settings-chip--active {
-  background: #3F434C;
+  background: var(--chip-active-bg);
   border-color: transparent;
+  color: var(--chip-active-text);
 }
 
 .settings-chip--active:hover {
-  background: #464A54;
+  background: var(--chip-active-hover);
+}
+
+:root[data-theme="light"] .settings-card {
+  border-color: transparent;
+}
+
+:root[data-theme="light"] .settings-chip {
+  border-color: #bdbdbd;
+  color: var(--text-muted);
+}
+
+:root[data-theme="light"] .settings-chip--active {
+  border-color: transparent;
+  color: #000000;
 }
 
 /* Email edit */
@@ -200,7 +215,7 @@
   height: 40px;
   border-radius: 10px;
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--input-bg);
   color: var(--text);
   font-size: 14px;
   padding: 0 12px;
@@ -215,7 +230,7 @@
 
 .settings-email-edit__error {
   font-size: 13px;
-  color: #F44336;
+  color: var(--danger);
 }
 
 .settings-email-edit__actions {
@@ -229,9 +244,9 @@
   width: 100%;
   height: 44px;
   border-radius: 14px;
-  border: 1px solid #F44336;
+  border: 1px solid var(--danger);
   background: transparent;
-  color: #F44336;
+  color: var(--danger);
   font-size: 15px;
   font-weight: 500;
   cursor: pointer;
@@ -239,19 +254,25 @@
 }
 
 .settings-logout-btn:hover {
-  background: rgba(244, 67, 54, 0.08);
+  background: var(--danger-soft-bg);
 }
 
 /* Dialog overlay */
 .dialog-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
   backdrop-filter: blur(4px);
+  animation: settings-dialog-overlay-in 180ms ease-out;
+}
+
+.dialog-overlay--closing {
+  pointer-events: none;
+  animation: settings-dialog-overlay-out 180ms ease-in forwards;
 }
 
 .dialog {
@@ -261,6 +282,45 @@
   padding: 24px;
   max-width: 340px;
   width: calc(100% - 48px);
+  box-shadow: var(--modal-shadow);
+  transform-origin: center;
+  animation: settings-dialog-in 220ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+.dialog-overlay--closing .dialog {
+  animation: settings-dialog-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+@keyframes settings-dialog-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes settings-dialog-overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes settings-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes settings-dialog-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
 }
 
 .dialog__title {
@@ -305,10 +365,10 @@
 }
 
 .dialog__btn--primary {
-  background: #DADCE5;
-  color: #2D2F37;
+  background: var(--cta-bg);
+  color: var(--cta-text);
 }
 
 .dialog__btn--primary:hover {
-  background: #E3E5EE;
+  background: var(--cta-hover);
 }

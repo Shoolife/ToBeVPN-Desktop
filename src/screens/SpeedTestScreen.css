@@ -52,14 +52,14 @@
 
 .speed-vpn-badge--on {
   background: rgba(67, 211, 158, 0.16);
-  color: #43d39e;
+  color: var(--success);
   border: 1px solid rgba(67, 211, 158, 0.32);
 }
 
 .speed-vpn-badge--off {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-muted);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--speed-off-bg);
+  color: var(--speed-off-text);
+  border: 1px solid var(--speed-off-border);
 }
 
 .speed-content {
@@ -116,7 +116,7 @@
 }
 
 .speed-phase--error {
-  color: #F44336;
+  color: var(--danger);
 }
 
 /* Results */
@@ -150,9 +150,9 @@
   font-weight: 700;
 }
 
-.speed-result__value--green { color: #4CAF50; }
-.speed-result__value--orange { color: #FF9800; }
-.speed-result__value--red { color: #F44336; }
+.speed-result__value--green { color: var(--success); }
+.speed-result__value--orange { color: var(--warning); }
+.speed-result__value--red { color: var(--danger); }
 .speed-result__value--muted { color: var(--text-muted); }
 
 .speed-result__unit {
@@ -167,8 +167,8 @@
   height: 52px;
   border-radius: 16px;
   border: none;
-  background: #DADCE5;
-  color: #2D2F37;
+  background: var(--cta-bg);
+  color: var(--cta-text);
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
@@ -176,5 +176,5 @@
 }
 
 .speed-start-btn:hover {
-  background: #E3E5EE;
+  background: var(--cta-hover);
 }

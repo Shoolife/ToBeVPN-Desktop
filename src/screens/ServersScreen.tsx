@@ -38,9 +38,9 @@ function countryName(code: string | null | undefined): string {
 }
 
 function pingColor(ping: number): string {
-  if (ping < 100) return "#4CAF50";
-  if (ping < 200) return "#FF9800";
-  return "#F44336";
+  if (ping < 100) return "var(--success)";
+  if (ping < 200) return "var(--warning)";
+  return "var(--danger)";
 }
 
 function loadErrorText(error: unknown): string {

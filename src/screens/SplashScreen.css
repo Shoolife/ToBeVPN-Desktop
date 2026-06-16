@@ -52,6 +52,7 @@
 }
 
 .splash-chevron-main {
+  stroke: #ffffff;
   transform: translateX(-40px);
   opacity: 0;
   animation:
@@ -60,6 +61,8 @@
 }
 
 .splash-chevron-trail {
+  stroke: #ffffff;
+  stroke-opacity: 0.4;
   transform: translateX(-24px);
   opacity: 0;
   animation:
@@ -105,6 +108,43 @@
 
 .splash-status--visible {
   color: rgba(255, 255, 255, 0.74);
+}
+
+:root[data-theme="light"] .splash-root {
+  background: #f4f7fb;
+}
+
+:root[data-theme="light"] .splash-glow {
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgba(0, 188, 212, 0.18) 0%,
+    rgba(0, 188, 212, 0) 65%
+  );
+}
+
+:root[data-theme="light"] .splash-chevron-main {
+  stroke: #6b7280;
+}
+
+:root[data-theme="light"] .splash-chevron-trail {
+  stroke: #6b7280;
+  stroke-opacity: 0.35;
+}
+
+:root[data-theme="light"] .splash-title {
+  color: #102a43;
+}
+
+:root[data-theme="light"] .splash-tagline {
+  color: rgba(16, 42, 67, 0.55);
+}
+
+:root[data-theme="light"] .splash-status {
+  color: rgba(16, 42, 67, 0);
+}
+
+:root[data-theme="light"] .splash-status--visible {
+  color: rgba(16, 42, 67, 0.74);
 }
 
 @keyframes splash-shield-scale {

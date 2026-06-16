@@ -22,10 +22,10 @@ const PING_COUNT = 3;
 const TEST_DURATION_MS = 10_000;
 
 function gaugeColor(speed: number): string {
-  if (speed < 10) return "#F44336";
-  if (speed < 30) return "#FF9800";
-  if (speed < 60) return "#4CAF50";
-  return "#2196F3";
+  if (speed < 10) return "var(--danger)";
+  if (speed < 30) return "var(--warning)";
+  if (speed < 60) return "var(--success)";
+  return "var(--info)";
 }
 
 function pingColorClass(ping: number): string {

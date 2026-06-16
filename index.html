@@ -5,9 +5,17 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ToBeVPN</title>
+    <script src="/theme-boot.js"></script>
     <style>
+      :root,
+      :root[data-theme="dark"] {
+        --initial-bg: #0d0d0d;
+      }
+      :root[data-theme="light"] {
+        --initial-bg: #ffffff;
+      }
       html, body {
-        background: #0d0d0d;
+        background: var(--initial-bg);
         margin: 0;
         width: 100%;
         height: 100%;
@@ -21,7 +29,7 @@
       #scale-frame {
         width: var(--app-frame-width, 100vw);
         height: var(--app-frame-height, 100vh);
-        background: #0d0d0d;
+        background: var(--initial-bg);
         transform: scale(var(--app-scale, 1));
         transform-origin: top left;
         position: relative;

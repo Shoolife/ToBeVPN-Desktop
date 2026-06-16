@@ -73,17 +73,17 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--hero-label);
 }
 
 .stats-hero__label {
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--hero-label);
 }
 
 .stats-hero__sublabel {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--hero-sublabel);
 }
 
 .stats-hero__total {
@@ -108,7 +108,7 @@
 }
 
 .stats-hero__metric-icon {
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--hero-label);
   margin-bottom: 4px;
 }
 
@@ -120,13 +120,13 @@
 
 .stats-hero__metric-label {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--hero-label);
 }
 
 .stats-hero__divider {
   width: 1px;
   height: 36px;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--hero-divider);
   flex-shrink: 0;
 }
 
@@ -300,7 +300,7 @@
 .stats-row__bytes {
   font-size: 16px;
   font-weight: 700;
-  color: #4CAF50;
+  color: var(--success);
 }
 
 .stats-row__detail {
@@ -311,7 +311,7 @@
 
 .stats-row__bar-bg {
   height: 5px;
-  background: rgba(138, 151, 168, 0.15);
+  background: var(--progress-track);
   border-radius: 3px;
   overflow: hidden;
 }

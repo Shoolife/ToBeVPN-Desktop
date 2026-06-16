@@ -155,9 +155,9 @@
 
 .devices-card__disconnect {
   font-size: 12px;
-  color: #F44336;
+  color: var(--danger);
   background: none;
-  border: 1px solid #F44336;
+  border: 1px solid var(--danger);
   border-radius: 8px;
   padding: 4px 10px;
   cursor: pointer;
@@ -167,7 +167,7 @@
 }
 
 .devices-card__disconnect:hover {
-  background: rgba(244, 67, 54, 0.08);
+  background: var(--danger-soft-bg);
 }
 
 .devices-card__disconnect:disabled {

@@ -13,13 +13,54 @@
   --bg: #0d0d0d;
   --surface: #2b2b2b;
   --surface-2: #353535;
+  --surface-3: #242424;
   --border: #3a3a3a;
   --text: #ececec;
   --text-muted: #a4a4a4;
   --accent: #3a8dff;
   --accent-hover: #4d9aff;
+  --accent-glow: rgba(58, 141, 255, 0.4);
   --danger: #ff5a5a;
   --success: #43d39e;
+  --warning: #ffb74d;
+  --info: #2196f3;
+  --shadow-card: 0 20px 50px rgba(0, 0, 0, 0.35);
+  --modal-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+  --overlay: rgba(0, 0, 0, 0.55);
+  --overlay-soft: rgba(0, 0, 0, 0.36);
+  --overlay-strong: rgba(0, 0, 0, 0.78);
+  --cta-bg: #dadce5;
+  --cta-hover: #e3e5ee;
+  --cta-text: #2d2f37;
+  --cta-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+  --selected-bg: #3f434c;
+  --selected-bg-hover: #464a54;
+  --selected-border: #5a5d6c;
+  --chip-active-bg: #3f434c;
+  --chip-active-hover: #464a54;
+  --chip-active-text: #ececec;
+  --input-bg: #191919;
+  --sheet-bg: #1c1c1c;
+  --sheet-card: #262626;
+  --sheet-divider: #3a3a3e;
+  --sheet-handle: #938f99;
+  --progress-track: rgba(255, 255, 255, 0.12);
+  --trial-bg: #2a2021;
+  --trial-bg-hover: #312425;
+  --trial-border: #7a3430;
+  --trial-text: #ff8a80;
+  --trial-icon-bg: rgba(255, 138, 128, 0.14);
+  --warning-soft-bg: rgba(255, 152, 0, 0.12);
+  --warning-soft-border: rgba(255, 152, 0, 0.34);
+  --danger-soft-bg: rgba(244, 67, 54, 0.13);
+  --danger-soft-border: rgba(244, 67, 54, 0.36);
+  --subtle-icon-bg: rgba(255, 255, 255, 0.08);
+  --hero-label: rgba(255, 255, 255, 0.72);
+  --hero-sublabel: rgba(255, 255, 255, 0.52);
+  --hero-divider: rgba(255, 255, 255, 0.18);
+  --speed-off-bg: rgba(255, 255, 255, 0.08);
+  --speed-off-border: rgba(255, 255, 255, 0.12);
+  --speed-off-text: rgba(255, 255, 255, 0.62);
 
   color-scheme: dark;
   color: var(--text);
@@ -28,6 +69,62 @@
   font-size: 15px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #eeeeee;
+  --surface-2: #e3e3e3;
+  --surface-3: #f7f7f7;
+  --border: #cfcfcf;
+  --text: #1a1c1e;
+  --text-muted: #5c5e6a;
+  --accent: #5c5e6a;
+  --accent-hover: #4f515c;
+  --accent-glow: rgba(92, 94, 106, 0.22);
+  --danger: #d32f2f;
+  --success: #2e7d32;
+  --warning: #b26a00;
+  --info: #1565c0;
+  --shadow-card: 0 18px 42px rgba(20, 24, 32, 0.12);
+  --modal-shadow: 0 18px 48px rgba(20, 24, 32, 0.18);
+  --overlay: rgba(0, 0, 0, 0.28);
+  --overlay-soft: rgba(0, 0, 0, 0.18);
+  --overlay-strong: rgba(0, 0, 0, 0.54);
+  --cta-bg: #3f3f3f;
+  --cta-hover: #4a4a4a;
+  --cta-text: #ffffff;
+  --cta-shadow: none;
+  --selected-bg: #dfe2f3;
+  --selected-bg-hover: #d6dae9;
+  --selected-border: #5a5d6c;
+  --chip-active-bg: #d8d8d8;
+  --chip-active-hover: #d0d0d0;
+  --chip-active-text: #000000;
+  --input-bg: #ffffff;
+  --sheet-bg: #ffffff;
+  --sheet-card: #eeeeee;
+  --sheet-divider: #d9d9d9;
+  --sheet-handle: #777a83;
+  --progress-track: rgba(26, 28, 30, 0.12);
+  --trial-bg: #fff0ee;
+  --trial-bg-hover: #ffe8e5;
+  --trial-border: #e0aaa4;
+  --trial-text: #b3261e;
+  --trial-icon-bg: rgba(179, 38, 30, 0.1);
+  --warning-soft-bg: rgba(255, 152, 0, 0.12);
+  --warning-soft-border: rgba(178, 106, 0, 0.28);
+  --danger-soft-bg: rgba(211, 47, 47, 0.1);
+  --danger-soft-border: rgba(211, 47, 47, 0.26);
+  --subtle-icon-bg: rgba(26, 28, 30, 0.07);
+  --hero-label: rgba(26, 28, 30, 0.7);
+  --hero-sublabel: rgba(26, 28, 30, 0.55);
+  --hero-divider: rgba(26, 28, 30, 0.16);
+  --speed-off-bg: rgba(26, 28, 30, 0.06);
+  --speed-off-border: rgba(26, 28, 30, 0.12);
+  --speed-off-text: rgba(26, 28, 30, 0.62);
+
+  color-scheme: light;
 }
 
 * {
@@ -40,6 +137,7 @@ html, body, #root {
   height: 100%;
   width: 100%;
   overflow: hidden;
+  background: var(--bg);
 }
 
 body {
@@ -77,7 +175,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-card);
 }
 
 .app-error__title {
@@ -182,9 +280,8 @@ body {
 
 .btn--danger { background: var(--danger); }
 
-/* Primary call-to-action across the app: same light pill as the
-   subscription "Купить" button. Use this for any prominent action that
-   isn't a destructive or status-toggling control. */
+/* Primary call-to-action across the app. The actual color is theme-aware:
+   light pill in dark mode, dark neutral button in light mode. */
 .cta-pill {
   display: inline-flex;
   align-items: center;
@@ -194,8 +291,8 @@ body {
   padding: 0 16px;
   border-radius: 12px;
   border: none;
-  background: #DADCE5;
-  color: #2D2F37;
+  background: var(--cta-bg);
+  color: var(--cta-text);
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.1px;
@@ -203,8 +300,8 @@ body {
   transition: background 120ms, box-shadow 120ms;
 }
 .cta-pill:hover:not(:disabled) {
-  background: #E3E5EE;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+  background: var(--cta-hover);
+  box-shadow: var(--cta-shadow);
 }
 .cta-pill:disabled {
   opacity: 0.6;
@@ -320,8 +417,8 @@ body {
 }
 
 .pairing__mode-btn--active {
-  background: var(--accent);
-  color: white;
+  background: var(--chip-active-bg);
+  color: var(--chip-active-text);
 }
 
 .pairing__qr {
@@ -407,7 +504,7 @@ body {
 }
 
 .pairing__hint--error {
-  color: #F44336;
+  color: var(--danger);
 }
 
 /* Home */
@@ -445,7 +542,7 @@ body {
   background: var(--accent);
   border-color: var(--accent);
   color: white;
-  box-shadow: 0 0 24px rgba(58, 141, 255, 0.4);
+  box-shadow: 0 0 24px var(--accent-glow);
 }
 
 .home__status-text {

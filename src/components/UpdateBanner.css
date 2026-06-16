@@ -6,7 +6,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-card);
 }
 
 /* Single-row variant for the Available state — title on the left,
@@ -45,7 +45,7 @@
 
 .update-banner__progress {
   height: 6px;
-  background: var(--surface-2);
+  background: var(--progress-track);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -103,8 +103,8 @@
 .update-banner__btn-primary {
   /* Same look-and-feel as cta-pill so we don't reintroduce the blue button
      that the user pushed back on for SubscriptionSheet. */
-  background: #DADCE5;
-  color: #2D2F37;
+  background: var(--cta-bg);
+  color: var(--cta-text);
   border: none;
   height: 36px;
   padding: 0 14px;
@@ -117,6 +117,6 @@
 }
 
 .update-banner__btn-primary:hover {
-  background: #E3E5EE;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+  background: var(--cta-hover);
+  box-shadow: var(--cta-shadow);
 }

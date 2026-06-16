@@ -5,6 +5,7 @@ import { useSession, type UserPlan } from "../session/store";
 import { getXrayVersion } from "../session/vpn";
 import { formatDateDots } from "../session/dateFormat";
 import { loadRoutingSettings, type RoutingMode } from "../session/routingSettings";
+import { getSavedTheme, saveTheme, type ThemeMode } from "../session/theme";
 import UpdateCheckRow from "../components/UpdateCheckRow";
 import "./SettingsScreen.css";
 
@@ -48,6 +49,8 @@ function routingModeLabel(mode: RoutingMode): string {
   }
 }
 
+const LANGUAGE_DIALOG_EXIT_MS = 180;
+
 export default function SettingsScreen({
   onBack,
   onLoggedOut,
@@ -61,7 +64,9 @@ export default function SettingsScreen({
 }) {
   const session = useSession();
   const currentLang = getSavedLang();
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getSavedTheme());
   const [pendingLang, setPendingLang] = useState<Lang | null>(null);
+  const [languageDialogClosing, setLanguageDialogClosing] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [xrayVersion, setXrayVersion] = useState("Xray-core ...");
   const [routingMode, setRoutingMode] = useState<RoutingMode>(
@@ -74,6 +79,14 @@ export default function SettingsScreen({
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
   const emailInputRef = useRef<HTMLInputElement>(null);
+  const languageDialogTimerRef = useRef<number | null>(null);
+
+  const clearLanguageDialogTimer = () => {
+    if (languageDialogTimerRef.current !== null) {
+      window.clearTimeout(languageDialogTimerRef.current);
+      languageDialogTimerRef.current = null;
+    }
+  };
 
   const handleEditEmail = () => {
     setEmailDraft(session.email ?? "");
@@ -102,15 +115,33 @@ export default function SettingsScreen({
 
   const handleLangClick = (lang: Lang) => {
     if (lang !== currentLang) {
+      clearLanguageDialogTimer();
+      setLanguageDialogClosing(false);
       setPendingLang(lang);
     }
   };
 
+  const closeLanguageDialog = () => {
+    if (!pendingLang || languageDialogClosing) return;
+    clearLanguageDialogTimer();
+    setLanguageDialogClosing(true);
+    languageDialogTimerRef.current = window.setTimeout(() => {
+      setPendingLang(null);
+      setLanguageDialogClosing(false);
+      languageDialogTimerRef.current = null;
+    }, LANGUAGE_DIALOG_EXIT_MS);
+  };
+
   const handleRestart = () => {
     if (pendingLang) {
+      clearLanguageDialogTimer();
       saveLang(pendingLang);
       window.location.reload();
     }
+  };
+
+  const handleThemeClick = (theme: ThemeMode) => {
+    if (theme !== themeMode) setThemeMode(saveTheme(theme));
   };
 
   const handleLogout = async () => {
@@ -144,6 +175,8 @@ export default function SettingsScreen({
     window.addEventListener("focus", refreshRoutingMode);
     return () => window.removeEventListener("focus", refreshRoutingMode);
   }, []);
+
+  useEffect(() => clearLanguageDialogTimer, []);
 
   return (
     <div className="settings-root">
@@ -267,6 +300,25 @@ export default function SettingsScreen({
           </div>
         </div>
 
+        {/* Theme card */}
+        <div className="settings-card">
+          <div className="settings-card__header">{t("theme")}</div>
+          <div className="settings-chips">
+            <button
+              className={`settings-chip ${themeMode === "light" ? "settings-chip--active" : ""}`}
+              onClick={() => handleThemeClick("light")}
+            >
+              {t("theme_light")}
+            </button>
+            <button
+              className={`settings-chip ${themeMode === "dark" ? "settings-chip--active" : ""}`}
+              onClick={() => handleThemeClick("dark")}
+            >
+              {t("theme_dark")}
+            </button>
+          </div>
+        </div>
+
         {/* Language card */}
         <div className="settings-card">
           <div className="settings-card__header">{t("language")}</div>
@@ -314,12 +366,15 @@ export default function SettingsScreen({
 
       {/* Restart dialog */}
       {pendingLang && (
-        <div className="dialog-overlay" onClick={() => setPendingLang(null)}>
+        <div
+          className={`dialog-overlay ${languageDialogClosing ? "dialog-overlay--closing" : ""}`}
+          onClick={closeLanguageDialog}
+        >
           <div className="dialog" onClick={(e) => e.stopPropagation()}>
             <div className="dialog__title">{t("language_restart_title")}</div>
             <div className="dialog__message">{t("language_restart_message")}</div>
             <div className="dialog__actions">
-              <button className="dialog__btn dialog__btn--secondary" onClick={() => setPendingLang(null)}>
+              <button className="dialog__btn dialog__btn--secondary" onClick={closeLanguageDialog}>
                 {t("cancel")}
               </button>
               <button className="dialog__btn dialog__btn--primary" onClick={handleRestart}>

@@ -63,17 +63,17 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  border: 1px solid #7a3430;
+  border: 1px solid var(--trial-border);
   border-radius: 16px;
-  background: #2a2021;
-  color: #ff8a80;
+  background: var(--trial-bg);
+  color: var(--trial-text);
   cursor: pointer;
   text-align: left;
   flex-shrink: 0;
 }
 
 .home-trial-banner:hover {
-  background: #312425;
+  background: var(--trial-bg-hover);
 }
 
 .home-trial-banner__icon {
@@ -83,7 +83,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 138, 128, 0.14);
+  background: var(--trial-icon-bg);
   flex-shrink: 0;
 }
 
@@ -92,7 +92,7 @@
   font-size: 13px;
   font-weight: 700;
   line-height: 1.25;
-  color: #ff8a80;
+  color: var(--trial-text);
 }
 
 .home-sub-reminder {
@@ -102,17 +102,17 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-  border: 1px solid rgba(255, 152, 0, 0.34);
+  border: 1px solid var(--warning-soft-border);
   border-radius: 20px;
-  background: rgba(255, 152, 0, 0.12);
-  color: #ffb74d;
+  background: var(--warning-soft-bg);
+  color: var(--warning);
   flex-shrink: 0;
 }
 
 .home-sub-reminder--expired {
-  border-color: rgba(244, 67, 54, 0.36);
-  background: rgba(244, 67, 54, 0.13);
-  color: #ff8a80;
+  border-color: var(--danger-soft-border);
+  background: var(--danger-soft-bg);
+  color: var(--trial-text);
 }
 
 .home-sub-reminder__icon {
@@ -122,7 +122,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--subtle-icon-bg);
   flex-shrink: 0;
 }
 
@@ -170,8 +170,8 @@
 }
 
 .home-sub-reminder__btn--primary {
-  background: #dadce5;
-  color: #2d2f37;
+  background: var(--cta-bg);
+  color: var(--cta-text);
 }
 
 .home-sub-reminder__btn--text {
@@ -257,14 +257,14 @@
 }
 
 .home-power--blocked {
-  background: #F44336;
+  background: var(--danger);
   color: var(--bg);
   cursor: pointer;
   opacity: 0.85;
 }
 
 .home-power--blocked:hover {
-  background: #F44336;
+  background: var(--danger);
 }
 
 .home__status-label {
@@ -275,11 +275,11 @@
 }
 
 .home__status-label--on {
-  color: #4CAF50;
+  color: var(--success);
 }
 
 .home__status-label--connecting {
-  color: #FF9800;
+  color: var(--warning);
 }
 
 .home__status-label--disconnecting {
@@ -288,7 +288,7 @@
 
 .home__vpn-error {
   font-size: 13px;
-  color: #F44336;
+  color: var(--danger);
   text-align: center;
   margin-top: 4px;
   padding: 0 20px;
@@ -315,7 +315,7 @@
 }
 
 .home-card--blocked {
-  background: rgba(244, 67, 54, 0.13);
+  background: var(--danger-soft-bg);
 }
 
 .home-card__blocked-icon {
@@ -354,7 +354,7 @@
 }
 
 .home-card__icon--blue {
-  background: #2196F3;
+  background: var(--info);
   color: white;
 }
 
@@ -403,7 +403,7 @@
 .home-card__ping-unavailable {
   font-size: 12px;
   font-weight: 600;
-  color: #F44336;
+  color: var(--danger);
   white-space: nowrap;
 }
 
@@ -454,9 +454,9 @@
   letter-spacing: -0.01em;
 }
 
-.home-sub__plan--green { color: #4CAF50; }
-.home-sub__plan--orange { color: #FF9800; }
-.home-sub__plan--red { color: #F44336; }
+.home-sub__plan--green { color: var(--success); }
+.home-sub__plan--orange { color: var(--warning); }
+.home-sub__plan--red { color: var(--danger); }
 
 .home-sub__hint {
   font-size: 13px;
@@ -492,7 +492,7 @@
   height: 7px;
   margin-top: 3px;
   border-radius: 999px;
-  background: var(--surface-2);
+  background: var(--progress-track);
   overflow: hidden;
 }
 
@@ -564,7 +564,7 @@
 
 .home-progress__fill {
   height: 100%;
-  background: #4CAF50;
+  background: var(--success);
   border-radius: 3px;
   transition: width 300ms;
 }
@@ -582,7 +582,7 @@
   align-items: center;
   justify-content: center;
   padding: 14px 18px;
-  background: rgba(0, 0, 0, 0.36);
+  background: var(--overlay-soft);
   animation: dialog-overlay-in 0.2s ease-out;
 }
 
@@ -597,7 +597,7 @@
   border: 1px solid var(--border);
   border-radius: 18px;
   padding: 18px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
+  box-shadow: var(--modal-shadow);
   animation: dialog-slide-in 0.25s ease-out;
 }
 
@@ -622,7 +622,7 @@
 
 .home-trial-dialog__icon--update {
   background: rgba(76, 175, 80, 0.14);
-  color: #4CAF50;
+  color: var(--success);
 }
 
 .home-trial-dialog__close {
@@ -719,10 +719,10 @@
 }
 
 .home-trial-dialog__btn--primary {
-  background: #dadce5;
-  color: #2d2f37;
+  background: var(--cta-bg);
+  color: var(--cta-text);
 }
 
 .home-trial-dialog__btn--primary:hover {
-  background: #e3e5ee;
+  background: var(--cta-hover);
 }
