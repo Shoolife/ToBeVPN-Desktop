@@ -21,7 +21,7 @@
   --accent-hover: #4d9aff;
   --accent-glow: rgba(58, 141, 255, 0.4);
   --danger: #ff5a5a;
-  --success: #43d39e;
+  --success: #4CAF50;
   --warning: #ffb74d;
   --info: #2196f3;
   --shadow-card: 0 20px 50px rgba(0, 0, 0, 0.35);
@@ -83,7 +83,7 @@
   --accent-hover: #4f515c;
   --accent-glow: rgba(92, 94, 106, 0.22);
   --danger: #d32f2f;
-  --success: #2e7d32;
+  --success: #4CAF50;
   --warning: #b26a00;
   --info: #1565c0;
   --shadow-card: 0 18px 42px rgba(20, 24, 32, 0.12);
