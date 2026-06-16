@@ -96,7 +96,30 @@ fn restore_window_chrome(window: &tauri::WebviewWindow) {
     let _ = window.set_minimizable(true);
     let _ = window.set_closable(true);
     let _ = window.set_maximizable(false);
+    apply_windows_rounded_corners(window);
 }
+
+#[cfg(target_os = "windows")]
+fn apply_windows_rounded_corners(window: &tauri::WebviewWindow) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+
+    if let Ok(hwnd) = window.hwnd() {
+        let preference = DWMWCP_ROUND;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &preference as *const _ as _,
+                std::mem::size_of_val(&preference) as u32,
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_windows_rounded_corners(_window: &tauri::WebviewWindow) {}
 
 #[cfg(target_os = "linux")]
 fn is_wayland_session() -> bool {
