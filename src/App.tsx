@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useSyncExternalStore, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
 import OnboardingScreen from "./screens/OnboardingScreen";
@@ -79,7 +80,9 @@ function WindowsTitleBar() {
           type="button"
           className="windows-titlebar__button windows-titlebar__button--close"
           aria-label="Закрыть"
-          onClick={() => void appWindow.close()}
+          onClick={() => {
+            void invoke("hide_main_window_to_tray").catch(() => appWindow.close());
+          }}
         >
           <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
             <path d="M3 3l6 6M9 3L3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
