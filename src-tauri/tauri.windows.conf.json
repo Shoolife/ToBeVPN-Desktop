@@ -14,7 +14,10 @@
         "maximizable": false,
         "fullscreen": false,
         "center": true,
-        "backgroundColor": "#0d0d0d"
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "backgroundColor": "#00000000"
       }
     ]
   },
