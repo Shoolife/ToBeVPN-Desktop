@@ -44,8 +44,6 @@ const SECURE_SESSION_ACCOUNT: &str = "device-session-v1";
 const MAX_DESKTOP_STATS_BYTES: usize = 512 * 1024;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-#[cfg(target_os = "windows")]
-const WINDOWS_FRAME_RADIUS_DIP: f64 = 14.0;
 #[cfg(target_os = "linux")]
 const LEGACY_WEBKIT_WAL_COMPACT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -103,10 +101,9 @@ fn restore_window_chrome(window: &tauri::WebviewWindow) {
 #[cfg(target_os = "windows")]
 fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
     let _ = window.set_decorations(false);
-    let _ = window.set_shadow(true);
+    let _ = window.set_shadow(false);
     let _ = window.set_background_color(Some(tauri::utils::config::Color(0, 0, 0, 0)));
     apply_windows_rounded_corners(window);
-    apply_windows_window_region(window);
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -117,11 +114,13 @@ fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
 #[cfg(target_os = "windows")]
 fn apply_windows_rounded_corners(window: &tauri::WebviewWindow) {
     use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
 
     if let Ok(hwnd) = window.hwnd() {
         let preference = DWMWCP_ROUND;
+        let border_color = DWMWA_COLOR_NONE;
         unsafe {
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -129,38 +128,12 @@ fn apply_windows_rounded_corners(window: &tauri::WebviewWindow) {
                 &preference as *const _ as _,
                 std::mem::size_of_val(&preference) as u32,
             );
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn apply_windows_window_region(window: &tauri::WebviewWindow) {
-    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ};
-
-    let Ok(hwnd) = window.hwnd() else {
-        return;
-    };
-    let Ok(size) = window.outer_size() else {
-        return;
-    };
-
-    let width = size.width.min(i32::MAX as u32) as i32;
-    let height = size.height.min(i32::MAX as u32) as i32;
-    if width <= 0 || height <= 0 {
-        return;
-    }
-
-    let scale_factor = window.scale_factor().unwrap_or(1.0).max(1.0);
-    let radius = (WINDOWS_FRAME_RADIUS_DIP * scale_factor).round().max(1.0) as i32;
-    let diameter = radius * 2;
-
-    unsafe {
-        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter);
-        if region.is_invalid() {
-            return;
-        }
-        if SetWindowRgn(hwnd, Some(region), true) == 0 {
-            let _ = DeleteObject(HGDIOBJ(region.0));
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &border_color as *const _ as _,
+                std::mem::size_of_val(&border_color) as u32,
+            );
         }
     }
 }

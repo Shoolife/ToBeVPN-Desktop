@@ -61,6 +61,7 @@
   --speed-off-bg: rgba(255, 255, 255, 0.08);
   --speed-off-border: rgba(255, 255, 255, 0.12);
   --speed-off-text: rgba(255, 255, 255, 0.62);
+  --window-frame-border: rgba(255, 255, 255, 0.1);
 
   color-scheme: dark;
   color: var(--text);
@@ -123,6 +124,7 @@
   --speed-off-bg: rgba(26, 28, 30, 0.06);
   --speed-off-border: rgba(26, 28, 30, 0.12);
   --speed-off-text: rgba(26, 28, 30, 0.62);
+  --window-frame-border: rgba(26, 28, 30, 0.14);
 
   color-scheme: light;
 }
@@ -169,6 +171,8 @@ body {
 
 .app--windows-frame {
   border-radius: 14px;
+  border: 1px solid var(--window-frame-border);
+  background: var(--bg);
 }
 
 .app--windows-frame .app__content {
