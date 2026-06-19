@@ -92,11 +92,23 @@ fn show_main_window(app: &tauri::AppHandle) {
 fn restore_window_chrome(window: &tauri::WebviewWindow) {
     let _ = window.set_enabled(true);
     let _ = window.set_focusable(true);
-    let _ = window.set_decorations(true);
     let _ = window.set_minimizable(true);
     let _ = window.set_closable(true);
     let _ = window.set_maximizable(false);
+    apply_platform_window_chrome(window);
+}
+
+#[cfg(target_os = "windows")]
+fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
+    let _ = window.set_decorations(false);
+    let _ = window.set_shadow(true);
+    let _ = window.set_background_color(Some(tauri::utils::config::Color(0, 0, 0, 0)));
     apply_windows_rounded_corners(window);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
+    let _ = window.set_decorations(true);
 }
 
 #[cfg(target_os = "windows")]
@@ -117,9 +129,6 @@ fn apply_windows_rounded_corners(window: &tauri::WebviewWindow) {
         }
     }
 }
-
-#[cfg(not(target_os = "windows"))]
-fn apply_windows_rounded_corners(_window: &tauri::WebviewWindow) {}
 
 #[cfg(target_os = "linux")]
 fn is_wayland_session() -> bool {
@@ -797,6 +806,7 @@ pub fn run() {
             // delete-event callback is reentrant and on some Wayland/GTK setups
             // the call is silently dropped, leaving the window stuck on screen.
             if let Some(main_window) = app.get_webview_window("main") {
+                restore_window_chrome(&main_window);
                 let quit_for_window = quit_flag.clone();
                 let window_for_handler = main_window.clone();
                 main_window.on_window_event(move |event| {

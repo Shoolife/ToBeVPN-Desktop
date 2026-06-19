@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from "react";
+import { useState, useRef, useEffect, useCallback, useSyncExternalStore, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { getCurrentWindow, LogicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
@@ -13,6 +13,7 @@ import DevicesScreen from "./screens/DevicesScreen";
 import RoutingScreen from "./screens/RoutingScreen";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import UpdateBanner from "./components/UpdateBanner";
+import brandLogo from "./assets/onboarding_logo.svg";
 import {
   getCachedVpnServers,
   getUpdateRequired,
@@ -40,6 +41,54 @@ import "./App.css";
 export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing";
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
+
+function shouldUseWindowsFrame(browserPreview: boolean): boolean {
+  return !browserPreview && navigator.userAgent.includes("Windows");
+}
+
+function WindowsTitleBar() {
+  const appWindow = getCurrentWindow();
+
+  const startWindowDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+    void appWindow.startDragging();
+  };
+
+  return (
+    <div
+      className="windows-titlebar"
+      data-tauri-drag-region
+      onPointerDown={startWindowDrag}
+    >
+      <div className="windows-titlebar__brand" data-tauri-drag-region>
+        <img src={brandLogo} alt="" className="windows-titlebar__icon" draggable={false} />
+        <span data-tauri-drag-region>ToBeVPN</span>
+      </div>
+      <div className="windows-titlebar__controls">
+        <button
+          type="button"
+          className="windows-titlebar__button"
+          aria-label="Свернуть"
+          onClick={() => void appWindow.minimize()}
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M2 6h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className="windows-titlebar__button windows-titlebar__button--close"
+          aria-label="Закрыть"
+          onClick={() => void appWindow.close()}
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3 3l6 6M9 3L3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function hasSeenOnboarding(): boolean {
   try {
@@ -119,9 +168,15 @@ export default function App({
     getUpdateRequired,
     getUpdateRequired,
   );
+  const useWindowsFrame = shouldUseWindowsFrame(browserPreview);
   const timeoutRef = useRef<number | null>(null);
 
   const DURATION = 300;
+
+  useEffect(() => {
+    if (useWindowsFrame) document.documentElement.dataset.windowFrame = "windows";
+    else delete document.documentElement.dataset.windowFrame;
+  }, [useWindowsFrame]);
 
   const navigate = useCallback((to: Screen, dir: Direction) => {
     if (animating) return;
@@ -527,7 +582,9 @@ export default function App({
         : "";
 
   return (
-    <main className="app">
+    <main className={`app ${useWindowsFrame ? "app--windows-frame" : ""}`}>
+      {useWindowsFrame && <WindowsTitleBar />}
+      <div className="app__content">
       <AppErrorBoundary>
         {prevScreen && (
           <div key={prevScreen} className={`screen-layer ${exitClass}`}>
@@ -556,6 +613,7 @@ export default function App({
             );
           })()}
       </AppErrorBoundary>
+      </div>
     </main>
   );
 }

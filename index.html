@@ -5,6 +5,11 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ToBeVPN</title>
+    <script>
+      if (navigator.userAgent.includes("Windows")) {
+        document.documentElement.dataset.windowFrame = "windows";
+      }
+    </script>
     <script src="/theme-boot.js"></script>
     <style>
       :root,
@@ -21,6 +26,10 @@
         height: 100%;
         overflow: hidden;
       }
+      html[data-window-frame="windows"],
+      html[data-window-frame="windows"] body {
+        background: transparent;
+      }
       body { display: block; }
       /* The app is designed around 494x895, but the outer frame expands in
          unscaled CSS pixels so that after transform scaling it covers the
@@ -33,6 +42,9 @@
         transform: scale(var(--app-scale, 1));
         transform-origin: top left;
         position: relative;
+      }
+      html[data-window-frame="windows"] #scale-frame {
+        background: transparent;
       }
       #root { width: 100%; height: 100%; }
       /* Dedicated overlay layer for the in-app updater banner. Lives as a

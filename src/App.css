@@ -140,6 +140,13 @@ html, body, #root {
   background: var(--bg);
 }
 
+html[data-window-frame="windows"],
+html[data-window-frame="windows"] body,
+html[data-window-frame="windows"] #scale-frame,
+html[data-window-frame="windows"] #root {
+  background: transparent;
+}
+
 body {
   user-select: none;
   -webkit-user-select: none;
@@ -151,6 +158,91 @@ body {
   width: 100%;
   background: var(--bg);
   overflow: hidden;
+}
+
+.app__content {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.app--windows-frame {
+  border-radius: 14px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+}
+
+.app--windows-frame .app__content {
+  top: 34px;
+  border-radius: 0 0 14px 14px;
+}
+
+.windows-titlebar {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 30;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 12px;
+  background: var(--bg);
+  border-radius: 14px 14px 0 0;
+  color: var(--text);
+  -webkit-app-region: drag;
+}
+
+.windows-titlebar__brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.92;
+}
+
+.windows-titlebar__icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex: 0 0 auto;
+  border-radius: 4px;
+}
+
+.windows-titlebar__controls {
+  height: 100%;
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.windows-titlebar__button {
+  width: 46px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: default;
+  transition: background 120ms, color 120ms;
+}
+
+.windows-titlebar__button:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.windows-titlebar__button--close {
+  border-top-right-radius: 14px;
+}
+
+.windows-titlebar__button--close:hover {
+  background: #e81123;
+  color: #ffffff;
 }
 
 /* Screen transition layers */
@@ -333,6 +425,10 @@ body {
 
 .update-banner-overlay > * {
   pointer-events: auto;
+}
+
+html[data-window-frame="windows"] .update-banner-overlay {
+  top: 46px;
 }
 
 /* Splash */
