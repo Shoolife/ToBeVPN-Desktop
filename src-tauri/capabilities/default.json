@@ -16,6 +16,7 @@
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "core:window:allow-minimize",
     "core:window:allow-set-size",
     "core:window:allow-center",
     {
