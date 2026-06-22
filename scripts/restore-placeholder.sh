@@ -113,4 +113,10 @@ if [ -n "$FALLBACK_BOT_HOST_VAL" ] && [ "$FALLBACK_BOT_HOST_VAL" = "$FALLBACK_SU
     rm -f src-tauri/capabilities/default.json.bak
 fi
 
+# Final safety net: local builds may have capabilities/default.json injected
+# with values from an older .env, so exact host substitutions above cannot
+# always know what needs to be removed. The public source must keep only
+# placeholders in the HTTP allowlist.
+perl -0pi -e 's/"allow": \[\n(?:\s*\{ "url": "https:\/\/[^"]+" \},\n){4}\s*\{ "url": "https:\/\/[^"]+" \}\n\s*\]/"allow": [\n        { "url": "https:\/\/__BOT_API_HOST__\/*" },\n        { "url": "https:\/\/__PANEL_HOST__\/*" },\n        { "url": "https:\/\/__SUBSCRIPTION_HOST__\/*" },\n        { "url": "https:\/\/__FALLBACK_BOT_HOST__\/*" },\n        { "url": "https:\/\/__FALLBACK_SUBS_HOST__\/*" }\n      ]/s' src-tauri/capabilities/default.json
+
 echo "✓ restored __BOT_API_HOST__ / __PANEL_HOST__ placeholders"

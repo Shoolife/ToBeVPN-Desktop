@@ -169,11 +169,6 @@ fn rebuild_wayland_titlebar(window: &tauri::WebviewWindow) {
             .decoration_layout(layout)
             .title(title)
             .build();
-        let event_box = gtk::EventBox::new();
-        event_box.set_above_child(true);
-        event_box.set_visible(true);
-        event_box.set_can_focus(false);
-        event_box.add(&header);
 
         let header_weak = header.downgrade();
         gtk_window.connect_resizable_notify(move |gtk_window| {
@@ -187,10 +182,10 @@ fn rebuild_wayland_titlebar(window: &tauri::WebviewWindow) {
             }
         });
 
-        gtk_window.set_titlebar(Some(&event_box));
+        gtk_window.set_titlebar(Some(&header));
         gtk_window.set_sensitive(true);
         gtk_window.set_deletable(true);
-        event_box.show_all();
+        header.show_all();
         eprintln!("[TRAY] rebuilt Wayland titlebar");
     }
 }
