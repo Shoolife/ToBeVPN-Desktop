@@ -1,6 +1,6 @@
 [package]
 name = "tobevpn-desktop"
-version = "1.0.50"
+version = "1.0.51"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -29,7 +29,7 @@ log = "0.4"
 tauri-plugin-http = "2.5.8"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
-machine-uid = "0.5"
+machine-uid = "0.6"
 os_info = { version = "3", default-features = false }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 dirs = "6"
