@@ -170,6 +170,14 @@ fn rebuild_wayland_titlebar(window: &tauri::WebviewWindow) {
             .title(title)
             .build();
 
+        // Wayland needs an event window around rebuilt CSD titlebars for drag.
+        // Keep it below child widgets so header buttons still receive clicks.
+        let event_box = gtk::EventBox::new();
+        event_box.set_above_child(false);
+        event_box.set_visible_window(false);
+        event_box.set_can_focus(false);
+        event_box.add(&header);
+
         let header_weak = header.downgrade();
         gtk_window.connect_resizable_notify(move |gtk_window| {
             if let Some(header) = header_weak.upgrade() {
@@ -182,10 +190,10 @@ fn rebuild_wayland_titlebar(window: &tauri::WebviewWindow) {
             }
         });
 
-        gtk_window.set_titlebar(Some(&header));
+        gtk_window.set_titlebar(Some(&event_box));
         gtk_window.set_sensitive(true);
         gtk_window.set_deletable(true);
-        header.show_all();
+        event_box.show_all();
         eprintln!("[TRAY] rebuilt Wayland titlebar");
     }
 }
