@@ -44,7 +44,11 @@ import {
   loadSecureSession,
   saveSecureSession,
 } from "./secureSession";
-import { disconnectVpn } from "./vpnState";
+import {
+  disconnectVpn,
+  getActiveVpnReconnectServer,
+  reconnectVpnWithFreshSubscription,
+} from "./vpnState";
 import {
   fetchSubscriptionProfile,
   pingSubscriptionUrl,
@@ -1010,8 +1014,12 @@ async function applyCurrentPlanHeartbeat(
   const cachedUrl = oldShortUuid ? readCachedSubscriptionUrl(oldShortUuid) : null;
   const nextUrl = planInfo.subscriptionUrl;
   const subscriptionUrlChanged = Boolean(nextUrl && nextUrl !== cachedUrl);
+  const reconnectServer = subscriptionUrlChanged ? getActiveVpnReconnectServer() : null;
 
   if (subscriptionUrlChanged) {
+    if (reconnectServer) {
+      await disconnectVpn().catch(() => {});
+    }
     await bootstrapDeviceSession().catch(() => {});
   }
   const refreshedSession = getSession();
@@ -1038,6 +1046,9 @@ async function applyCurrentPlanHeartbeat(
   clearSubSyncTimestamp();
   await syncSubscription({ force: true }).catch(() => {});
   await fetchVpnServers({ skipAccessPing: true }).catch(() => []);
+  if (reconnectServer && getSession().userPlan !== "EXPIRED") {
+    await reconnectVpnWithFreshSubscription(reconnectServer);
+  }
 }
 
 export async function isCurrentDeviceLinked(): Promise<boolean> {
@@ -1149,9 +1160,16 @@ export async function fetchDevices(): Promise<LinkedDevicesDto | null> {
 export async function unlinkOtherDevice(deviceId: string): Promise<void> {
   const { isLinked } = getSession();
   if (!isLinked) throw new Error("Not authenticated");
+  const reconnectServer = getActiveVpnReconnectServer();
   const res = await unlinkDevice({ device_id: deviceId });
   if (!res.success) throw new Error(res.message ?? "Could not unlink device");
+  if (reconnectServer) {
+    await disconnectVpn().catch(() => {});
+  }
   await refreshAfterDeviceUnlink(res.data);
+  if (reconnectServer && getSession().userPlan !== "EXPIRED") {
+    await reconnectVpnWithFreshSubscription(reconnectServer);
+  }
 }
 
 async function refreshAfterDeviceUnlink(

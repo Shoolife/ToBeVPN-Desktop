@@ -98,6 +98,11 @@ export function getVpnRuntime(): VpnRuntimeState {
   return state;
 }
 
+export function getActiveVpnReconnectServer(): ServerVpnConfig | null {
+  if (!state.connected && !state.connecting) return null;
+  return currentServerForRecovery ? { ...currentServerForRecovery } : null;
+}
+
 let pollTimer: number | null = null;
 let accessBlockCounter = 0;
 let accessBlockCheckInFlight = false;
@@ -131,12 +136,15 @@ function toServerVpnConfig(server: Awaited<ReturnType<typeof fetchVpnServers>>[n
 
 async function refreshServerConfigAfterAccessCheck(
   server: ServerVpnConfig,
-  options: { avoidCurrentInAuto?: boolean } = {},
+  options: { avoidCurrentInAuto?: boolean; allowStaleOnRefreshError?: boolean } = {},
 ): Promise<ServerVpnConfig> {
   let servers: VpnServer[];
   try {
     servers = await fetchVpnServers({ skipAccessPing: true });
   } catch {
+    if (options.allowStaleOnRefreshError === false) {
+      throw new Error(t("servers_empty"));
+    }
     return server;
   }
   const availableServers = servers.filter(isAvailableVpnServer);
@@ -410,6 +418,32 @@ export async function disconnectVpn(): Promise<void> {
       disconnecting: false,
       sessionStartTime: null,
       sessionBytes: 0,
+    });
+  }
+}
+
+export async function reconnectVpnWithFreshSubscription(server: ServerVpnConfig): Promise<void> {
+  setState({
+    connected: false,
+    connecting: true,
+    disconnecting: false,
+    sessionStartTime: null,
+    sessionBytes: 0,
+    lastError: null,
+  });
+  try {
+    const freshServer = await refreshServerConfigAfterAccessCheck(server, {
+      allowStaleOnRefreshError: false,
+    });
+    await connectVpnInternal(freshServer, true);
+  } catch (e) {
+    setState({
+      connected: false,
+      connecting: false,
+      disconnecting: false,
+      sessionStartTime: null,
+      sessionBytes: 0,
+      lastError: userFacingVpnError(e),
     });
   }
 }
