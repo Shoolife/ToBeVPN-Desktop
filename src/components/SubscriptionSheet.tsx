@@ -68,6 +68,13 @@ interface PlanTab {
   periods: PlanRow[];
 }
 
+interface ExitingPeriods {
+  id: number;
+  tab: PlanTab;
+  selectedKey: string | null;
+  showCacheHint: boolean;
+}
+
 function readCachedPurchasePlans(): PurchasePlansDto | null {
   try {
     const raw = localStorage.getItem(PURCHASE_PLANS_CACHE_KEY);
@@ -281,7 +288,10 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const [closing, setClosing] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const periodsContentRef = useRef<HTMLDivElement | null>(null);
+  const tabTransitionIdRef = useRef(0);
+  const tabTransitionTimerRef = useRef<number | null>(null);
   const [periodsHeight, setPeriodsHeight] = useState<number | null>(null);
+  const [exitingPeriods, setExitingPeriods] = useState<ExitingPeriods | null>(null);
 
   const closeQr = () => {
     if (qrClosing) return;
@@ -425,6 +435,14 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     return () => window.removeEventListener("keydown", onKey);
   }, [qrVisible]);
 
+  useEffect(() => {
+    return () => {
+      if (tabTransitionTimerRef.current !== null) {
+        window.clearTimeout(tabTransitionTimerRef.current);
+      }
+    };
+  }, []);
+
   const canPurchase = session.isLinked && session.telegramId !== null;
   const isPaidAccount = session.userPlan !== "FREE_TRIAL";
   const selectedTabIsCurrent = samePlanName(session.planDisplayName, selectedTab?.title);
@@ -515,6 +533,25 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
         : `XXX ${t("unit_gb")}`;
   const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : "XX";
   const selectTab = (tab: PlanTab) => {
+    if (selectedTab?.key === tab.key) return;
+
+    if (selectedTab) {
+      tabTransitionIdRef.current += 1;
+      setExitingPeriods({
+        id: tabTransitionIdRef.current,
+        tab: selectedTab,
+        selectedKey,
+        showCacheHint: plansFromCache,
+      });
+      if (tabTransitionTimerRef.current !== null) {
+        window.clearTimeout(tabTransitionTimerRef.current);
+      }
+      tabTransitionTimerRef.current = window.setTimeout(() => {
+        setExitingPeriods(null);
+        tabTransitionTimerRef.current = null;
+      }, 360);
+    }
+
     setSelectedTabKey(tab.key);
     const nextRow =
       tab.periods.find((row) => row.key === "month" || row.key.endsWith(":month")) ??
@@ -522,6 +559,27 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       null;
     setSelectedKey(nextRow?.key ?? null);
   };
+
+  const renderPeriodRows = (
+    periods: PlanRow[],
+    activeKey: string | null,
+    interactive: boolean,
+  ) => periods.map((row) => (
+    <div
+      key={row.key}
+      className={`sub-plan ${activeKey === row.key ? "sub-plan--selected" : ""}`}
+      onClick={interactive ? () => setSelectedKey(row.key) : undefined}
+    >
+      <div className="sub-plan__radio">
+        {activeKey === row.key && <div className="sub-plan__radio-dot" />}
+      </div>
+      <div className="sub-plan__info">
+        <div className="sub-plan__title">{row.title}</div>
+        <div className="sub-plan__desc">{row.description}</div>
+      </div>
+      <div className="sub-plan__price">{row.priceDisplay}</div>
+    </div>
+  ));
 
   return (
     <div
@@ -603,27 +661,26 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
                 className="sub-periods-shell"
                 style={periodsHeight === null ? undefined : { height: `${periodsHeight}px` }}
               >
+                {exitingPeriods && (
+                  <div
+                    key={`exit:${exitingPeriods.id}`}
+                    className="sub-periods sub-periods--exit"
+                    aria-hidden="true"
+                  >
+                    {renderPeriodRows(exitingPeriods.tab.periods, exitingPeriods.selectedKey, false)}
+                    {exitingPeriods.showCacheHint && (
+                      <div className="sub-sheet__hint sub-sheet__hint--compact">
+                        {t("plans_load_error")}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div
                   key={selectedTab?.key ?? "empty"}
                   ref={periodsContentRef}
-                  className="sub-periods"
+                  className="sub-periods sub-periods--enter"
                 >
-                  {selectedTab?.periods.map((row) => (
-                    <div
-                      key={row.key}
-                      className={`sub-plan ${selectedKey === row.key ? "sub-plan--selected" : ""}`}
-                      onClick={() => setSelectedKey(row.key)}
-                    >
-                      <div className="sub-plan__radio">
-                        {selectedKey === row.key && <div className="sub-plan__radio-dot" />}
-                      </div>
-                      <div className="sub-plan__info">
-                        <div className="sub-plan__title">{row.title}</div>
-                        <div className="sub-plan__desc">{row.description}</div>
-                      </div>
-                      <div className="sub-plan__price">{row.priceDisplay}</div>
-                    </div>
-                  ))}
+                  {renderPeriodRows(selectedTab?.periods ?? [], selectedKey, true)}
                   {plansFromCache && (
                     <div className="sub-sheet__hint sub-sheet__hint--compact">
                       {t("plans_load_error")}
