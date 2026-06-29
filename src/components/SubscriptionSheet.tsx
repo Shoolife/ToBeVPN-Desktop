@@ -391,7 +391,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       if (frame) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
         frame = 0;
-        const nextHeight = Math.ceil(node.getBoundingClientRect().height);
+        const nextHeight = node.scrollHeight;
         setPeriodsHeight((currentHeight) =>
           currentHeight === nextHeight ? currentHeight : nextHeight,
         );
