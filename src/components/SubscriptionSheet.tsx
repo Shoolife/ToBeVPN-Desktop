@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import {
@@ -280,6 +280,8 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const [qrClosing, setQrClosing] = useState(false);
   const [closing, setClosing] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const periodsContentRef = useRef<HTMLDivElement | null>(null);
+  const [periodsHeight, setPeriodsHeight] = useState<number | null>(null);
 
   const closeQr = () => {
     if (qrClosing) return;
@@ -374,6 +376,37 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     () => selectedTab?.periods.find((r) => r.key === selectedKey) ?? selectedTab?.periods[0] ?? null,
     [selectedKey, selectedTab],
   );
+
+  useEffect(() => {
+    if (plansLoading || !selectedTab) {
+      setPeriodsHeight(null);
+      return;
+    }
+
+    const node = periodsContentRef.current;
+    if (!node) return;
+
+    let frame = 0;
+    const updateHeight = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        const nextHeight = Math.ceil(node.getBoundingClientRect().height);
+        setPeriodsHeight((currentHeight) =>
+          currentHeight === nextHeight ? currentHeight : nextHeight,
+        );
+      });
+    };
+
+    updateHeight();
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(node);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [plansLoading, selectedTab?.key, plansFromCache]);
 
   const handleClose = () => {
     if (closing) return;
@@ -566,28 +599,37 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
                 ))}
               </div>
 
-              <div key={selectedTab?.key ?? "empty"} className="sub-periods">
-                {selectedTab?.periods.map((row) => (
-                  <div
-                    key={row.key}
-                    className={`sub-plan ${selectedKey === row.key ? "sub-plan--selected" : ""}`}
-                    onClick={() => setSelectedKey(row.key)}
-                  >
-                    <div className="sub-plan__radio">
-                      {selectedKey === row.key && <div className="sub-plan__radio-dot" />}
+              <div
+                className="sub-periods-shell"
+                style={periodsHeight === null ? undefined : { height: `${periodsHeight}px` }}
+              >
+                <div
+                  key={selectedTab?.key ?? "empty"}
+                  ref={periodsContentRef}
+                  className="sub-periods"
+                >
+                  {selectedTab?.periods.map((row) => (
+                    <div
+                      key={row.key}
+                      className={`sub-plan ${selectedKey === row.key ? "sub-plan--selected" : ""}`}
+                      onClick={() => setSelectedKey(row.key)}
+                    >
+                      <div className="sub-plan__radio">
+                        {selectedKey === row.key && <div className="sub-plan__radio-dot" />}
+                      </div>
+                      <div className="sub-plan__info">
+                        <div className="sub-plan__title">{row.title}</div>
+                        <div className="sub-plan__desc">{row.description}</div>
+                      </div>
+                      <div className="sub-plan__price">{row.priceDisplay}</div>
                     </div>
-                    <div className="sub-plan__info">
-                      <div className="sub-plan__title">{row.title}</div>
-                      <div className="sub-plan__desc">{row.description}</div>
+                  ))}
+                  {plansFromCache && (
+                    <div className="sub-sheet__hint sub-sheet__hint--compact">
+                      {t("plans_load_error")}
                     </div>
-                    <div className="sub-plan__price">{row.priceDisplay}</div>
-                  </div>
-                ))}
-                {plansFromCache && (
-                  <div className="sub-sheet__hint sub-sheet__hint--compact">
-                    {t("plans_load_error")}
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
           )}
