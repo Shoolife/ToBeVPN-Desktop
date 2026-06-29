@@ -18,6 +18,7 @@ export interface Session {
   userPlan: UserPlan;
   planDisplayName: string | null;
   planExpiresAt: number | null;
+  isAdminProfile: boolean;
   trafficLimitBytes: number;
   trafficUsedBytes: number;
   email: string | null;
@@ -58,6 +59,7 @@ function defaultSession(): Session {
     userPlan: "FREE_TRIAL",
     planDisplayName: null,
     planExpiresAt: null,
+    isAdminProfile: false,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
     email: null,
@@ -73,6 +75,7 @@ function migrateSession(parsed: Partial<Session>): Session {
   if (parsed.isLinked === undefined) {
     merged.isLinked = parsed.telegramId !== null && parsed.telegramId !== undefined;
   }
+  merged.isAdminProfile = parsed.isAdminProfile === true;
   return merged;
 }
 
@@ -144,6 +147,7 @@ export function clearIdentity() {
     userPlan: "FREE_TRIAL",
     planDisplayName: null,
     planExpiresAt: null,
+    isAdminProfile: false,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
     email: null,
@@ -173,6 +177,7 @@ export function clearDeviceSession() {
     userPlan: "FREE_TRIAL",
     planDisplayName: null,
     planExpiresAt: null,
+    isAdminProfile: false,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
     email: null,
@@ -246,6 +251,7 @@ export function updateSessionFromTokens(tokens: SessionTokensDto): Session {
     userPlan: isLinked ? currentSession.userPlan : "FREE_TRIAL",
     planDisplayName: isLinked ? currentSession.planDisplayName : null,
     planExpiresAt: isLinked ? currentSession.planExpiresAt : null,
+    isAdminProfile: isLinked ? currentSession.isAdminProfile : false,
     trafficLimitBytes: isLinked ? currentSession.trafficLimitBytes : 0,
     trafficUsedBytes: isLinked ? currentSession.trafficUsedBytes : 0,
     email: isLinked ? currentSession.email : null,

@@ -403,8 +403,10 @@ interface CurrentSubscriptionPlanInfo {
   isExpired: boolean | null;
   isTrial: boolean | null;
   isUnlimited: boolean | null;
+  isAdmin: boolean;
   hasPlanData: boolean;
   subscriptionUrl: string | null;
+  renewalUrl: string | null;
 }
 
 function normalizePlanTrafficLimit(value: number | null | undefined): number | null {
@@ -459,8 +461,10 @@ function currentPlanInfoFromDto(dto: CurrentPlanDto | null | undefined): Current
     isExpired,
     isTrial: subscription?.is_trial ?? snapshot?.is_trial ?? null,
     isUnlimited: subscription?.is_unlimited ?? (snapshot?.type ? snapshot.type.toUpperCase() === "UNLIMITED" : null),
+    isAdmin: dto.is_admin === true,
     hasPlanData,
     subscriptionUrl: (subscription?.url ?? "").trim() || null,
+    renewalUrl: (dto.renewal_url ?? "").trim() || null,
   };
 }
 
@@ -845,6 +849,7 @@ async function runSyncSubscription(): Promise<void> {
         currentPlanInfo.trafficLimitBytes ??
         session.trafficLimitBytes,
       trafficUsedBytes: profileResult?.trafficUsedBytes ?? session.trafficUsedBytes,
+      isAdminProfile: currentPlanInfo.isAdmin,
     });
     try {
       await registerCurrentDevice();
@@ -1031,6 +1036,7 @@ async function applyCurrentPlanHeartbeat(
         : (planInfo.displayName ?? refreshedSession.planDisplayName),
     planExpiresAt: planInfo.expiresAtMillis,
     trafficLimitBytes: planInfo.trafficLimitBytes ?? refreshedSession.trafficLimitBytes,
+    isAdminProfile: planInfo.isAdmin,
   });
 
   if (!subscriptionUrlChanged) return;
@@ -1205,6 +1211,7 @@ async function refreshAfterDeviceUnlink(
       planDisplayName: planInfo.displayName ?? refreshedSession.planDisplayName,
       planExpiresAt: planInfo.expiresAtMillis,
       trafficLimitBytes: planInfo.trafficLimitBytes ?? refreshedSession.trafficLimitBytes,
+      isAdminProfile: planInfo.isAdmin,
     });
   }
 
@@ -1249,6 +1256,12 @@ export interface VpnServer {
   spx: string;
   country: string;
   isOnline: boolean;
+  sortOrder: number;
+}
+
+interface ServerNameParts {
+  base: string;
+  number: number | null;
 }
 
 /**
@@ -1267,9 +1280,13 @@ export function isSentinelServer(server: VpnServer): boolean {
   );
 }
 
-/** Server metadata allows the client to select and use this entry. */
+/**
+ * Panel online metadata can lag behind real VLESS/Reality reachability.
+ * Only sentinel/expired placeholders are not connectable; probes and xray
+ * decide whether a normal server is actually reachable.
+ */
 export function isAvailableVpnServer(server: VpnServer): boolean {
-  return server.isOnline && !isSentinelServer(server);
+  return !isSentinelServer(server);
 }
 
 function parseVlessUrl(url: string): VpnServer | null {
@@ -1309,6 +1326,7 @@ function parseVlessUrl(url: string): VpnServer | null {
       spx: p.get("spx") ?? "",
       country: "",
       isOnline: true,
+      sortOrder: 0,
     };
   } catch {
     console.warn("[parseVlessUrl] parse error");
@@ -1344,6 +1362,91 @@ function parseVpnServersFromLinks(links: string[]): VpnServer[] {
     .filter((server) => !isSentinelServer(server));
 }
 
+function serverNameParts(name: string): ServerNameParts {
+  const normalized = name.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+  const match = normalized.match(/^(.*?)[\s#_-]+(\d+)$/);
+  if (!match) return { base: normalized, number: null };
+  const parsedNumber = Number.parseInt(match[2], 10);
+  return {
+    base: match[1].trim(),
+    number: Number.isFinite(parsedNumber) ? parsedNumber : null,
+  };
+}
+
+function keepStableServerOrder(servers: VpnServer[], cachedServers: VpnServer[]): VpnServer[] {
+  const compareFallback = (a: VpnServer, b: VpnServer): number => {
+    const aParts = serverNameParts(a.name);
+    const bParts = serverNameParts(b.name);
+    return (
+      aParts.base.localeCompare(bParts.base, "en-US") ||
+      (aParts.number ?? Number.MAX_SAFE_INTEGER) -
+        (bParts.number ?? Number.MAX_SAFE_INTEGER) ||
+      a.name.localeCompare(b.name, "en-US") ||
+      a.id.localeCompare(b.id, "en-US")
+    );
+  };
+
+  if (cachedServers.length === 0) {
+    return [...servers].sort(compareFallback).map((server, index) => ({
+      ...server,
+      sortOrder: index,
+    }));
+  }
+
+  const cachedPositionById = new Map(
+    cachedServers.map((server, index) => [server.id, index] as const),
+  );
+  const cachedGroupPositionByName = new Map<string, number>();
+  cachedServers.forEach((server, index) => {
+    const base = serverNameParts(server.name).base;
+    const current = cachedGroupPositionByName.get(base);
+    if (current === undefined || index < current) {
+      cachedGroupPositionByName.set(base, index);
+    }
+  });
+
+  return servers
+    .map((server, profileIndex) => {
+      const nameParts = serverNameParts(server.name);
+      const cachedPosition = cachedPositionById.get(server.id);
+      const cachedGroupPosition = cachedGroupPositionByName.get(nameParts.base);
+      const primaryPosition =
+        nameParts.number !== null
+          ? cachedGroupPosition ?? cachedPosition ?? Number.MAX_SAFE_INTEGER
+          : cachedPosition ?? cachedGroupPosition ?? Number.MAX_SAFE_INTEGER;
+      return {
+        server,
+        nameParts,
+        profileIndex,
+        primaryPosition,
+      };
+    })
+    .sort((a, b) => {
+      return (
+        a.primaryPosition - b.primaryPosition ||
+        a.nameParts.base.localeCompare(b.nameParts.base, "en-US") ||
+        (a.nameParts.number ?? Number.MAX_SAFE_INTEGER) -
+          (b.nameParts.number ?? Number.MAX_SAFE_INTEGER) ||
+        a.server.name.localeCompare(b.server.name, "en-US") ||
+        a.server.id.localeCompare(b.server.id, "en-US") ||
+        a.profileIndex - b.profileIndex
+      );
+    })
+    .map((entry, index) => ({
+      ...entry.server,
+      sortOrder: index,
+    }));
+}
+
+function prepareVpnServersForCache(shortUuid: string, servers: VpnServer[]): VpnServer[] {
+  const cachedServers =
+    vpnServersMemoryCache?.shortUuid === shortUuid ? vpnServersMemoryCache.servers : [];
+  return reuseCachedVpnServerMetadata(
+    shortUuid,
+    keepStableServerOrder(servers, cachedServers),
+  );
+}
+
 function reuseCachedVpnServerMetadata(shortUuid: string, servers: VpnServer[]): VpnServer[] {
   if (vpnServersMemoryCache?.shortUuid !== shortUuid) return servers;
 
@@ -1357,12 +1460,13 @@ function reuseCachedVpnServerMetadata(shortUuid: string, servers: VpnServer[]): 
       ...server,
       country: server.country || cached.country,
       isOnline: cached.isOnline,
+      sortOrder: server.sortOrder,
     };
   });
 }
 
 function cacheVpnServersFromLinks(shortUuid: string, links: string[]): VpnServer[] {
-  const servers = reuseCachedVpnServerMetadata(
+  const servers = prepareVpnServersForCache(
     shortUuid,
     parseVpnServersFromLinks(links),
   );
@@ -1462,7 +1566,7 @@ export async function fetchVpnServers(
     return [];
   }
 
-  const servers = reuseCachedVpnServerMetadata(
+  const servers = prepareVpnServersForCache(
     shortUuid,
     parseVpnServersFromLinks(links),
   );

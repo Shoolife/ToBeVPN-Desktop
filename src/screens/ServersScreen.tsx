@@ -23,6 +23,7 @@ import {
 } from "../session/serverQuality";
 import Spinner from "../components/Spinner";
 import type { SelectedServer } from "../App";
+import { useSession } from "../session/store";
 import "./ServersScreen.css";
 
 type ServerItem = MeasuredVpnServer;
@@ -48,6 +49,19 @@ function loadErrorText(error: unknown): string {
   return t("servers_load_error_details");
 }
 
+function serverListItemKey(server: VpnServer): string {
+  return [
+    server.id,
+    server.name,
+    server.country ?? "",
+    `${server.address}:${server.port}`,
+    server.uuid,
+    server.sni,
+    server.public_key,
+    server.short_id,
+  ].join("|");
+}
+
 export default function ServersScreen({
   onBack,
   onSelect,
@@ -66,6 +80,8 @@ export default function ServersScreen({
   const [pingLoading, setPingLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flagsReady, setFlagsReady] = useState(areCountryFlagsReady);
+  const session = useSession();
+  const showEndpoint = session.isAdminProfile;
   const pingGenRef = useRef(0);
   const loading = serverLoading || pingLoading;
 
@@ -247,6 +263,7 @@ export default function ServersScreen({
           </div>
           {servers.map((server) => {
             const clickable = isAvailableVpnServer(server);
+            const unavailablePlaceholder = !clickable;
             const selected =
               !automaticServerSelection &&
               clickable &&
@@ -259,7 +276,7 @@ export default function ServersScreen({
 
             return (
               <div
-                key={server.id}
+                key={serverListItemKey(server)}
                 className={className}
                 aria-current={selected ? "true" : undefined}
                 onClick={() => {
@@ -275,13 +292,18 @@ export default function ServersScreen({
                   <div className="server-item__name">
                     {serverDisplayName(server.name, server.country)}
                   </div>
-                  <div className={`server-item__country ${!server.isOnline ? "server-item__country--red" : ""}`}>
-                    {server.isOnline
-                      ? countryName(serverCountryCodeForUi(server.country, server.name))
-                      : t("server_unavailable")}
+                  <div className={`server-item__country ${unavailablePlaceholder ? "server-item__country--red" : ""}`}>
+                    {unavailablePlaceholder
+                      ? t("server_unavailable")
+                      : countryName(serverCountryCodeForUi(server.country, server.name))}
                   </div>
+                  {showEndpoint && (
+                    <div className="server-item__endpoint">
+                      {server.address}:{server.port}
+                    </div>
+                  )}
                 </div>
-                {!server.isOnline ? (
+                {unavailablePlaceholder ? (
                   <span className="server-item__offline-badge">{t("server_offline")}</span>
                 ) : server.ping < 0 ? (
                   <span className="server-item__ping-unavailable">{t("server_unavailable")}</span>

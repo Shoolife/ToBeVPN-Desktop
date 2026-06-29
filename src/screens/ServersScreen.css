@@ -142,6 +142,15 @@
   color: var(--danger);
 }
 
+.server-item__endpoint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .server-item__ping {
   display: flex;
   flex-direction: column;

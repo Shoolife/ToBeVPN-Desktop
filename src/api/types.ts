@@ -195,6 +195,8 @@ export interface CurrentPlanSubscriptionDto {
 }
 
 export interface CurrentPlanDto {
+  is_admin?: boolean | null;
+  renewal_url?: string | null;
   current_plan?: CurrentPlanSnapshotDto | null;
   plan_snapshot?: CurrentPlanSnapshotDto | null;
   subscription?: CurrentPlanSubscriptionDto | null;

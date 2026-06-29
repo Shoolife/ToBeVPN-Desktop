@@ -73,7 +73,6 @@ function qualityKey(server: ServerQualityIdentity): string {
 
 function isAvailableServer(server: VpnServer): boolean {
   return (
-    server.isOnline &&
     server.uuid !== "00000000-0000-0000-0000-000000000000" &&
     Boolean(server.address) &&
     server.address !== "127.0.0.1" &&
@@ -293,6 +292,10 @@ export async function selectBestVpnServer(
   const pings = await measureVpnServerPings(available, { force: options.forceProbe });
   const records = readState().records;
   const now = Date.now();
+  const preferPanelOnline = (rankCandidates: VpnServer[]): VpnServer[] => {
+    const online = rankCandidates.filter((server) => server.isOnline);
+    return online.length > 0 ? online : rankCandidates;
+  };
   const rank = (rankCandidates: VpnServer[]): MeasuredVpnServer | null => {
     const ranked = rankCandidates
       .map((server) => {
@@ -315,11 +318,18 @@ export async function selectBestVpnServer(
     );
     return ranked[0]?.server ?? null;
   };
+  const onlineCandidates = preferPanelOnline(available);
+  const preferredOnlineCandidates = preferPanelOnline(candidates);
   return (
+    rank(preferredOnlineCandidates) ??
     rank(candidates) ??
+    rank(onlineCandidates) ??
     rank(available) ??
-    (candidates[0]
-      ? { ...candidates[0], ping: pings.get(candidates[0].id) ?? -1 }
+    (preferredOnlineCandidates[0]
+      ? {
+          ...preferredOnlineCandidates[0],
+          ping: pings.get(preferredOnlineCandidates[0].id) ?? -1,
+        }
       : null)
   );
 }

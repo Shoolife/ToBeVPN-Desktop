@@ -19,6 +19,7 @@ import {
 import { getSession, subscribeSession } from "./store";
 import {
   fetchVpnServers,
+  getSubscriptionUsageBlocked,
   isAvailableVpnServer,
   pingHwidOnly,
   registerCurrentDevice,
@@ -54,6 +55,7 @@ const TUNNEL_RECOVERY_RESTART_DELAY_MS = 700;
 const MAX_TUNNEL_RECOVERY_ATTEMPTS = 2;
 const RECENT_TUNNEL_TRAFFIC_GRACE_MS = 60_000;
 const QUALITY_TRAFFIC_CONFIRM_BYTES = 64 * 1024;
+const NATIVE_CONNECT_TIMEOUT_MS = 45_000;
 const TUNNEL_PROBE_URLS = [
   "https://speed.cloudflare.com/__down?bytes=1",
   "https://api.github.com/zen",
@@ -134,21 +136,33 @@ function toServerVpnConfig(server: Awaited<ReturnType<typeof fetchVpnServers>>[n
   };
 }
 
+function canUseStaleServerConfig(server: ServerVpnConfig): boolean {
+  return (
+    !getSubscriptionUsageBlocked() &&
+    getSession().userPlan !== "EXPIRED" &&
+    server.uuid !== "00000000-0000-0000-0000-000000000000" &&
+    Boolean(server.address) &&
+    server.address !== "127.0.0.1" &&
+    server.address !== "0.0.0.0"
+  );
+}
+
 async function refreshServerConfigAfterAccessCheck(
   server: ServerVpnConfig,
   options: { avoidCurrentInAuto?: boolean; allowStaleOnRefreshError?: boolean } = {},
 ): Promise<ServerVpnConfig> {
+  const canFallbackToStale = () =>
+    options.allowStaleOnRefreshError !== false && canUseStaleServerConfig(server);
   let servers: VpnServer[];
   try {
     servers = await fetchVpnServers({ skipAccessPing: true });
   } catch {
-    if (options.allowStaleOnRefreshError === false) {
-      throw new Error(t("servers_empty"));
-    }
-    return server;
+    if (canFallbackToStale()) return server;
+    throw new Error(t("servers_empty"));
   }
   const availableServers = servers.filter(isAvailableVpnServer);
   if (availableServers.length === 0) {
+    if (canFallbackToStale()) return server;
     throw new Error(t("servers_empty"));
   }
   const automatic = loadAutomaticServerSelection();
@@ -163,6 +177,7 @@ async function refreshServerConfigAfterAccessCheck(
           candidate.sni === (server.sni ?? ""),
       ) ?? null;
   if (!fresh) {
+    if (canFallbackToStale()) return server;
     throw new Error(t("servers_empty"));
   }
   if (automatic) {
@@ -277,11 +292,48 @@ function userFacingVpnError(error: unknown, fallback = t("vpn_error_connect")): 
   const message = raw.replace(/[\n\r\t]+/g, " ").trim();
   if (!message) return fallback;
   if (/subscription expired/i.test(message)) return t("subscription_expired_connect");
+  if (/No IPv4 address found|default IPv4 gateway/i.test(message)) {
+    return t("vpn_error_ipv4");
+  }
+  if (/DNS resolve timed out|DNS resolve failed/i.test(message)) {
+    return t("vpn_error_dns");
+  }
+  if (/timed out after|did not start within|did not appear within/i.test(message)) {
+    return t("vpn_error_connect_timeout");
+  }
   if (/vpn tunnel stopped|vpn process stopped|xray/i.test(message)) {
     return t("vpn_error_tunnel_stopped");
   }
   if (isTechnicalVpnErrorMessage(message)) return fallback;
   return message.slice(0, 200);
+}
+
+async function startNativeVpnWithTimeout(
+  server: ServerVpnConfig,
+  gen: number,
+): Promise<void> {
+  let timedOut = false;
+  let timeoutId: number | null = null;
+  try {
+    await Promise.race([
+      engineStart(server),
+      new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          timedOut = true;
+          reject(new Error(t("vpn_error_connect_timeout")));
+        }, NATIVE_CONNECT_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    if (timedOut && gen === connectionGeneration) {
+      await engineStop().catch(() => {});
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  }
 }
 
 export async function connectVpn(server: ServerVpnConfig): Promise<void> {
@@ -349,7 +401,7 @@ async function connectVpnInternal(
     if (gen !== connectionGeneration) return;
     currentServerForRecovery = serverToStart;
     serverStartAttempted = true;
-    await engineStart(serverToStart);
+    await startNativeVpnWithTimeout(serverToStart, gen);
     if (gen !== connectionGeneration) return;
     if (hadConnectedTunnel) statsSessionEnd();
     statsSessionStart();

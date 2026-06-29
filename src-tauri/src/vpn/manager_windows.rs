@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -33,6 +34,7 @@ const SUBPROC_TIMEOUT: Duration = Duration::from_secs(15);
 // retry loop stays time-bounded even if PowerShell wedges.
 const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
+const BYPASS_DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Per-user app data dir (e.g. C:\Users\<user>\AppData\Local\ToBeVPN).
@@ -660,25 +662,37 @@ impl VpnManager {
         self.bin_dir.clone()
     }
 
-    async fn resolve_server_ip(address: &str, attempt: &ConnectAttempt) -> Result<String, String> {
-        if address.parse::<std::net::IpAddr>().is_ok() {
-            return Ok(address.to_string());
-        }
+    async fn lookup_ipv4s(
+        host: String,
+        port: u16,
+        timeout_dur: Duration,
+    ) -> Result<Vec<String>, String> {
         let lookup = timeout(
-            DNS_RESOLVE_TIMEOUT,
-            tokio::net::lookup_host(format!("{}:0", address)),
+            timeout_dur,
+            tokio::net::lookup_host(format!("{}:{}", host, port)),
         );
-        tokio::pin!(lookup);
+        let addrs = lookup
+            .await
+            .map_err(|_| "DNS resolve timed out".to_string())?
+            .map_err(|e| format!("DNS resolve failed: {}", e))?;
+        Ok(addrs
+            .filter(|addr| addr.is_ipv4())
+            .map(|addr| addr.ip().to_string())
+            .collect())
+    }
+
+    async fn resolve_server_ip(address: &str, attempt: &ConnectAttempt) -> Result<String, String> {
+        match address.parse::<IpAddr>() {
+            Ok(IpAddr::V4(_)) => return Ok(address.to_string()),
+            Ok(IpAddr::V6(_)) => return Err("No IPv4 address found for server".into()),
+            Err(_) => {}
+        }
         let addrs = tokio::select! {
-            result = &mut lookup => result
-                .map_err(|_| "DNS resolve timed out".to_string())?
-                .map_err(|e| format!("DNS resolve failed: {}", e))?,
+            result = Self::lookup_ipv4s(address.to_string(), 0, DNS_RESOLVE_TIMEOUT) => result?,
             _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
         };
-        for addr in addrs {
-            if addr.is_ipv4() {
-                return Ok(addr.ip().to_string());
-            }
+        if let Some(ip) = addrs.into_iter().next() {
+            return Ok(ip);
         }
         Err("No IPv4 address found for server".into())
     }
@@ -688,29 +702,31 @@ impl VpnManager {
         attempt: &ConnectAttempt,
     ) -> Result<Vec<String>, String> {
         let mut ips = BTreeSet::new();
+        let mut seen_hosts = BTreeSet::new();
+        let mut tasks = Vec::new();
         for host in hosts {
-            if host.trim().is_empty() {
+            let trimmed = host.trim();
+            if trimmed.is_empty() || !seen_hosts.insert(trimmed.to_string()) {
                 continue;
             }
-            let lookup = timeout(
-                DNS_RESOLVE_TIMEOUT,
-                tokio::net::lookup_host(format!("{}:443", host)),
-            );
-            tokio::pin!(lookup);
+            if let Ok(ip) = trimmed.parse::<std::net::Ipv4Addr>() {
+                ips.insert(ip.to_string());
+                continue;
+            }
+            let host = trimmed.to_string();
+            tasks.push(tokio::spawn(async move {
+                Self::lookup_ipv4s(host, 443, BYPASS_DNS_RESOLVE_TIMEOUT).await
+            }));
+        }
+        for task in tasks {
             let result = tokio::select! {
-                result = &mut lookup => result,
+                result = task => result,
                 _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
             };
             match result {
-                Ok(Ok(addrs)) => {
-                    for addr in addrs {
-                        if addr.is_ipv4() {
-                            ips.insert(addr.ip().to_string());
-                        }
-                    }
-                }
+                Ok(Ok(found)) => ips.extend(found),
                 Ok(Err(_)) | Err(_) => {
-                    log_win!("[VPN-WIN] Direct-access destination DNS lookup failed");
+                    log_win!("[VPN-WIN] Direct-access destination DNS lookup failed")
                 }
             }
         }
@@ -723,6 +739,7 @@ impl VpnManager {
     async fn resolve_hosts_to_ipv4_pairs(hosts: &[String]) -> Vec<PingHostMapping> {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
+        let mut tasks = Vec::new();
         for host in hosts {
             let trimmed = host.trim();
             if trimmed.is_empty() {
@@ -738,23 +755,19 @@ impl VpnManager {
                 });
                 continue;
             }
-            match timeout(
-                DNS_RESOLVE_TIMEOUT,
-                tokio::net::lookup_host(format!("{}:443", trimmed)),
-            )
-            .await
-            {
-                Ok(Ok(addrs)) => {
-                    if let Some(addr) = addrs.into_iter().find(|a| a.is_ipv4()) {
-                        out.push(PingHostMapping {
-                            host: trimmed.to_string(),
-                            ip: addr.ip().to_string(),
-                        });
-                    }
-                }
-                Ok(Err(_)) | Err(_) => {
-                    log_win!("[VPN-WIN] Ping destination DNS lookup failed");
-                }
+            let host = trimmed.to_string();
+            tasks.push(tokio::spawn(async move {
+                let ip = Self::lookup_ipv4s(host.clone(), 443, BYPASS_DNS_RESOLVE_TIMEOUT)
+                    .await
+                    .ok()
+                    .and_then(|ips| ips.into_iter().next());
+                ip.map(|ip| PingHostMapping { host, ip })
+            }));
+        }
+        for task in tasks {
+            match task.await {
+                Ok(Some(mapping)) => out.push(mapping),
+                Ok(None) | Err(_) => log_win!("[VPN-WIN] Ping destination DNS lookup failed"),
             }
         }
         out

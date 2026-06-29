@@ -17,6 +17,7 @@ import "./SubscriptionSheet.css";
 interface CurrentLimits {
   trafficLimitBytes: number;
   deviceLimit: number;
+  renewalUrl: string | null;
 }
 
 function normalizePlanTrafficLimit(value: number | null | undefined): number | null {
@@ -29,20 +30,21 @@ function currentLimitsFromPlan(dto: CurrentPlanDto | null | undefined): CurrentL
   if (!dto) return null;
   const snapshot = dto.current_plan ?? dto.plan_snapshot ?? null;
   const subscription = dto.subscription ?? null;
+  const renewalUrl = (dto.renewal_url ?? "").trim() || null;
   const trafficLimitBytes =
     subscription?.traffic_limit_bytes ??
     normalizePlanTrafficLimit(subscription?.traffic_limit) ??
     snapshot?.traffic_limit_bytes ??
     normalizePlanTrafficLimit(snapshot?.traffic_limit);
   const deviceLimit = subscription?.device_limit ?? snapshot?.device_limit;
-  if (trafficLimitBytes === null && deviceLimit === null) return null;
+  if (trafficLimitBytes === null && deviceLimit === null && !renewalUrl) return null;
   return {
     trafficLimitBytes: trafficLimitBytes ?? 0,
     deviceLimit: deviceLimit ?? 0,
+    renewalUrl,
   };
 }
 
-const BOT_NAME = "meow_meow_vpn_bot";
 const FALLBACK_PLAN_DURATIONS = [
   { days: 1, rubPrice: 15 },
   { days: 7, rubPrice: 65 },
@@ -50,6 +52,7 @@ const FALLBACK_PLAN_DURATIONS = [
   { days: 90, rubPrice: 500 },
   { days: 365, rubPrice: 1500 },
 ];
+const PURCHASE_PLANS_CACHE_KEY = "tobevpn_purchase_plans_shape_v1";
 
 interface PlanRow {
   key: string;
@@ -57,6 +60,32 @@ interface PlanRow {
   description: string;
   priceDisplay: string;
   paymentUrl: string | null;
+}
+
+interface PlanTab {
+  key: string;
+  title: string;
+  periods: PlanRow[];
+}
+
+function readCachedPurchasePlans(): PurchasePlansDto | null {
+  try {
+    const raw = localStorage.getItem(PURCHASE_PLANS_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PurchasePlansDto;
+    return Array.isArray(parsed.plans) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedPurchasePlans(data: PurchasePlansDto | null): void {
+  try {
+    if (!data || !Array.isArray(data.plans) || data.plans.length === 0) return;
+    localStorage.setItem(PURCHASE_PLANS_CACHE_KEY, JSON.stringify(data));
+  } catch {
+    // The live response is enough; cache failure should not block the sheet.
+  }
 }
 
 function planTitleKey(days: number): StringKey | null {
@@ -134,7 +163,8 @@ function formatDurationPrice(duration: PurchaseDurationDto, isRu: boolean): stri
   return t("plan_unknown_name");
 }
 
-function planDescription(plan: PurchasePlanDto | null): string {
+function planDescription(plan: PurchasePlanDto | null, masked = false): string {
+  if (masked) return `${t("plan_quota_month")} · ${t("plan_devices_unknown")}`;
   const trafficGb = plan?.traffic_limit;
   const deviceLimit = plan?.device_limit;
   const trafficPart =
@@ -150,40 +180,60 @@ function planDescription(plan: PurchasePlanDto | null): string {
   return `${trafficPart} \u00B7 ${devicePart}`;
 }
 
-function pickSourcePlan(data: PurchasePlansDto): PurchasePlanDto | null {
-  const candidates = data.plans.filter((p) =>
-    p.durations.some((d) => d.days > 0),
-  );
-  if (candidates.length === 0) return null;
-  return candidates.reduce((best, p) =>
-    p.durations.length > best.durations.length ? p : best,
-  );
+function buildTabs(data: PurchasePlansDto | null, isRu: boolean, masked = false): PlanTab[] {
+  const sourcePlans = data
+    ? data.plans
+        .filter((p) => p.durations.some((d) => d.days > 0))
+        .sort((a, b) => a.order_index - b.order_index || a.name.localeCompare(b.name))
+    : [];
+  if (sourcePlans.length === 0) {
+    const desc = planDescription(null, true);
+    return [
+      {
+        key: "fallback",
+        title: t("plan_unknown_name"),
+        periods: FALLBACK_PLAN_DURATIONS.map((d) => ({
+          key: `fallback:${planKey(d.days)}`,
+          title: planTitle(d.days),
+          description: desc,
+          priceDisplay: masked ? t("plan_unknown_name") : formatFallbackPrice(d.rubPrice, isRu),
+          paymentUrl: null,
+        })),
+      },
+    ];
+  }
+  return sourcePlans.map((sourcePlan) => {
+    const desc = planDescription(sourcePlan, masked);
+    return {
+      key: String(sourcePlan.id),
+      title: sourcePlan.name,
+      periods: [...sourcePlan.durations]
+        .filter((d) => d.days > 0)
+        .sort((a, b) => a.order_index - b.order_index)
+        .map((d) => ({
+          key: `${sourcePlan.id}:${planKey(d.days)}`,
+          title: planTitle(d.days),
+          description: desc,
+          priceDisplay: masked ? t("plan_unknown_name") : formatDurationPrice(d, isRu),
+          paymentUrl: masked ? null : (d.bot_payment_url ?? "").trim() || null,
+        })),
+    };
+  });
 }
 
-function buildRows(data: PurchasePlansDto | null, isRu: boolean): PlanRow[] {
-  const sourcePlan = data ? pickSourcePlan(data) : null;
-  const desc = planDescription(sourcePlan);
-  if (!sourcePlan) {
-    return FALLBACK_PLAN_DURATIONS.map((d) => ({
-      key: planKey(d.days),
-      title: planTitle(d.days),
-      description: desc,
-      priceDisplay: formatFallbackPrice(d.rubPrice, isRu),
-      paymentUrl: null,
-    }));
-  }
-  return [...sourcePlan.durations]
-    .filter((d) => d.days > 0)
-    .sort((a, b) => a.order_index - b.order_index)
-    .map((d) => ({
-      key: planKey(d.days),
-      title: planTitle(d.days),
-      description: desc,
-      priceDisplay: formatDurationPrice(d, isRu),
-      paymentUrl:
-        d.bot_payment_url ??
-        (d.bot_start_param ? `https://t.me/${BOT_NAME}?start=${d.bot_start_param}` : null),
-    }));
+function normalizedPlanName(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+
+function samePlanName(current: string | null | undefined, selected: string | null | undefined): boolean {
+  const currentName = normalizedPlanName(current);
+  const selectedName = normalizedPlanName(selected);
+  if (!currentName || !selectedName) return false;
+  return (
+    currentName === selectedName ||
+    currentName.startsWith(`${selectedName} `) ||
+    selectedName.startsWith(`${currentName} `)
+  );
 }
 
 function planLabel(plan: UserPlan, displayName?: string | null): string {
@@ -213,7 +263,6 @@ function planNameClass(plan: UserPlan): string {
 export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void }) {
   const session = useSession();
   const isRu = getSavedLang() === "ru";
-  const lang = getSavedLang();
   const showLimits = session.userPlan === "PAID" || session.userPlan === "ADMIN";
   const currentLimitsKey =
     session.isLinked && session.telegramId !== null
@@ -221,9 +270,11 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       : null;
 
   const [plansData, setPlansData] = useState<PurchasePlansDto | null>(null);
+  const [plansFromCache, setPlansFromCache] = useState(false);
   const [plansLoading, setPlansLoading] = useState(true);
   const [currentLimits, setCurrentLimits] = useState<CurrentLimits | null>(null);
   const [loadedLimitsKey, setLoadedLimitsKey] = useState<string | null>(null);
+  const [selectedTabKey, setSelectedTabKey] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [qrVisible, setQrVisible] = useState(false);
   const [qrClosing, setQrClosing] = useState(false);
@@ -245,11 +296,21 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     fetchPurchasePlans()
       .then((data) => {
         if (cancelled) return;
-        setPlansData(data);
+        if (data && data.plans.length > 0) {
+          writeCachedPurchasePlans(data);
+          setPlansData(data);
+          setPlansFromCache(false);
+          return;
+        }
+        const cached = readCachedPurchasePlans();
+        setPlansData(cached);
+        setPlansFromCache(Boolean(cached));
       })
       .catch(() => {
         if (cancelled) return;
-        setPlansData(null);
+        const cached = readCachedPurchasePlans();
+        setPlansData(cached);
+        setPlansFromCache(Boolean(cached));
       })
       .finally(() => {
         if (!cancelled) setPlansLoading(false);
@@ -285,23 +346,33 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     };
   }, [currentLimitsKey, session.isLinked, session.telegramId]);
 
-  const rows = useMemo(
-    () => (plansLoading ? [] : buildRows(plansData, isRu)),
-    [plansData, plansLoading, isRu],
+  const tabs = useMemo(
+    () => (plansLoading ? [] : buildTabs(plansData, isRu, plansFromCache || !plansData)),
+    [plansData, plansFromCache, plansLoading, isRu],
   );
 
-  // Keep the selection valid as the rows refresh.
+  // Keep the selection valid as the plan shape refreshes.
   useEffect(() => {
-    if (rows.length === 0) return;
-    if (!selectedKey || !rows.some((r) => r.key === selectedKey)) {
-      const monthRow = rows.find((r) => r.key === "month") ?? rows[0];
-      setSelectedKey(monthRow.key);
+    if (tabs.length === 0) return;
+    const activeTab = tabs.find((tab) => tab.key === selectedTabKey) ?? tabs[0];
+    if (!selectedTabKey || activeTab.key !== selectedTabKey) {
+      setSelectedTabKey(activeTab.key);
     }
-  }, [rows, selectedKey]);
+    if (!selectedKey || !activeTab.periods.some((r) => r.key === selectedKey)) {
+      const monthRow =
+        activeTab.periods.find((r) => r.key === "month" || r.key.endsWith(":month")) ??
+        activeTab.periods[0];
+      setSelectedKey(monthRow?.key ?? null);
+    }
+  }, [tabs, selectedKey, selectedTabKey]);
 
+  const selectedTab = useMemo(
+    () => tabs.find((tab) => tab.key === selectedTabKey) ?? tabs[0] ?? null,
+    [tabs, selectedTabKey],
+  );
   const selectedRow = useMemo(
-    () => rows.find((r) => r.key === selectedKey) ?? null,
-    [rows, selectedKey],
+    () => selectedTab?.periods.find((r) => r.key === selectedKey) ?? selectedTab?.periods[0] ?? null,
+    [selectedKey, selectedTab],
   );
 
   const handleClose = () => {
@@ -321,17 +392,27 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     return () => window.removeEventListener("keydown", onKey);
   }, [qrVisible]);
 
-  const fallbackQr = `https://t.me/${BOT_NAME}?start=buy_${selectedRow?.key ?? "month"}_${lang}`;
-  const qrUrl = selectedRow?.paymentUrl ?? fallbackQr;
-
   const canPurchase = session.isLinked && session.telegramId !== null;
-  const isRenewal = session.userPlan === "PAID" || session.userPlan === "EXPIRED";
+  const isPaidAccount = session.userPlan !== "FREE_TRIAL";
+  const selectedTabIsCurrent = samePlanName(session.planDisplayName, selectedTab?.title);
+  const isRenewal = isPaidAccount && selectedTabIsCurrent;
+  const selectedActionTitle =
+    selectedTab && selectedRow
+      ? `${selectedTab.title} · ${selectedRow.title}`
+      : selectedRow?.title ?? "";
+  const selectedPaymentUrl =
+    selectedRow?.paymentUrl ??
+    (isRenewal && !plansFromCache ? currentLimits?.renewalUrl ?? null : null);
   const handleShowQr = async () => {
     if (!canPurchase) {
       setOpenError(t("not_authorized"));
       return;
     }
     if (!selectedRow) return;
+    if (!selectedPaymentUrl) {
+      setOpenError(t("plans_load_error"));
+      return;
+    }
     if (await pingHwidOnly().catch(() => false)) {
       onDismiss();
       return;
@@ -345,7 +426,11 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   };
   const buyText = selectedRow
     ? canPurchase
-      ? tf(isRenewal ? "renew_plan" : "buy_plan", selectedRow.title, selectedRow.priceDisplay)
+      ? tf(
+          isRenewal ? "renew_plan" : isPaidAccount ? "change_plan" : "buy_plan",
+          selectedActionTitle,
+          selectedRow.priceDisplay,
+        )
       : t("not_authorized")
     : t("subscription");
 
@@ -395,7 +480,15 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       : displayedLimits && displayedLimits.trafficLimitBytes <= 0
         ? "\u221E"
         : `XXX ${t("unit_gb")}`;
-  const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : t("plan_unknown_name");
+  const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : "XX";
+  const selectTab = (tab: PlanTab) => {
+    setSelectedTabKey(tab.key);
+    const nextRow =
+      tab.periods.find((row) => row.key === "month" || row.key.endsWith(":month")) ??
+      tab.periods[0] ??
+      null;
+    setSelectedKey(nextRow?.key ?? null);
+  };
 
   return (
     <div
@@ -452,25 +545,51 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
               <Spinner size={18} thickness={2} />
               <span>{t("plans_loading")}</span>
             </div>
-          ) : rows.length === 0 ? (
+          ) : tabs.length === 0 ? (
             <div className="sub-sheet__hint">{t("plans_load_error")}</div>
           ) : (
-            rows.map((row) => (
+            <div className="sub-tariffs">
               <div
-                key={row.key}
-                className={`sub-plan ${selectedKey === row.key ? "sub-plan--selected" : ""}`}
-                onClick={() => setSelectedKey(row.key)}
+                className="sub-tabs"
+                style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
               >
-                <div className="sub-plan__radio">
-                  {selectedKey === row.key && <div className="sub-plan__radio-dot" />}
-                </div>
-                <div className="sub-plan__info">
-                  <div className="sub-plan__title">{row.title}</div>
-                  <div className="sub-plan__desc">{row.description}</div>
-                </div>
-                <div className="sub-plan__price">{row.priceDisplay}</div>
+                {tabs.map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    className={`sub-tab ${selectedTab?.key === tab.key ? "sub-tab--selected" : ""}`}
+                    onClick={() => selectTab(tab)}
+                    aria-pressed={selectedTab?.key === tab.key}
+                  >
+                    <span>{tab.title}</span>
+                  </button>
+                ))}
               </div>
-            ))
+
+              <div key={selectedTab?.key ?? "empty"} className="sub-periods">
+                {selectedTab?.periods.map((row) => (
+                  <div
+                    key={row.key}
+                    className={`sub-plan ${selectedKey === row.key ? "sub-plan--selected" : ""}`}
+                    onClick={() => setSelectedKey(row.key)}
+                  >
+                    <div className="sub-plan__radio">
+                      {selectedKey === row.key && <div className="sub-plan__radio-dot" />}
+                    </div>
+                    <div className="sub-plan__info">
+                      <div className="sub-plan__title">{row.title}</div>
+                      <div className="sub-plan__desc">{row.description}</div>
+                    </div>
+                    <div className="sub-plan__price">{row.priceDisplay}</div>
+                  </div>
+                ))}
+                {plansFromCache && (
+                  <div className="sub-sheet__hint sub-sheet__hint--compact">
+                    {t("plans_load_error")}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
 
           <div className="sub-sheet__hint">{t("payment_via_telegram")}</div>
@@ -478,7 +597,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           <button
             className="sub-sheet__buy-btn"
             onClick={handleShowQr}
-            disabled={!selectedRow || !canPurchase}
+            disabled={!selectedRow || !canPurchase || !selectedPaymentUrl}
           >
             {buyText}
           </button>
@@ -486,7 +605,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       </div>
 
       {/* QR overlay */}
-      {qrVisible && (
+      {qrVisible && selectedPaymentUrl && (
         <div
           className={`sub-qr-overlay ${qrClosing ? "sub-qr-overlay--closing" : ""}`}
           onClick={(e) => e.target === e.currentTarget && closeQr()}
@@ -496,7 +615,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
               {t(isRenewal ? "subscription_qr_renew_title" : "subscription_qr_title")}
             </div>
             <div className="sub-qr-card__qr">
-              <QRCodeSVG value={qrUrl} size={220} level="M" />
+              <QRCodeSVG value={selectedPaymentUrl} size={220} level="M" />
             </div>
             <div className="sub-qr-card__hint">
               {t(isRenewal ? "subscription_qr_renew_hint" : "subscription_qr_hint")}

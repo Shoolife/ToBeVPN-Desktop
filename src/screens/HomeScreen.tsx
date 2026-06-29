@@ -28,7 +28,7 @@ import {
   syncSubscription,
   type VpnServer,
 } from "../session/auth";
-import { useSession, type UserPlan } from "../session/store";
+import { getSession, useSession, type UserPlan } from "../session/store";
 import { connectVpn, disconnectVpn, useVpnRuntime, clearVpnError } from "../session/vpnState";
 import {
   measureVpnServerPing,
@@ -171,6 +171,19 @@ function toSelectedServer(server: VpnServer): SelectedServer {
   };
 }
 
+function canUseSelectedServerFallback(server: SelectedServer | null): server is SelectedServer {
+  const session = getSession();
+  return Boolean(
+    server &&
+      !getSubscriptionUsageBlocked() &&
+      session.userPlan !== "EXPIRED" &&
+      server.uuid !== "00000000-0000-0000-0000-000000000000" &&
+      server.address &&
+      server.address !== "127.0.0.1" &&
+      server.address !== "0.0.0.0",
+  );
+}
+
 let blockDialogShownThisSession = false;
 
 export default function HomeScreen({
@@ -303,6 +316,7 @@ export default function HomeScreen({
         ...selectedServer,
         id: stableServerId(selectedServer),
         isOnline: true,
+        sortOrder: 0,
       };
       const ms = await measureVpnServerPing(pingServer, { force: true });
       if (!cancelled) setPing(ms);
@@ -324,9 +338,18 @@ export default function HomeScreen({
     const fresh = automaticServerSelection
       ? await selectBestVpnServer(freshServers, { forceProbe: true })
       : freshServers.find((server) => isSameServerSelection(selectedServer, server)) ?? null;
-    if (!fresh) return null;
+    if (!fresh) {
+      if (canUseSelectedServerFallback(selectedServer)) {
+        console.warn("[VPN-UI] using selected server fallback after fresh server lookup missed", {
+          freshServerCount: freshServers.length,
+          automaticServerSelection,
+        });
+        return selectedServer;
+      }
+      return null;
+    }
     if (!automaticServerSelection) {
-      await measureVpnServerPing(fresh, { force: true }).catch(() => -1);
+      void measureVpnServerPing(fresh, { force: true }).catch(() => -1);
     }
 
     const resolved = toSelectedServer(fresh);

@@ -312,6 +312,9 @@ export default function App({
       const current = selectedServerRef.current;
       const servers = getCachedVpnServers().filter(isAvailableVpnServer);
       const automatic = automaticServerSelectionRef.current;
+      if (servers.length === 0) {
+        return;
+      }
       const matching = current
         ? servers.find((server) => isSameServerSelection(current, server)) ?? null
         : null;
