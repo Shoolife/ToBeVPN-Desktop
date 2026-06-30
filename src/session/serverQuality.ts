@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { VpnServer } from "./auth";
 import { preparePingBypass } from "./vpn";
+import { isBrowserPreviewRuntime } from "./browserPreview";
 
 const STORAGE_KEY = "tobevpn_server_quality_v1";
 const PING_TIMEOUT_MS = 3_000;
@@ -233,6 +234,15 @@ export async function measureVpnServerPings(
   servers: VpnServer[],
   options: { force?: boolean } = {},
 ): Promise<Map<string, number>> {
+  if (isBrowserPreviewRuntime()) {
+    return new Map(
+      servers.map((server, index) => [
+        server.id,
+        isAvailableServer(server) && server.isOnline ? 42 + index * 18 : -1,
+      ]),
+    );
+  }
+
   const now = Date.now();
   const result = new Map<string, number>();
   const pending: VpnServer[] = [];

@@ -49,6 +49,7 @@ import {
   getActiveVpnReconnectServer,
   reconnectVpnWithFreshSubscription,
 } from "./vpnState";
+import { isBrowserPreviewRuntime } from "./browserPreview";
 import {
   fetchSubscriptionProfile,
   pingSubscriptionUrl,
@@ -1259,6 +1260,14 @@ export interface VpnServer {
   sortOrder: number;
 }
 
+export function seedVpnServersForBrowserPreview(
+  shortUuid: string,
+  servers: VpnServer[],
+): void {
+  if (!isBrowserPreviewRuntime()) return;
+  writeVpnServersMemoryCache(shortUuid, servers);
+}
+
 interface ServerNameParts {
   base: string;
   number: number | null;
@@ -1524,6 +1533,7 @@ export async function fetchVpnServers(
   const { shortUuid } = getSession();
   const debug = import.meta.env.DEV;
   if (!shortUuid) return [];
+  if (isBrowserPreviewRuntime()) return getCachedVpnServers();
   if (getSubscriptionUsageBlocked()) {
     clearVpnServersMemoryCache(shortUuid);
     return [];
