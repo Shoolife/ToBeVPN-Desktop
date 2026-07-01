@@ -178,17 +178,54 @@
   width: 100%;
 }
 
-.sub-tabs {
-  display: grid;
+.sub-tabs-shell {
+  position: relative;
   width: 100%;
-  gap: 0;
   border-bottom: 1px solid var(--sheet-divider);
   margin-bottom: 12px;
 }
 
+.sub-tabs {
+  --sub-tabs-mask: none;
+  display: flex;
+  width: 100%;
+  gap: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-mask-image: var(--sub-tabs-mask);
+  mask-image: var(--sub-tabs-mask);
+  -webkit-mask-mode: alpha;
+  mask-mode: alpha;
+  touch-action: pan-x;
+}
+
+.sub-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.sub-tabs-shell--start .sub-tabs {
+  --sub-tabs-mask: linear-gradient(to right, transparent 0, #000 38px, #000 100%);
+}
+
+.sub-tabs-shell--end .sub-tabs {
+  --sub-tabs-mask: linear-gradient(to right, #000 0, #000 calc(100% - 38px), transparent 100%);
+}
+
+.sub-tabs-shell--start.sub-tabs-shell--end .sub-tabs {
+  --sub-tabs-mask: linear-gradient(
+    to right,
+    transparent 0,
+    #000 38px,
+    #000 calc(100% - 38px),
+    transparent 100%
+  );
+}
+
 .sub-tab {
   position: relative;
-  min-width: 0;
+  flex: 1 0 max-content;
+  min-width: max-content;
   border: none;
   background: transparent;
   color: var(--text-muted);
@@ -198,17 +235,22 @@
   font-weight: 600;
   text-align: center;
   cursor: pointer;
-  transition: color 220ms ease, background 220ms ease;
+  transition: color 220ms ease;
 }
 
-.sub-tab:hover {
-  background: var(--surface-2);
+.sub-tab:hover,
+.sub-tab:active {
+  background: transparent;
+}
+
+.sub-tab:focus-visible {
+  outline: 1px solid var(--selected-border);
+  outline-offset: -4px;
+  border-radius: 8px 8px 0 0;
 }
 
 .sub-tab span {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -232,6 +274,38 @@
 
 .sub-tab--selected::after {
   transform: scaleX(1);
+  opacity: 1;
+}
+
+.sub-tabs__edge {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--text-muted);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 180ms ease;
+}
+
+.sub-tabs__edge--start {
+  left: 2px;
+}
+
+.sub-tabs__edge--end {
+  right: 2px;
+}
+
+.sub-tabs-shell--start .sub-tabs__edge--start,
+.sub-tabs-shell--end .sub-tabs__edge--end {
   opacity: 1;
 }
 

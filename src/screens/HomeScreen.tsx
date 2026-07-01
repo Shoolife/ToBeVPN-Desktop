@@ -220,7 +220,9 @@ export default function HomeScreen({
   );
   const vpn = useVpnRuntime();
   const { connected, connecting, disconnecting, sessionBytes, sessionStartTime, lastError } = vpn;
-  const [showSubscription, setShowSubscription] = useState(false);
+  const previewSubscriptionOpen =
+    browserPreview && new URLSearchParams(window.location.search).get("subscription") === "1";
+  const [showSubscription, setShowSubscription] = useState(previewSubscriptionOpen);
   const [showTrialInfo, setShowTrialInfo] = useState(false);
   const [showBlockedDialog, setShowBlockedDialog] = useState(false);
   const [dismissedReminderKey, setDismissedReminderKey] = useState<string | null>(null);

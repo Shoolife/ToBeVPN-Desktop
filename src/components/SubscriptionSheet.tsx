@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import {
@@ -11,6 +11,7 @@ import { useSession, type UserPlan } from "../session/store";
 import { getCurrentPlan } from "../api/client";
 import type { CurrentPlanDto, PurchaseDurationDto, PurchasePlanDto, PurchasePlansDto } from "../api/types";
 import { formatDateDots } from "../session/dateFormat";
+import { isBrowserPreviewRuntime } from "../session/browserPreview";
 import Spinner from "./Spinner";
 import "./SubscriptionSheet.css";
 
@@ -54,6 +55,18 @@ const FALLBACK_PLAN_DURATIONS = [
 ];
 const PURCHASE_PLANS_CACHE_KEY = "tobevpn_purchase_plans_shape_v1";
 
+const PREVIEW_PURCHASE_PLANS: PurchasePlansDto = {
+  telegram_id: 100000001,
+  effective_discount_percent: 0,
+  plans: [
+    createPreviewPlan(1, "Стандарт", 100, 3, 1),
+    createPreviewPlan(2, "Оптимальный", 250, 5, 2),
+    createPreviewPlan(3, "Максимальный", 500, 10, 3),
+    createPreviewPlan(4, "Семейный доступ", 1000, 20, 4),
+    createPreviewPlan(5, "Премиум безлимит", 0, 30, 5),
+  ],
+};
+
 interface PlanRow {
   key: string;
   title: string;
@@ -73,6 +86,48 @@ interface ExitingPeriods {
   tab: PlanTab;
   selectedKey: string | null;
   showCacheHint: boolean;
+}
+
+function createPreviewPlan(
+  id: number,
+  name: string,
+  trafficLimit: number,
+  deviceLimit: number,
+  orderIndex: number,
+): PurchasePlanDto {
+  return {
+    id,
+    public_code: `preview-${id}`,
+    name,
+    description: null,
+    type: "PAID",
+    availability: "PUBLIC",
+    purchase_type: id === 1 ? "RENEW" : "CHANGE",
+    traffic_limit: trafficLimit,
+    traffic_limit_strategy: "MONTH",
+    device_limit: deviceLimit,
+    tag: null,
+    order_index: orderIndex,
+    internal_squad_uuids: [],
+    external_squad_uuid: null,
+    durations: FALLBACK_PLAN_DURATIONS.map((duration, index) => {
+      const multiplier = orderIndex + 1;
+      const rub = duration.rubPrice * multiplier;
+      return {
+        id: id * 100 + index + 1,
+        days: duration.days,
+        order_index: index,
+        bot_start_param: `preview_${id}_${duration.days}`,
+        bot_payment_url: `https://t.me/preview_bot?start=preview_${id}_${duration.days}`,
+        prices: [
+          { currency: "RUB", amount: String(rub) },
+          { currency: "USD", amount: (rub / 95).toFixed(2) },
+          { currency: "XTR", amount: String(Math.round(rub / 1.3)) },
+        ],
+        payment_methods: [],
+      };
+    }),
+  };
 }
 
 function readCachedPurchasePlans(): PurchasePlansDto | null {
@@ -290,8 +345,16 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const periodsContentRef = useRef<HTMLDivElement | null>(null);
   const tabTransitionIdRef = useRef(0);
   const tabTransitionTimerRef = useRef<number | null>(null);
+  const tabsScrollerRef = useRef<HTMLDivElement | null>(null);
+  const tabButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const tabsScrollAnimationRef = useRef<number | null>(null);
   const [periodsHeight, setPeriodsHeight] = useState<number | null>(null);
   const [exitingPeriods, setExitingPeriods] = useState<ExitingPeriods | null>(null);
+  const [tabsOverflow, setTabsOverflow] = useState({
+    scrollable: false,
+    start: false,
+    end: false,
+  });
 
   const closeQr = () => {
     if (qrClosing) return;
@@ -303,6 +366,13 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   };
 
   useEffect(() => {
+    if (isBrowserPreviewRuntime()) {
+      setPlansData(PREVIEW_PURCHASE_PLANS);
+      setPlansFromCache(false);
+      setPlansLoading(false);
+      return;
+    }
+
     let cancelled = false;
     setPlansLoading(true);
     fetchPurchasePlans()
@@ -362,6 +432,119 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     () => (plansLoading ? [] : buildTabs(plansData, isRu, plansFromCache || !plansData)),
     [plansData, plansFromCache, plansLoading, isRu],
   );
+
+  const updateTabsOverflow = useCallback(() => {
+    const scroller = tabsScrollerRef.current;
+    if (!scroller) {
+      setTabsOverflow((current) =>
+        current.scrollable || current.start || current.end
+          ? { scrollable: false, start: false, end: false }
+          : current,
+      );
+      return;
+    }
+
+    const scrollable = scroller.scrollWidth > scroller.clientWidth + 1;
+    const start = scrollable && scroller.scrollLeft > 1;
+    const end = scrollable && scroller.scrollLeft + scroller.clientWidth < scroller.scrollWidth - 1;
+    setTabsOverflow((current) =>
+      current.scrollable === scrollable && current.start === start && current.end === end
+        ? current
+        : { scrollable, start, end },
+    );
+  }, []);
+
+  const animateTabsScrollTo = useCallback((target: number) => {
+    const scroller = tabsScrollerRef.current;
+    if (!scroller) return;
+
+    if (tabsScrollAnimationRef.current !== null) {
+      window.cancelAnimationFrame(tabsScrollAnimationRef.current);
+      tabsScrollAnimationRef.current = null;
+    }
+
+    const start = scroller.scrollLeft;
+    const distance = target - start;
+    if (Math.abs(distance) <= 1) {
+      scroller.scrollLeft = target;
+      updateTabsOverflow();
+      return;
+    }
+
+    const durationMs = 520;
+    const startedAt = window.performance.now();
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = 0.5 - Math.cos(Math.PI * progress) / 2;
+      scroller.scrollLeft = start + distance * eased;
+      if (progress < 1) {
+        tabsScrollAnimationRef.current = window.requestAnimationFrame(animate);
+      } else {
+        tabsScrollAnimationRef.current = null;
+        updateTabsOverflow();
+      }
+    };
+
+    tabsScrollAnimationRef.current = window.requestAnimationFrame(animate);
+  }, [updateTabsOverflow]);
+
+  const scrollTabTowardCenter = useCallback((tabKey: string) => {
+    const scroller = tabsScrollerRef.current;
+    const tabButton = tabButtonRefs.current.get(tabKey);
+    if (!scroller || !tabButton) return;
+
+    const maxScroll = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+    if (maxScroll <= 1) return;
+
+    const selectedStart = tabButton.offsetLeft;
+    const selectedWidth = tabButton.offsetWidth;
+    const selectedEnd = selectedStart + selectedWidth;
+    const selectedCenter = selectedStart + selectedWidth / 2;
+    const visibleStart = scroller.scrollLeft;
+    const visibleEnd = visibleStart + scroller.clientWidth;
+    const edgeComfort = Math.max(scroller.clientWidth / 4, selectedWidth / 2);
+    const centeredTarget = selectedCenter - scroller.clientWidth / 2;
+
+    let target = visibleStart;
+    if (
+      selectedStart < visibleStart ||
+      selectedEnd > visibleEnd ||
+      selectedCenter < visibleStart + edgeComfort ||
+      selectedCenter > visibleEnd - edgeComfort
+    ) {
+      target = Math.min(maxScroll, Math.max(0, centeredTarget));
+    }
+
+    if (Math.abs(target - visibleStart) > 1) {
+      animateTabsScrollTo(target);
+    }
+  }, [animateTabsScrollTo]);
+
+  useEffect(() => {
+    const scroller = tabsScrollerRef.current;
+    if (!scroller || tabs.length === 0) {
+      updateTabsOverflow();
+      return;
+    }
+
+    let frame = window.requestAnimationFrame(updateTabsOverflow);
+    const scheduleUpdate = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(updateTabsOverflow);
+    };
+
+    scroller.addEventListener("scroll", scheduleUpdate, { passive: true });
+    const observer = new ResizeObserver(scheduleUpdate);
+    observer.observe(scroller);
+    Array.from(scroller.children).forEach((child) => observer.observe(child));
+    window.addEventListener("resize", scheduleUpdate);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      scroller.removeEventListener("scroll", scheduleUpdate);
+      observer.disconnect();
+      window.removeEventListener("resize", scheduleUpdate);
+    };
+  }, [tabs, updateTabsOverflow]);
 
   // Keep the selection valid as the plan shape refreshes.
   useEffect(() => {
@@ -440,8 +623,18 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       if (tabTransitionTimerRef.current !== null) {
         window.clearTimeout(tabTransitionTimerRef.current);
       }
+      if (tabsScrollAnimationRef.current !== null) {
+        window.cancelAnimationFrame(tabsScrollAnimationRef.current);
+        tabsScrollAnimationRef.current = null;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!selectedTabKey) return;
+    const frame = window.requestAnimationFrame(() => scrollTabTowardCenter(selectedTabKey));
+    return () => window.cancelAnimationFrame(frame);
+  }, [scrollTabTowardCenter, selectedTabKey, tabs.length]);
 
   const canPurchase = session.isLinked && session.telegramId !== null;
   const isPaidAccount = session.userPlan !== "FREE_TRIAL";
@@ -533,7 +726,10 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
         : `XXX ${t("unit_gb")}`;
   const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : "XX";
   const selectTab = (tab: PlanTab) => {
-    if (selectedTab?.key === tab.key) return;
+    if (selectedTab?.key === tab.key) {
+      scrollTabTowardCenter(tab.key);
+      return;
+    }
 
     if (selectedTab) {
       tabTransitionIdRef.current += 1;
@@ -641,20 +837,27 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           ) : (
             <div className="sub-tariffs">
               <div
-                className="sub-tabs"
-                style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
+                className={`sub-tabs-shell ${tabsOverflow.start ? "sub-tabs-shell--start" : ""} ${tabsOverflow.end ? "sub-tabs-shell--end" : ""}`}
               >
-                {tabs.map((tab) => (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    className={`sub-tab ${selectedTab?.key === tab.key ? "sub-tab--selected" : ""}`}
-                    onClick={() => selectTab(tab)}
-                    aria-pressed={selectedTab?.key === tab.key}
-                  >
-                    <span>{tab.title}</span>
-                  </button>
-                ))}
+                <div className="sub-tabs" ref={tabsScrollerRef}>
+                  {tabs.map((tab) => (
+                    <button
+                      key={tab.key}
+                      ref={(node) => {
+                        if (node) tabButtonRefs.current.set(tab.key, node);
+                        else tabButtonRefs.current.delete(tab.key);
+                      }}
+                      type="button"
+                      className={`sub-tab ${selectedTab?.key === tab.key ? "sub-tab--selected" : ""}`}
+                      onClick={() => selectTab(tab)}
+                      aria-pressed={selectedTab?.key === tab.key}
+                    >
+                      <span>{tab.title}</span>
+                    </button>
+                  ))}
+                </div>
+                <span className="sub-tabs__edge sub-tabs__edge--start" aria-hidden="true">‹</span>
+                <span className="sub-tabs__edge sub-tabs__edge--end" aria-hidden="true">›</span>
               </div>
 
               <div

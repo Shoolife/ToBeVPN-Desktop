@@ -3,8 +3,9 @@
 // updates" row, so dismiss/check/start-download stay in sync across screens.
 //
 // Persistence:
-//   - 7-day cache of the GitHub probe result (avoids burning the 60 req/h
-//     anonymous rate limit on every cold start; same as phone)
+//   - 7-day cache only for "no update" probes (avoids burning the 60 req/h
+//     anonymous rate limit on every cold start; available updates are always
+//     revalidated so users never walk through old versions one-by-one)
 //   - 7-day "dismissed for version X" record so once the user clicks
 //     "Позже" the banner stays hidden until that window expires or until
 //     a new release ships. The Settings "Проверить" button also clears
@@ -92,32 +93,14 @@ export function useManualCheckInFlight(): boolean {
   return useSyncExternalStore(subscribeUpdate, () => snapshot.manualCheckInFlight);
 }
 
-function compareSemver(a: string, b: string): number {
-  const parse = (raw: string): number[] => {
-    const cleaned = raw.replace(/^v/, "").split(/[-+]/, 1)[0];
-    const parts = cleaned.split(".").map((p) => Number(p) || 0);
-    while (parts.length < 3) parts.push(0);
-    return parts.slice(0, 3);
-  };
-  const left = parse(a);
-  const right = parse(b);
-  for (let i = 0; i < 3; i++) {
-    if (left[i] !== right[i]) return left[i] < right[i] ? -1 : 1;
-  }
-  return 0;
-}
-
 function readCache(): CachedCheck | null {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CachedCheck;
     if (Date.now() - parsed.ts > CACHE_TTL_MS) return null;
-    // After the user installs an update, __APP_VERSION__ catches up but the
-    // cache entry still says "v1.0.1 available". Drop stale "available"
-    // rows whose version is <= current so we don't keep nagging the user
-    // about a release they've already installed.
-    if (parsed.info && compareSemver(parsed.info.version, __APP_VERSION__) <= 0) {
+    if (parsed.info) {
+      clearCache();
       return null;
     }
     return parsed;
@@ -131,6 +114,14 @@ function writeCache(info: DesktopUpdateInfo | null) {
     localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), info } satisfies CachedCheck));
   } catch {
     // ignore quota/private-mode failures
+  }
+}
+
+function clearCache() {
+  try {
+    localStorage.removeItem(CACHE_KEY);
+  } catch {
+    // ignore
   }
 }
 
@@ -178,7 +169,7 @@ async function probeNetwork(): Promise<DesktopUpdateInfo | null> {
       notes: update.body ?? "",
       pubDate: update.date ?? undefined,
     };
-    writeCache(info);
+    clearCache();
     return info;
   } catch (e) {
     console.warn("[updateStore] check failed:", e);
