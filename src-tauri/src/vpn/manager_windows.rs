@@ -624,21 +624,18 @@ impl VpnManager {
         // short backoff before surfacing the failure. ensure_ipv4_address is
         // idempotent (it checks the unicast table first), so retrying is safe.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut last_err = String::new();
         loop {
             match windows_routes::ensure_ipv4_address(interface_index, WINTUN_IP, 30) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    last_err = e;
                     if tokio::time::Instant::now() >= deadline {
-                        break;
+                        return Err(format!("Windows IPv4 address configuration failed: {e}"));
                     }
-                    log_win!("[TUN-WIN] IPv4 address not settled yet, retrying: {last_err}");
+                    log_win!("[TUN-WIN] IPv4 address not settled yet, retrying: {e}");
                     sleep(Duration::from_millis(200)).await;
                 }
             }
         }
-        Err(format!("Windows IPv4 address configuration failed: {last_err}"))
     }
 
     /// Poll until Windows has bound the requested IP stacks to the wintun

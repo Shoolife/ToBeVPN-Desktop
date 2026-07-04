@@ -279,7 +279,8 @@ fn ip_interface_ready(family: ADDRESS_FAMILY, interface_index: u32) -> bool {
     unsafe { InitializeIpInterfaceEntry(&mut row) };
     row.Family = family;
     row.InterfaceIndex = interface_index;
-    unsafe { GetIpInterfaceEntry(&mut row) } == ERROR_SUCCESS
+    let status = unsafe { GetIpInterfaceEntry(&mut row) };
+    status == ERROR_SUCCESS
 }
 
 pub fn adapter_index_by_alias(alias: &str) -> Option<u32> {
