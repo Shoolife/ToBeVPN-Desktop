@@ -262,6 +262,26 @@ pub fn set_ipv6_interface_metric(interface_index: u32, metric: u32) -> Result<()
     set_interface_metric(AF_INET6, interface_index, metric, "IPv6")
 }
 
+/// True once Windows has bound the IPv4 stack to this interface. The wintun
+/// adapter shows up in GetAdaptersAddresses a beat before its IP interface is
+/// ready; assigning an address too early fails with ERROR_NOT_FOUND (1168).
+pub fn ipv4_interface_ready(interface_index: u32) -> bool {
+    ip_interface_ready(AF_INET, interface_index)
+}
+
+/// True once Windows has bound the IPv6 stack to this interface.
+pub fn ipv6_interface_ready(interface_index: u32) -> bool {
+    ip_interface_ready(AF_INET6, interface_index)
+}
+
+fn ip_interface_ready(family: ADDRESS_FAMILY, interface_index: u32) -> bool {
+    let mut row = MIB_IPINTERFACE_ROW::default();
+    unsafe { InitializeIpInterfaceEntry(&mut row) };
+    row.Family = family;
+    row.InterfaceIndex = interface_index;
+    unsafe { GetIpInterfaceEntry(&mut row) } == ERROR_SUCCESS
+}
+
 pub fn adapter_index_by_alias(alias: &str) -> Option<u32> {
     let adapters = adapters().ok()?;
     adapters.into_iter().find_map(|adapter| {

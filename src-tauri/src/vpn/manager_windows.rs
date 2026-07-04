@@ -618,8 +618,54 @@ impl VpnManager {
     }
 
     async fn set_wintun_ipv4_address(&self, interface_index: u32) -> Result<(), String> {
-        windows_routes::ensure_ipv4_address(interface_index, WINTUN_IP, 30)
-            .map_err(|e| format!("Windows IPv4 address configuration failed: {e}"))
+        // Even after GetIpInterfaceEntry reports the IPv4 stack ready,
+        // CreateUnicastIpAddressEntry can briefly return ERROR_NOT_FOUND (1168)
+        // on slower machines while the interface finishes settling. Retry with a
+        // short backoff before surfacing the failure. ensure_ipv4_address is
+        // idempotent (it checks the unicast table first), so retrying is safe.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut last_err = String::new();
+        loop {
+            match windows_routes::ensure_ipv4_address(interface_index, WINTUN_IP, 30) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = e;
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    log_win!("[TUN-WIN] IPv4 address not settled yet, retrying: {last_err}");
+                    sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+        Err(format!("Windows IPv4 address configuration failed: {last_err}"))
+    }
+
+    /// Poll until Windows has bound the requested IP stacks to the wintun
+    /// interface. The adapter appears in GetAdaptersAddresses a beat before its
+    /// IP interfaces are ready; touching addresses/routes too early fails with
+    /// ERROR_NOT_FOUND (1168). Gating here is what makes the connect reliable.
+    async fn wait_for_ipv4_interface(
+        &self,
+        interface_index: u32,
+        attempt: &ConnectAttempt,
+    ) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut iter = 0;
+        loop {
+            attempt.ensure_active()?;
+            if windows_routes::ipv4_interface_ready(interface_index) {
+                log_win!("[TUN-WIN] IPv4 interface ready (after {iter} polls)");
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(
+                    "Wintun IPv4 interface did not become ready within 10s".to_string()
+                );
+            }
+            iter += 1;
+            sleep(Duration::from_millis(200)).await;
+        }
     }
 
     async fn configure_wintun_ipv4_interface(&self, interface_index: u32) {
@@ -860,6 +906,12 @@ impl VpnManager {
         log_win!("[TUN-WIN] wintun adapter ready (after {iter} polls)");
         attempt.ensure_active()?;
 
+        // The adapter is registered but the OS may not have bound its IPv4
+        // stack yet. Wait for that before we touch addresses/routes, otherwise
+        // CreateUnicastIpAddressEntry fails with ERROR_NOT_FOUND (1168).
+        self.wait_for_ipv4_interface(wintun_idx, attempt).await?;
+        attempt.ensure_active()?;
+
         self.reset_wintun_ipv4_config(wintun_idx).await;
         attempt.ensure_active()?;
 
@@ -902,21 +954,50 @@ impl VpnManager {
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
+
+        // IPv6 is best-effort: on hosts with IPv6 disabled the stack may never
+        // bind to the wintun interface. Do not let that block an otherwise
+        // healthy IPv4 tunnel — wait briefly, then skip if it never appears.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !windows_routes::ipv6_interface_ready(interface_index) {
+            attempt.ensure_active()?;
+            if tokio::time::Instant::now() >= deadline {
+                log_win!("[TUN-WIN] IPv6 interface not ready, skipping IPv6 tunnel config");
+                return Ok(());
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+        attempt.ensure_active()?;
+
         self.reset_ipv6_tunnel(interface_index).await;
         attempt.ensure_active()?;
 
-        windows_routes::ensure_ipv6_address(interface_index, WINTUN_IPV6, 64)
-            .map_err(|e| format!("Windows IPv6 address configuration failed: {e}"))?;
+        // Retry the address like IPv4: it can transiently report 1168 while the
+        // interface settles. Failures here are logged, not fatal.
+        let addr_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match windows_routes::ensure_ipv6_address(interface_index, WINTUN_IPV6, 64) {
+                Ok(()) => break,
+                Err(error) => {
+                    if tokio::time::Instant::now() >= addr_deadline {
+                        log_win!("[TUN-WIN] IPv6 address configuration failed: {error}");
+                        return Ok(());
+                    }
+                    sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
         if let Err(error) = windows_routes::set_ipv6_interface_metric(interface_index, 1) {
             log_win!("[TUN-WIN] IPv6 metric configuration failed: {error}");
         }
-        windows_routes::replace_ipv6_route(
+        if let Err(error) = windows_routes::replace_ipv6_route(
             WINTUN_PUBLIC_IPV6_ROUTE,
             WINTUN_PUBLIC_IPV6_PREFIX,
             interface_index,
             1,
-        )
-        .map_err(|e| format!("Windows IPv6 tunnel route configuration failed: {e}"))?;
+        ) {
+            log_win!("[TUN-WIN] IPv6 tunnel route configuration failed: {error}");
+        }
 
         Ok(())
     }
