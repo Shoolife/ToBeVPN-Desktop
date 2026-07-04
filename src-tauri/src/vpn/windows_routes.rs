@@ -283,14 +283,74 @@ fn ip_interface_ready(family: ADDRESS_FAMILY, interface_index: u32) -> bool {
     status == ERROR_SUCCESS
 }
 
+/// Any interface index for the adapter, preferring IPv4 (IfIndex) and falling
+/// back to IPv6 (Ipv6IfIndex). Fine for adapter-presence checks and best-effort
+/// cleanup, but NOT for IPv4 address/route calls — use [`adapter_ipv4_index`].
 pub fn adapter_index_by_alias(alias: &str) -> Option<u32> {
     let adapters = adapters().ok()?;
     adapters.into_iter().find_map(|adapter| {
-        adapter
-            .friendly_name
-            .eq_ignore_ascii_case(alias)
-            .then_some(adapter.interface_index)
+        if !adapter.friendly_name.eq_ignore_ascii_case(alias) {
+            return None;
+        }
+        let index = if adapter.ipv4_index != 0 {
+            adapter.ipv4_index
+        } else {
+            adapter.ipv6_index
+        };
+        (index != 0).then_some(index)
     })
+}
+
+/// The adapter's IPv4 interface index (IfIndex), or None until Windows has
+/// bound IPv4 to it. Using the IPv6 index for IPv4 CreateUnicastIpAddressEntry
+/// / route calls returns ERROR_NOT_FOUND (1168), so IPv4 configuration must go
+/// through this.
+pub fn adapter_ipv4_index(alias: &str) -> Option<u32> {
+    let adapters = adapters().ok()?;
+    adapters.into_iter().find_map(|adapter| {
+        (adapter.friendly_name.eq_ignore_ascii_case(alias) && adapter.ipv4_index != 0)
+            .then_some(adapter.ipv4_index)
+    })
+}
+
+/// The adapter's IPv6 interface index (Ipv6IfIndex), or None when IPv6 is not
+/// bound. Can differ from the IPv4 index, so IPv6 configuration uses this.
+pub fn adapter_ipv6_index(alias: &str) -> Option<u32> {
+    let adapters = adapters().ok()?;
+    adapters.into_iter().find_map(|adapter| {
+        (adapter.friendly_name.eq_ignore_ascii_case(alias) && adapter.ipv6_index != 0)
+            .then_some(adapter.ipv6_index)
+    })
+}
+
+/// True if the current process token is elevated (Administrator). Reads the
+/// process token directly — no subprocess, no dependency on the Server service
+/// (unlike a `net session` probe, which false-negatives when LanmanServer is
+/// disabled).
+pub fn process_is_elevated() -> bool {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut return_length = 0u32;
+        let result = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut TOKEN_ELEVATION as *mut c_void),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut return_length,
+        );
+        let _ = CloseHandle(token);
+        result.is_ok() && elevation.TokenIsElevated != 0
+    }
 }
 
 pub fn interface_alias_by_index(interface_index: u32) -> Option<String> {
@@ -479,7 +539,10 @@ fn unicast_row_address(row: &MIB_UNICASTIPADDRESS_ROW) -> Option<IpAddress> {
 #[derive(Debug)]
 struct AdapterInfo {
     friendly_name: String,
-    interface_index: u32,
+    /// IPv4 interface index (IfIndex). 0 until Windows binds IPv4.
+    ipv4_index: u32,
+    /// IPv6 interface index (Ipv6IfIndex). 0 when IPv6 is not bound.
+    ipv6_index: u32,
 }
 
 fn adapters() -> Result<Vec<AdapterInfo>, String> {
@@ -516,16 +579,13 @@ fn adapters() -> Result<Vec<AdapterInfo>, String> {
         while !current.is_null() {
             let adapter = unsafe { &*current };
             if let Some(friendly_name) = pwstr_to_string(adapter.FriendlyName) {
-                let if_index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
-                let interface_index = if if_index != 0 {
-                    if_index
-                } else {
-                    adapter.Ipv6IfIndex
-                };
-                if interface_index != 0 {
+                let ipv4_index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
+                let ipv6_index = adapter.Ipv6IfIndex;
+                if ipv4_index != 0 || ipv6_index != 0 {
                     out.push(AdapterInfo {
                         friendly_name,
-                        interface_index,
+                        ipv4_index,
+                        ipv6_index,
                     });
                 }
             }

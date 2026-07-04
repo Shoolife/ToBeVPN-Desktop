@@ -28,9 +28,6 @@ use super::{ConnectAttempt, CONNECT_CANCELLED};
 // CREATE_NO_WINDOW — suppress flashing console for every spawned helper.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-// Hard ceiling for external probes/sidecars.
-// Without this a hanging subprocess pins the connection in "Connecting" forever.
-const SUBPROC_TIMEOUT: Duration = Duration::from_secs(15);
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
 const BYPASS_DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -638,33 +635,6 @@ impl VpnManager {
         }
     }
 
-    /// Poll until Windows has bound the requested IP stacks to the wintun
-    /// interface. The adapter appears in GetAdaptersAddresses a beat before its
-    /// IP interfaces are ready; touching addresses/routes too early fails with
-    /// ERROR_NOT_FOUND (1168). Gating here is what makes the connect reliable.
-    async fn wait_for_ipv4_interface(
-        &self,
-        interface_index: u32,
-        attempt: &ConnectAttempt,
-    ) -> Result<(), String> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        let mut iter = 0;
-        loop {
-            attempt.ensure_active()?;
-            if windows_routes::ipv4_interface_ready(interface_index) {
-                log_win!("[TUN-WIN] IPv4 interface ready (after {iter} polls)");
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(
-                    "Wintun IPv4 interface did not become ready within 10s".to_string()
-                );
-            }
-            iter += 1;
-            sleep(Duration::from_millis(200)).await;
-        }
-    }
-
     async fn configure_wintun_ipv4_interface(&self, interface_index: u32) {
         if let Err(error) = windows_routes::set_ipv4_interface_metric(interface_index, 1) {
             log_win!("[TUN-WIN] IPv4 metric configuration failed: {error}");
@@ -871,42 +841,62 @@ impl VpnManager {
         if let Some(stderr) = t2s_child.stderr.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(_line)) = lines.next_line().await {
-                    log_win!("[tun2socks] diagnostic output received");
+                while let Ok(Some(line)) = lines.next_line().await {
+                    log_win!("[tun2socks] {line}");
                 }
             });
         }
         *self.tun2socks_process.lock().await = Some(t2s_child);
 
-        // Wait for the adapter to register with Windows.
-        let adapter_deadline_secs = 15u64;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(adapter_deadline_secs);
+        // Wait for the wintun adapter's *IPv4* interface to be usable. Two
+        // separate things have to settle after tun2socks spawns the adapter:
+        //   1. the adapter registers in GetAdaptersAddresses, and
+        //   2. Windows binds IPv4 to it and assigns the IPv4 interface index
+        //      (IfIndex) — a beat later than (1).
+        // The IPv4 IfIndex is 0 until (2) completes; the old code fell back to
+        // the *IPv6* index (Ipv6IfIndex) in that window and then every IPv4
+        // address/route call failed with ERROR_NOT_FOUND (1168) — or, once we
+        // gated on interface readiness, timed out because we were polling the
+        // wrong index. So here we specifically wait for the IPv4 IfIndex and
+        // confirm it is a live IP interface.
+        let ready_deadline_secs = 20u64;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_deadline_secs);
         let mut wintun_idx: Option<u32> = None;
         let mut iter = 0;
         while tokio::time::Instant::now() < deadline {
             attempt.ensure_active()?;
             iter += 1;
-            if let Some(idx) = windows_routes::adapter_index_by_alias(WINTUN_ADAPTER) {
-                wintun_idx = Some(idx);
-                break;
+            let ipv4 = windows_routes::adapter_ipv4_index(WINTUN_ADAPTER);
+            let any = windows_routes::adapter_index_by_alias(WINTUN_ADAPTER);
+            log_win!("[TUN-WIN] adapter poll {iter}: ipv4_index={ipv4:?}, any_index={any:?}");
+            if let Some(idx) = ipv4 {
+                if windows_routes::ipv4_interface_ready(idx) {
+                    wintun_idx = Some(idx);
+                    break;
+                }
             }
-            log_win!("[TUN-WIN] adapter not ready yet (iter {iter})");
-            sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(400)).await;
         }
-        let Some(wintun_idx) = wintun_idx else {
-            return Err(format!(
-                "Wintun adapter '{}' did not appear within {}s",
-                WINTUN_ADAPTER, adapter_deadline_secs
-            ));
+        let wintun_idx = match wintun_idx.or_else(|| {
+            // Last resort: some stacks keep IfIndex at 0 in enumeration yet
+            // still accept configuration via the collapsed index. Give the
+            // retrying address assignment below a chance rather than failing.
+            let fallback = windows_routes::adapter_index_by_alias(WINTUN_ADAPTER);
+            if let Some(idx) = fallback {
+                log_win!("[TUN-WIN] IPv4 IfIndex never settled; falling back to index {idx}");
+            }
+            fallback
+        }) {
+            Some(idx) => idx,
+            None => {
+                return Err(format!(
+                    "Wintun adapter '{}' IPv4 interface did not become ready within {}s",
+                    WINTUN_ADAPTER, ready_deadline_secs
+                ));
+            }
         };
         *self.wintun_interface_index.lock().await = Some(wintun_idx);
-        log_win!("[TUN-WIN] wintun adapter ready (after {iter} polls)");
-        attempt.ensure_active()?;
-
-        // The adapter is registered but the OS may not have bound its IPv4
-        // stack yet. Wait for that before we touch addresses/routes, otherwise
-        // CreateUnicastIpAddressEntry fails with ERROR_NOT_FOUND (1168).
-        self.wait_for_ipv4_interface(wintun_idx, attempt).await?;
+        log_win!("[TUN-WIN] wintun IPv4 interface ready (idx={wintun_idx}, after {iter} polls)");
         attempt.ensure_active()?;
 
         self.reset_wintun_ipv4_config(wintun_idx).await;
@@ -940,30 +930,33 @@ impl VpnManager {
         .map_err(|e| format!("Could not add 128.0.0.0/1 tunnel route: {e}"))?;
         attempt.ensure_active()?;
 
-        self.configure_ipv6_tunnel(wintun_idx, attempt).await?;
+        self.configure_ipv6_tunnel(attempt).await?;
 
         Ok(())
     }
 
-    async fn configure_ipv6_tunnel(
-        &self,
-        interface_index: u32,
-        attempt: &ConnectAttempt,
-    ) -> Result<(), String> {
+    async fn configure_ipv6_tunnel(&self, attempt: &ConnectAttempt) -> Result<(), String> {
         attempt.ensure_active()?;
 
         // IPv6 is best-effort: on hosts with IPv6 disabled the stack may never
         // bind to the wintun interface. Do not let that block an otherwise
         // healthy IPv4 tunnel — wait briefly, then skip if it never appears.
+        // Resolve the dedicated IPv6 interface index (Ipv6IfIndex); it can
+        // differ from the IPv4 IfIndex, so we must not reuse the IPv4 one here.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while !windows_routes::ipv6_interface_ready(interface_index) {
+        let interface_index = loop {
             attempt.ensure_active()?;
+            if let Some(idx) = windows_routes::adapter_ipv6_index(WINTUN_ADAPTER) {
+                if windows_routes::ipv6_interface_ready(idx) {
+                    break idx;
+                }
+            }
             if tokio::time::Instant::now() >= deadline {
                 log_win!("[TUN-WIN] IPv6 interface not ready, skipping IPv6 tunnel config");
                 return Ok(());
             }
             sleep(Duration::from_millis(200)).await;
-        }
+        };
         attempt.ensure_active()?;
 
         self.reset_ipv6_tunnel(interface_index).await;
@@ -1121,27 +1114,14 @@ impl VpnManager {
 
 // ── helpers ────────────────────────────────────────────────────────
 
-/// True if the current process token has admin privileges.
-/// `net session` is the most reliable cross-version probe: it requires admin
-/// and exits non-zero with "Access is denied" otherwise.
+/// True if the current process token is elevated (running as Administrator).
+/// Reads the process token directly via the Win32 API. The previous probe
+/// (`net session`) gave false negatives on machines where the Server /
+/// LanmanServer service is disabled — it fails with a non-zero exit even for
+/// a fully elevated process, wrongly telling the user to "Run as
+/// administrator". The token check has no such external dependency.
 async fn is_elevated() -> bool {
-    let fut = Command::new("net")
-        .args(["session"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .status();
-    match timeout(SUBPROC_TIMEOUT, fut).await {
-        Ok(Ok(s)) => s.success(),
-        Ok(Err(e)) => {
-            log_win!("[is_elevated] net session spawn err: {e}");
-            false
-        }
-        Err(_) => {
-            log_win!("[is_elevated] net session timed out");
-            false
-        }
-    }
+    windows_routes::process_is_elevated()
 }
 
 /// Returns the lowest-metric physical IPv4 default route, excluding Wintun.
