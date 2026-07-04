@@ -388,16 +388,28 @@ async function connectVpnInternal(
       await engineStop().catch(() => {});
       if (gen !== connectionGeneration) return;
     }
-    if (await pingHwidOnly()) {
+    // Run the usage-block ping and the server-config refresh concurrently:
+    // they hit the panel independently, and overlapping them shaves a full
+    // round-trip off every connect/switch. The block check keeps priority —
+    // we await it first and, if blocked, surface usage_blocked exactly as
+    // before, discarding the refresh (its result/errors are swallowed).
+    const blockPing = pingHwidOnly();
+    const refresh = refreshServerConfigAfterAccessCheck(serverToStart, {
+      avoidCurrentInAuto,
+    });
+    const blocked = await blockPing;
+    if (gen !== connectionGeneration) {
+      refresh.catch(() => {});
+      return;
+    }
+    if (blocked) {
+      refresh.catch(() => {});
       if (hadConnectedTunnel) {
         await engineStop().catch(() => {});
       }
       throw new Error(t("usage_blocked"));
     }
-    if (gen !== connectionGeneration) return;
-    serverToStart = await refreshServerConfigAfterAccessCheck(serverToStart, {
-      avoidCurrentInAuto,
-    });
+    serverToStart = await refresh;
     if (gen !== connectionGeneration) return;
     currentServerForRecovery = serverToStart;
     serverStartAttempted = true;

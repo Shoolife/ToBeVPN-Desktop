@@ -238,7 +238,15 @@ impl VpnManager {
         // Resolve the replacement before stopping an existing tunnel. Under
         // restricted networks the current tunnel may be the only path that
         // can resolve a different VPN endpoint during a live switch.
-        let server_ip = match Self::resolve_server_ip(&server.address, attempt).await {
+        // Resolve the server endpoint and the direct-access (bypass) hosts
+        // concurrently. They are independent DNS lookups, so overlapping them
+        // trims connect/switch latency; on a live switch both still run while
+        // the existing tunnel is up (see comment above).
+        let (server_ip_res, bypass_res) = tokio::join!(
+            Self::resolve_server_ip(&server.address, attempt),
+            Self::resolve_bypass_ips(&server.bypass_hosts, attempt),
+        );
+        let server_ip = match server_ip_res {
             Ok(ip) => ip,
             Err(e) => {
                 if !matches!(&prev_state, VpnState::Connected) {
@@ -248,11 +256,10 @@ impl VpnManager {
             }
         };
         log_win!("[VPN-WIN] Server address resolved");
-        let mut control_bypass_ips =
-            match Self::resolve_bypass_ips(&server.bypass_hosts, attempt).await {
-                Ok(ips) => ips,
-                Err(e) => return Err(e),
-            };
+        let mut control_bypass_ips = match bypass_res {
+            Ok(ips) => ips,
+            Err(e) => return Err(e),
+        };
         control_bypass_ips.retain(|ip| ip != &server_ip);
         log_win!(
             "[VPN-WIN] Resolved {} configured direct-access destinations",
@@ -875,7 +882,7 @@ impl VpnManager {
                     break;
                 }
             }
-            sleep(Duration::from_millis(400)).await;
+            sleep(Duration::from_millis(250)).await;
         }
         let wintun_idx = match wintun_idx.or_else(|| {
             // Last resort: some stacks keep IfIndex at 0 in enumeration yet
@@ -1156,7 +1163,7 @@ async fn wait_for_port(
         {
             return Ok(());
         }
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(100)).await;
     }
 }
 

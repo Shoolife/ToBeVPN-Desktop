@@ -338,7 +338,14 @@ impl VpnManager {
         // Resolve the next endpoint while an existing tunnel is still alive.
         // On restricted networks it may be the only route that can resolve a
         // different VPN endpoint during a live switch.
-        let server_ip = match Self::resolve_server_ip(&server.address, attempt).await {
+        // Resolve the server endpoint and the direct-access (bypass) hosts
+        // concurrently — independent DNS lookups, so overlapping them trims
+        // connect/switch latency while the existing tunnel is still up.
+        let (server_ip_res, bypass_res) = tokio::join!(
+            Self::resolve_server_ip(&server.address, attempt),
+            Self::resolve_bypass_ips(&server.bypass_hosts, attempt),
+        );
+        let server_ip = match server_ip_res {
             Ok(ip) => ip,
             Err(e) => {
                 eprintln!("[VPN] ERROR: pre-resolve failed: {e}");
@@ -349,11 +356,10 @@ impl VpnManager {
             }
         };
         eprintln!("[VPN] Server address resolved");
-        let mut control_bypass_ips =
-            match Self::resolve_bypass_ips(&server.bypass_hosts, attempt).await {
-                Ok(ips) => ips,
-                Err(e) => return Err(e),
-            };
+        let mut control_bypass_ips = match bypass_res {
+            Ok(ips) => ips,
+            Err(e) => return Err(e),
+        };
         control_bypass_ips.retain(|ip| ip != &server_ip);
         eprintln!(
             "[VPN] Resolved {} configured direct-access destinations",
