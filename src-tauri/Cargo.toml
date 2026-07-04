@@ -1,6 +1,6 @@
 [package]
 name = "tobevpn-desktop"
-version = "1.0.61"
+version = "1.0.62"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -47,7 +47,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = "2"
