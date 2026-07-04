@@ -621,30 +621,23 @@ impl VpnManager {
         // the static tunnel address immediately below.
     }
 
-    async fn set_wintun_ipv4_address(&self, interface_index: u32) -> Result<(), String> {
-        // Even after GetIpInterfaceEntry reports the IPv4 stack ready,
-        // CreateUnicastIpAddressEntry can briefly return ERROR_NOT_FOUND (1168)
-        // on slower machines while the interface finishes settling. Retry with a
-        // short backoff before surfacing the failure. ensure_ipv4_address is
-        // idempotent (it checks the unicast table first), so retrying is safe.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    async fn configure_wintun_ipv4_interface(&self, interface_index: u32) {
+        // The interface metric is belt-and-suspenders — the split-default /1
+        // routes at metric 1 already win regardless. A freshly-created wintun
+        // interface can transiently reject SetIpInterfaceEntry with
+        // ERROR_INVALID_PARAMETER (87), so retry briefly, then give up quietly.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
         loop {
-            match windows_routes::ensure_ipv4_address(interface_index, WINTUN_IP, 30) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
+            match windows_routes::set_ipv4_interface_metric(interface_index, 1) {
+                Ok(()) => return,
+                Err(error) => {
                     if tokio::time::Instant::now() >= deadline {
-                        return Err(format!("Windows IPv4 address configuration failed: {e}"));
+                        log_win!("[TUN-WIN] IPv4 metric configuration failed: {error}");
+                        return;
                     }
-                    log_win!("[TUN-WIN] IPv4 address not settled yet, retrying: {e}");
                     sleep(Duration::from_millis(200)).await;
                 }
             }
-        }
-    }
-
-    async fn configure_wintun_ipv4_interface(&self, interface_index: u32) {
-        if let Err(error) = windows_routes::set_ipv4_interface_metric(interface_index, 1) {
-            log_win!("[TUN-WIN] IPv4 metric configuration failed: {error}");
         }
     }
 
@@ -855,62 +848,55 @@ impl VpnManager {
         }
         *self.tun2socks_process.lock().await = Some(t2s_child);
 
-        // Wait for the wintun adapter's *IPv4* interface to be usable. Two
-        // separate things have to settle after tun2socks spawns the adapter:
-        //   1. the adapter registers in GetAdaptersAddresses, and
-        //   2. Windows binds IPv4 to it and assigns the IPv4 interface index
-        //      (IfIndex) — a beat later than (1).
-        // The IPv4 IfIndex is 0 until (2) completes; the old code fell back to
-        // the *IPv6* index (Ipv6IfIndex) in that window and then every IPv4
-        // address/route call failed with ERROR_NOT_FOUND (1168) — or, once we
-        // gated on interface readiness, timed out because we were polling the
-        // wrong index. So here we specifically wait for the IPv4 IfIndex and
-        // confirm it is a live IP interface.
+        // Resolve the wintun IPv4 interface AND claim the tunnel address in one
+        // retry loop. This is what makes reconnect/switch reliable: a previous
+        // session can leave an orphaned "ToBeVPN"/"ToBeVPN 1" adapter that
+        // tun2socks tears down while creating the fresh one, so for a moment the
+        // IPv4 index resolves to a *dying* interface. If we lock onto that index
+        // and try to configure it, CreateUnicastIpAddressEntry returns
+        // ERROR_NOT_FOUND (1168) for as long as we keep retrying the same index.
+        // Instead we re-resolve the index every iteration and treat a failed
+        // address claim as "not the live adapter yet" — the next poll picks up
+        // the new adapter (see log: idx 45 -> orphan removed -> idx 21).
         let ready_deadline_secs = 20u64;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_deadline_secs);
-        let mut wintun_idx: Option<u32> = None;
         let mut iter = 0;
-        while tokio::time::Instant::now() < deadline {
+        let mut last_err: Option<String> = None;
+        let wintun_idx = loop {
             attempt.ensure_active()?;
             iter += 1;
             let ipv4 = windows_routes::adapter_ipv4_index(WINTUN_ADAPTER);
             let any = windows_routes::adapter_index_by_alias(WINTUN_ADAPTER);
             log_win!("[TUN-WIN] adapter poll {iter}: ipv4_index={ipv4:?}, any_index={any:?}");
-            if let Some(idx) = ipv4 {
+            // Prefer the IPv4 IfIndex; fall back to the collapsed index. The
+            // readiness + address claim below reject a wrong/dying index anyway.
+            if let Some(idx) = ipv4.or(any) {
                 if windows_routes::ipv4_interface_ready(idx) {
-                    wintun_idx = Some(idx);
-                    break;
+                    // Clear stale config on this interface, then claim the
+                    // tunnel address. Success proves this is the live adapter.
+                    self.reset_wintun_ipv4_config(idx).await;
+                    match windows_routes::ensure_ipv4_address(idx, WINTUN_IP, 30) {
+                        Ok(()) => break idx,
+                        Err(e) => {
+                            log_win!("[TUN-WIN] address claim on idx {idx} failed, retrying: {e}");
+                            last_err = Some(e);
+                        }
+                    }
                 }
             }
-            sleep(Duration::from_millis(250)).await;
-        }
-        let wintun_idx = match wintun_idx.or_else(|| {
-            // Last resort: some stacks keep IfIndex at 0 in enumeration yet
-            // still accept configuration via the collapsed index. Give the
-            // retrying address assignment below a chance rather than failing.
-            let fallback = windows_routes::adapter_index_by_alias(WINTUN_ADAPTER);
-            if let Some(idx) = fallback {
-                log_win!("[TUN-WIN] IPv4 IfIndex never settled; falling back to index {idx}");
-            }
-            fallback
-        }) {
-            Some(idx) => idx,
-            None => {
+            if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
-                    "Wintun adapter '{}' IPv4 interface did not become ready within {}s",
-                    WINTUN_ADAPTER, ready_deadline_secs
+                    "Windows IPv4 address configuration failed: {}",
+                    last_err.unwrap_or_else(|| format!(
+                        "wintun adapter '{}' IPv4 interface never became ready within {}s",
+                        WINTUN_ADAPTER, ready_deadline_secs
+                    ))
                 ));
             }
+            sleep(Duration::from_millis(250)).await;
         };
         *self.wintun_interface_index.lock().await = Some(wintun_idx);
-        log_win!("[TUN-WIN] wintun IPv4 interface ready (idx={wintun_idx}, after {iter} polls)");
-        attempt.ensure_active()?;
-
-        self.reset_wintun_ipv4_config(wintun_idx).await;
-        attempt.ensure_active()?;
-
-        // Configure adapter: address + low metric so it's the default route.
-        self.set_wintun_ipv4_address(wintun_idx).await?;
+        log_win!("[TUN-WIN] wintun IPv4 ready & address set (idx={wintun_idx}, after {iter} polls)");
         attempt.ensure_active()?;
         self.configure_wintun_ipv4_interface(wintun_idx).await;
         attempt.ensure_active()?;
