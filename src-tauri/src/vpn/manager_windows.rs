@@ -10,11 +10,11 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -28,12 +28,9 @@ use super::{ConnectAttempt, CONNECT_CANCELLED};
 // CREATE_NO_WINDOW — suppress flashing console for every spawned helper.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-// Hard ceiling for any external process we spawn (PowerShell and sidecars).
+// Hard ceiling for external probes/sidecars.
 // Without this a hanging subprocess pins the connection in "Connecting" forever.
 const SUBPROC_TIMEOUT: Duration = Duration::from_secs(15);
-// Tighter cap for fast-poll commands (adapter_exists) so the surrounding
-// retry loop stays time-bounded even if PowerShell wedges.
-const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
 const BYPASS_DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -88,10 +85,11 @@ macro_rules! log_win {
 // real LAN; tun2socks doesn't actually route via WINTUN_GATEWAY, but Windows
 // requires a sensible address on the interface.
 const WINTUN_ADAPTER: &str = "ToBeVPN";
-const WINTUN_IP: &str = "198.18.0.2";
+const WINTUN_IP: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 2);
 const WINTUN_GATEWAY: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
-const WINTUN_IPV6: &str = "fd66:6f62:6576:706e::2";
-const WINTUN_PUBLIC_IPV6_ROUTE: &str = "2000::/3";
+const WINTUN_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd66, 0x6f62, 0x6576, 0x706e, 0, 0, 0, 2);
+const WINTUN_PUBLIC_IPV6_ROUTE: Ipv6Addr = Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0);
+const WINTUN_PUBLIC_IPV6_PREFIX: u8 = 3;
 
 pub struct VpnManager {
     state: Arc<Mutex<VpnState>>,
@@ -145,10 +143,10 @@ impl VpnManager {
         // default route pointing through it. Otherwise route detection can
         // pick our own leftover route as the "real" gateway and the bypass
         // ends up looping through ourselves.
-        if adapter_exists(WINTUN_ADAPTER).await {
+        if let Some(interface_index) = windows_routes::adapter_index_by_alias(WINTUN_ADAPTER) {
             log_win!("[VPN-WIN] Stale wintun adapter detected, resetting");
-            self.reset_wintun_ipv4_config(None).await;
-            self.reset_ipv6_tunnel(None).await;
+            self.reset_wintun_ipv4_config(interface_index).await;
+            self.reset_ipv6_tunnel(interface_index).await;
         }
     }
 
@@ -263,13 +261,8 @@ impl VpnManager {
             "[VPN-WIN] Resolved {} configured direct-access destinations",
             control_bypass_ips.len()
         );
-        let physical_route = if let Some(route) = get_default_route() {
-            route
-        } else {
-            get_default_route_fallback()
-                .await
-                .ok_or("Could not detect the physical IPv4 route")?
-        };
+        let physical_route =
+            get_default_route().ok_or("Could not detect the physical IPv4 route")?;
         log_win!(
             "[VPN-WIN] Physical route detected (ifIndex={}, metric={})",
             physical_route.interface_index,
@@ -278,8 +271,7 @@ impl VpnManager {
         let direct_interface = if server.requires_direct_interface() {
             let interface = match physical_route.interface_alias.clone() {
                 Some(interface) => interface,
-                None => get_interface_name_by_index(physical_route.interface_index)
-                    .await
+                None => windows_routes::interface_alias_by_index(physical_route.interface_index)
                     .ok_or_else(|| {
                         format!(
                             "Could not resolve physical adapter alias for ifIndex {} via gateway {}",
@@ -603,84 +595,36 @@ impl VpnManager {
         *g = g.wrapping_add(1);
     }
 
-    async fn reset_wintun_ipv4_config(&self, attempt: Option<&ConnectAttempt>) {
-        let cmd = format!(
-            "Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4 \
-             -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false \
-             -ErrorAction SilentlyContinue; \
-             Get-NetRoute -InterfaceAlias '{}' -AddressFamily IPv4 \
-             -ErrorAction SilentlyContinue | Where-Object {{ $_.DestinationPrefix -in \
-             @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1') }} | \
-             Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue",
-            WINTUN_ADAPTER, WINTUN_ADAPTER
-        );
-        let _ = run_cmd(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", &cmd],
-            attempt,
-        )
-        .await;
+    async fn reset_wintun_ipv4_config(&self, interface_index: u32) {
+        if let Err(error) = windows_routes::delete_interface_ipv4_addresses(interface_index) {
+            log_win!("[TUN-WIN] IPv4 address reset failed: {error}");
+        }
+        for (destination, prefix_length) in [
+            (Ipv4Addr::UNSPECIFIED, 0),
+            (Ipv4Addr::UNSPECIFIED, 1),
+            (Ipv4Addr::new(128, 0, 0, 0), 1),
+        ] {
+            if let Err(error) = windows_routes::delete_ipv4_routes(
+                destination,
+                prefix_length,
+                Some(interface_index),
+            ) {
+                log_win!("[TUN-WIN] IPv4 route reset failed: {error}");
+            }
+        }
         // Do not switch Wintun to DHCP here: there is no DHCP server behind
         // this adapter, and Windows can spend seconds probing before we set
         // the static tunnel address immediately below.
     }
 
-    async fn set_wintun_ipv4_address(
-        &self,
-        interface_index: u32,
-        attempt: &ConnectAttempt,
-    ) -> Result<(), String> {
-        let cmd = format!(
-            concat!(
-                "$ErrorActionPreference = 'Stop'; ",
-                "New-NetIPAddress -InterfaceIndex {} -IPAddress '{}' -PrefixLength 30 ",
-                "-PolicyStore ActiveStore | Out-Null"
-            ),
-            interface_index, WINTUN_IP
-        );
-        let result = run_cmd(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", &cmd],
-            Some(attempt),
-        )
-        .await;
-
-        match result {
-            Ok(()) => Ok(()),
-            Err(e) if adapter_has_ipv4_address(WINTUN_ADAPTER, WINTUN_IP).await => {
-                log_win!(
-                    "[TUN-WIN] address configuration reported error but {} is already assigned: {}",
-                    WINTUN_IP,
-                    e
-                );
-                Ok(())
-            }
-            Err(e) => Err(format!("Windows IPv4 address configuration failed: {e}")),
-        }
+    async fn set_wintun_ipv4_address(&self, interface_index: u32) -> Result<(), String> {
+        windows_routes::ensure_ipv4_address(interface_index, WINTUN_IP, 30)
+            .map_err(|e| format!("Windows IPv4 address configuration failed: {e}"))
     }
 
-    async fn configure_wintun_ipv4_interface(
-        &self,
-        interface_index: u32,
-        attempt: &ConnectAttempt,
-    ) {
-        let cmd = format!(
-            concat!(
-                "$ErrorActionPreference = 'Stop'; ",
-                "Set-NetIPInterface -InterfaceIndex {} -AddressFamily IPv4 -InterfaceMetric 1; ",
-                "Set-DnsClientServerAddress -InterfaceIndex {} ",
-                "-ServerAddresses @('1.1.1.1','8.8.8.8')"
-            ),
-            interface_index, interface_index
-        );
-        if let Err(error) = run_cmd(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", &cmd],
-            Some(attempt),
-        )
-        .await
-        {
-            log_win!("[TUN-WIN] metric/DNS configuration failed: {error}");
+    async fn configure_wintun_ipv4_interface(&self, interface_index: u32) {
+        if let Err(error) = windows_routes::set_ipv4_interface_metric(interface_index, 1) {
+            log_win!("[TUN-WIN] IPv4 metric configuration failed: {error}");
         }
     }
 
@@ -891,16 +835,15 @@ impl VpnManager {
         }
         *self.tun2socks_process.lock().await = Some(t2s_child);
 
-        // Wait for the adapter to register with Windows. Time-bounded so
-        // a flaky adapter_exists never extends the loop past the deadline.
+        // Wait for the adapter to register with Windows.
         let adapter_deadline_secs = 15u64;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(adapter_deadline_secs);
-        let mut wintun_idx: Option<String> = None;
+        let mut wintun_idx: Option<u32> = None;
         let mut iter = 0;
         while tokio::time::Instant::now() < deadline {
             attempt.ensure_active()?;
             iter += 1;
-            if let Some(idx) = get_adapter_index(WINTUN_ADAPTER).await {
+            if let Some(idx) = windows_routes::adapter_index_by_alias(WINTUN_ADAPTER) {
                 wintun_idx = Some(idx);
                 break;
             }
@@ -913,21 +856,17 @@ impl VpnManager {
                 WINTUN_ADAPTER, adapter_deadline_secs
             ));
         };
-        let wintun_idx = wintun_idx
-            .parse::<u32>()
-            .map_err(|e| format!("Invalid Wintun interface index: {e}"))?;
         *self.wintun_interface_index.lock().await = Some(wintun_idx);
         log_win!("[TUN-WIN] wintun adapter ready (after {iter} polls)");
         attempt.ensure_active()?;
 
-        self.reset_wintun_ipv4_config(Some(attempt)).await;
+        self.reset_wintun_ipv4_config(wintun_idx).await;
         attempt.ensure_active()?;
 
         // Configure adapter: address + low metric so it's the default route.
-        self.set_wintun_ipv4_address(wintun_idx, attempt).await?;
+        self.set_wintun_ipv4_address(wintun_idx).await?;
         attempt.ensure_active()?;
-        self.configure_wintun_ipv4_interface(wintun_idx, attempt)
-            .await;
+        self.configure_wintun_ipv4_interface(wintun_idx).await;
         attempt.ensure_active()?;
 
         // Split-default override: 0.0.0.0/1 and 128.0.0.0/1 are both more
@@ -963,48 +902,38 @@ impl VpnManager {
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
-        self.reset_ipv6_tunnel(Some(attempt)).await;
+        self.reset_ipv6_tunnel(interface_index).await;
         attempt.ensure_active()?;
 
-        let cmd = format!(
-            concat!(
-                "$ErrorActionPreference = 'Stop'; ",
-                "New-NetIPAddress -InterfaceIndex {} -IPAddress '{}' -PrefixLength 64 ",
-                "-PolicyStore ActiveStore | Out-Null; ",
-                "New-NetRoute -DestinationPrefix '{}' -InterfaceIndex {} -NextHop '::' ",
-                "-RouteMetric 1 -PolicyStore ActiveStore | Out-Null"
-            ),
-            interface_index, WINTUN_IPV6, WINTUN_PUBLIC_IPV6_ROUTE, interface_index
-        );
-        run_cmd(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", &cmd],
-            Some(attempt),
+        windows_routes::ensure_ipv6_address(interface_index, WINTUN_IPV6, 64)
+            .map_err(|e| format!("Windows IPv6 address configuration failed: {e}"))?;
+        if let Err(error) = windows_routes::set_ipv6_interface_metric(interface_index, 1) {
+            log_win!("[TUN-WIN] IPv6 metric configuration failed: {error}");
+        }
+        windows_routes::replace_ipv6_route(
+            WINTUN_PUBLIC_IPV6_ROUTE,
+            WINTUN_PUBLIC_IPV6_PREFIX,
+            interface_index,
+            1,
         )
-        .await
-        .map_err(|e| format!("Windows IPv6 tunnel configuration failed: {e}"))?;
+        .map_err(|e| format!("Windows IPv6 tunnel route configuration failed: {e}"))?;
 
         Ok(())
     }
 
-    async fn reset_ipv6_tunnel(&self, attempt: Option<&ConnectAttempt>) {
-        let cmd = format!(
-            concat!(
-                "Get-NetRoute -InterfaceAlias '{}' -AddressFamily IPv6 ",
-                "-ErrorAction SilentlyContinue | Where-Object {{ $_.DestinationPrefix -eq '{}' }} | ",
-                "Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; ",
-                "Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv6 ",
-                "-ErrorAction SilentlyContinue | Where-Object {{ $_.IPAddress -eq '{}' }} | ",
-                "Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue"
-            ),
-            WINTUN_ADAPTER, WINTUN_PUBLIC_IPV6_ROUTE, WINTUN_ADAPTER, WINTUN_IPV6
-        );
-        let _ = run_cmd(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", &cmd],
-            attempt,
-        )
-        .await;
+    async fn reset_ipv6_tunnel(&self, interface_index: u32) {
+        if let Err(error) = windows_routes::delete_ipv6_routes(
+            WINTUN_PUBLIC_IPV6_ROUTE,
+            WINTUN_PUBLIC_IPV6_PREFIX,
+            Some(interface_index),
+        ) {
+            log_win!("[TUN-WIN] IPv6 route reset failed: {error}");
+        }
+        if let Err(error) =
+            windows_routes::delete_interface_ipv6_address(interface_index, WINTUN_IPV6)
+        {
+            log_win!("[TUN-WIN] IPv6 address reset failed: {error}");
+        }
     }
 
     /// Tauri puts wintun.dll in the resources dir, but tun2socks looks for it
@@ -1081,10 +1010,15 @@ impl VpnManager {
             }
         }
 
-        // Remove split-default routes installed by start_tun (best-effort —
-        // they're gone with the wintun adapter anyway, but explicit cleanup
-        // avoids stale entries surviving an abnormal shutdown).
-        if let Some(interface_index) = self.wintun_interface_index.lock().await.take() {
+        let wintun_interface_index = self
+            .wintun_interface_index
+            .lock()
+            .await
+            .take()
+            .or_else(|| windows_routes::adapter_index_by_alias(WINTUN_ADAPTER));
+
+        // Remove split-default routes installed by start_tun (best-effort).
+        if let Some(interface_index) = wintun_interface_index {
             for destination in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(128, 0, 0, 0)] {
                 if let Err(error) =
                     windows_routes::delete_ipv4_routes(destination, 1, Some(interface_index))
@@ -1092,12 +1026,8 @@ impl VpnManager {
                     log_win!("[VPN-WIN] split route cleanup failed: {error}");
                 }
             }
-        }
-        self.reset_ipv6_tunnel(None).await;
-
-        // Reset wintun adapter address (in case adapter is still listed)
-        if adapter_exists(WINTUN_ADAPTER).await {
-            self.reset_wintun_ipv4_config(None).await;
+            self.reset_ipv6_tunnel(interface_index).await;
+            self.reset_wintun_ipv4_config(interface_index).await;
         }
 
         // tun2socks owns the Wintun adapter, so stop it after route/address
@@ -1136,54 +1066,6 @@ async fn is_elevated() -> bool {
     }
 }
 
-async fn run_cmd(cmd: &str, args: &[&str], attempt: Option<&ConnectAttempt>) -> Result<(), String> {
-    log_win!("[CMD] {}", cmd);
-    let started = Instant::now();
-    let mut command = Command::new(cmd);
-    command
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .kill_on_drop(true);
-    let output = command.output();
-    tokio::pin!(output);
-    let deadline = sleep(SUBPROC_TIMEOUT);
-    tokio::pin!(deadline);
-    let output = tokio::select! {
-        result = &mut output => {
-            result.map_err(|e| format!("{} spawn failed: {e}", cmd))?
-        }
-        _ = &mut deadline => {
-            return Err(format!(
-                "{} timed out after {}s",
-                cmd,
-                SUBPROC_TIMEOUT.as_secs()
-            ));
-        }
-        _ = async {
-            if let Some(attempt) = attempt {
-                attempt.cancelled().await;
-            }
-        }, if attempt.is_some() => {
-            return Err(CONNECT_CANCELLED.into());
-        }
-    };
-    let elapsed_ms = started.elapsed().as_millis();
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "{} exit {} after {}ms: {}{}",
-            cmd,
-            output.status,
-            elapsed_ms,
-            stderr.trim(),
-            stdout.trim()
-        ));
-    }
-    log_win!("[CMD OK] {} ({}ms)", cmd, elapsed_ms);
-    Ok(())
-}
-
 /// Returns the lowest-metric physical IPv4 default route, excluding Wintun.
 fn get_default_route() -> Option<PhysicalRoute> {
     match windows_routes::default_ipv4_route(WINTUN_ADAPTER, WINTUN_GATEWAY) {
@@ -1193,133 +1075,6 @@ fn get_default_route() -> Option<PhysicalRoute> {
             None
         }
     }
-}
-
-async fn get_default_route_fallback() -> Option<PhysicalRoute> {
-    log_win!("[get_default_route] querying Get-NetRoute fallback");
-    let cmd = format!(
-        "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | \
-         Where-Object {{ $_.InterfaceAlias -ne '{adapter}' }} | \
-         Sort-Object @{{ Expression = {{ [uint64]$_.RouteMetric + [uint64]$_.InterfaceMetric }} }} | \
-         Select-Object -First 1; \
-         if ($r) {{ \
-           $metric = [uint64]$r.RouteMetric + [uint64]$r.InterfaceMetric; \
-           [Console]::Out.Write(\"$($r.NextHop)|$($r.InterfaceIndex)|$($r.InterfaceAlias)|$metric\") \
-         }}",
-        adapter = WINTUN_ADAPTER
-    );
-    let fut = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let out = match timeout(SUBPROC_TIMEOUT, fut).await {
-        Ok(Ok(o)) => Some(o),
-        Ok(Err(e)) => {
-            log_win!("[get_default_route] fallback spawn error: {e}");
-            None
-        }
-        Err(_) => {
-            log_win!("[get_default_route] fallback timed out");
-            None
-        }
-    };
-
-    if let Some(out) = out {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            let mut parts = s.trim().splitn(4, '|');
-            let gateway = parts.next()?.parse::<Ipv4Addr>().ok()?;
-            let interface_index = parts.next()?.parse::<u32>().ok()?;
-            let interface_alias = parts.next().and_then(|value| {
-                let value = value.trim();
-                (!value.is_empty() && value != WINTUN_ADAPTER).then(|| value.to_string())
-            });
-            let metric = parts.next()?.parse::<u32>().ok()?;
-            if gateway != WINTUN_GATEWAY {
-                return Some(PhysicalRoute {
-                    gateway,
-                    interface_index,
-                    interface_alias,
-                    metric,
-                });
-            }
-        } else {
-            log_win!("[get_default_route] fallback returned non-zero");
-        }
-    }
-
-    None
-}
-
-/// Resolves the physical adapter alias if IP Helper could not provide it.
-async fn get_interface_name_by_index(interface_index: u32) -> Option<String> {
-    let cmd = format!(
-        "$adapter = Get-NetAdapter -InterfaceIndex {} -ErrorAction SilentlyContinue | \
-         Select-Object -First 1; \
-         if ($adapter) {{ [Console]::Out.Write($adapter.Name) }}",
-        interface_index
-    );
-    let mut command = Command::new("powershell");
-    command
-        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .kill_on_drop(true);
-    match timeout(SUBPROC_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) if output.status.success() => {
-            let interface = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if interface.is_empty() || interface.eq_ignore_ascii_case(WINTUN_ADAPTER) {
-                None
-            } else {
-                Some(interface)
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Returns the Wintun adapter's InterfaceIndex. None when the adapter is
-/// missing or PowerShell times out.
-async fn get_adapter_index(name: &str) -> Option<String> {
-    let cmd = format!(
-        "(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue | Select-Object -First 1).ifIndex",
-        name
-    );
-    let fut = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    match timeout(POLL_TIMEOUT, fut).await {
-        Ok(Ok(o)) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
-        }
-        _ => None,
-    }
-}
-
-async fn adapter_has_ipv4_address(name: &str, ip: &str) -> bool {
-    let cmd = format!(
-        "if (Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4 \
-         -ErrorAction SilentlyContinue | Where-Object {{ $_.IPAddress -eq '{}' }}) \
-         {{ Write-Host found }}",
-        name, ip
-    );
-    let fut = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    match timeout(POLL_TIMEOUT, fut).await {
-        Ok(Ok(o)) => o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "found",
-        _ => false,
-    }
-}
-
-async fn adapter_exists(name: &str) -> bool {
-    get_adapter_index(name).await.is_some()
 }
 
 async fn wait_for_port(
