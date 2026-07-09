@@ -420,7 +420,12 @@ export default function SettingsScreen({
                 <div className="settings-account__avatar">
                   <div className="settings-account__avatar-inner">
                     {avatarUrl ? (
-                      <img src={avatarUrl} alt="" className="settings-account__avatar-img" />
+                      <img
+                        src={avatarUrl}
+                        alt=""
+                        className="settings-account__avatar-img"
+                        onError={() => setAvatarUrl(null)}
+                      />
                     ) : avatarLoading ? (
                       <Spinner size={40} thickness={3} />
                     ) : (

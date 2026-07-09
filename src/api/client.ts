@@ -634,7 +634,10 @@ export async function fetchUserAvatar(): Promise<Blob | null> {
 
   if (!response.ok) return null;
   const blob = await response.blob();
-  return blob.size > 0 ? blob : null;
+  // Guard against a non-image 200 (e.g. a rate-limit / error body served with
+  // a 200), which would otherwise become a broken <img> and an empty avatar.
+  if (blob.size === 0 || !blob.type.toLowerCase().startsWith("image/")) return null;
+  return blob;
 }
 
 // --- Deep-link authentication ---
