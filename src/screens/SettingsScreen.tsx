@@ -520,13 +520,13 @@ export default function SettingsScreen({
                   className={`settings-chip ${currentLang === "en" ? "settings-chip--active" : ""}`}
                   onClick={() => handleLangClick("en")}
                 >
-                  🇬🇧 {t("language_english")}
+                  <span className="chip-flag">🇬🇧</span> {t("language_english")}
                 </button>
                 <button
                   className={`settings-chip ${currentLang === "ru" ? "settings-chip--active" : ""}`}
                   onClick={() => handleLangClick("ru")}
                 >
-                  🇷🇺 {t("language_russian")}
+                  <span className="chip-flag">🇷🇺</span> {t("language_russian")}
                 </button>
               </div>
             </div>

@@ -535,14 +535,17 @@
   transform: rotate(180deg);
 }
 
+/* Collapse via max-height rather than grid-template-rows:0fr — WebKitGTK
+   (Linux) doesn't collapse a 0fr track to zero, so the answer would peek out
+   under the question in the closed state. */
 .faq-item__a-wrap {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 220ms ease;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 240ms ease;
 }
 
 .faq-item--open .faq-item__a-wrap {
-  grid-template-rows: 1fr;
+  max-height: 320px;
 }
 
 .faq-item__a {
@@ -701,6 +704,13 @@
 .settings-chips {
   display: flex;
   gap: 8px;
+}
+
+/* Buttons don't inherit the root font stack, so the flag emoji falls back to
+   Segoe UI Emoji (which has no flag glyphs) on Windows and shows "GB"/"RU".
+   Force the bundled Twemoji Country Flags font on the flag glyph. */
+.chip-flag {
+  font-family: "Twemoji Country Flags", "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
 }
 
 .settings-chip {
