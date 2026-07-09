@@ -3,6 +3,8 @@
   flex-direction: column;
   height: 100%;
   background: var(--bg);
+  /* Clip the scrollbar gutter that .settings-content pushes past the edge. */
+  overflow: hidden;
 }
 
 /* Top bar */
@@ -34,20 +36,577 @@
 }
 
 .settings-topbar__title {
+  flex: 1;
   font-size: 22px;
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.01em;
 }
 
-/* Content */
-.settings-content {
+.settings-topbar__logout {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms, color 120ms;
+  flex-shrink: 0;
+}
+
+.settings-topbar__logout:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* Account card */
+.settings-account {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 18px 12px;
+  overflow: hidden;
+  --account-accent: var(--success);
+}
+
+.settings-account--green { --account-accent: #4CAF50; }
+.settings-account--orange { --account-accent: #FF9800; }
+.settings-account--red { --account-accent: #F44336; }
+
+/* Soft accent glow at the top, tinted by the plan tier. */
+.settings-account::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 70%;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--account-accent) 16%, transparent),
+    transparent
+  );
+  pointer-events: none;
+}
+
+/* Two centred halves: avatar on the left, plan/ID/expiry on the right. */
+.settings-account__left,
+.settings-account__right {
+  position: relative;
   flex: 1;
-  overflow-y: auto;
-  padding: 4px 16px 24px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.settings-account__right {
+  gap: 6px;
+}
+
+/* Neutral, theme-adaptive ring with a small inset gap before the photo —
+   mirrors the Android ProfileAvatar (2.5px ring + 4px gap), so the photo
+   sits inside the ring rather than touching it. */
+.settings-account__avatar {
+  position: relative;
+  flex-shrink: 0;
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  padding: 2px;
+  box-sizing: border-box;
+  border: 2.5px solid color-mix(in srgb, var(--text) 22%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-account__avatar-inner {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.settings-account__avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.settings-account__name {
+  margin-top: 8px;
+  max-width: 100%;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-account__handle {
+  max-width: 100%;
+  font-size: 14px;
+  color: var(--text-muted);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+.settings-account__plan {
+  font-size: 14px;
+  font-weight: 700;
+  padding: 7px 16px;
+  border-radius: 999px;
+  color: var(--account-accent);
+  background: color-mix(in srgb, var(--account-accent) 16%, transparent);
+}
+
+.settings-account__id {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.settings-account__expires {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.settings-account__renew {
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* Category tiles */
+.settings-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.settings-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  min-height: 150px;
+  background: var(--surface);
+  border: none;
+  border-radius: 20px;
+  padding: 16px;
+  cursor: pointer;
+  transition: background 120ms, transform 80ms;
+}
+
+.settings-tile:hover {
+  background: var(--surface-2);
+}
+
+.settings-tile:active {
+  transform: scale(0.98);
+}
+
+.settings-tile__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.settings-tile__icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.settings-tile__chevron {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+/* Push the label + description block to the bottom of the tile. */
+.settings-tile__label {
+  margin-top: auto;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-tile__desc {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+:root[data-theme="light"] .settings-account,
+:root[data-theme="light"] .settings-tile {
+  border-color: transparent;
+}
+
+/* About section — scaled down 20% as a whole while keeping the card spacing. */
+.about-zoom {
+  zoom: 0.9;
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.about-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 16px 0 8px;
+}
+
+.about-logo {
+  width: 128px;
+  height: 128px;
+  display: block;
+}
+
+.about-name {
+  margin-top: 16px;
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.about-slogan {
+  margin-top: 4px;
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
+.about-spec-label {
+  color: var(--text-muted);
+}
+
+/* Version card typography, matching the Android About screen: the labels
+   ("Версия …", "XRay") are prominent and near-white with medium weight; the
+   XRay value is the muted, lighter detail. */
+.about-version-card {
+  padding: 6px;
+}
+
+.about-version-card .update-check-row,
+.about-version-card .settings-info-row {
+  padding: 8px 12px;
+}
+
+.about-version-card .settings-info-row__label,
+.about-version-card .settings-info-row__label--muted {
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.about-version-card .settings-info-row__value {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.about-version-card .update-check-row__btn {
+  height: 42px;
+  padding: 0 18px;
+  font-size: 16px;
+  font-weight: 600;
+  border-radius: 10px;
+  border-width: 2px;
+}
+
+/* Card holding the About link rows. */
+.settings-card--flush {
+  padding: 6px;
+}
+
+.about-link {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  padding: 14px 12px;
+  color: var(--text);
+  transition: background 120ms;
+}
+
+.about-link:hover {
+  background: var(--surface-2);
+}
+
+.about-link__icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  color: var(--text);
+}
+
+.about-link__label {
+  flex: 1;
+  text-align: left;
+  font-size: 17px;
+  color: var(--text);
+}
+
+.about-link__chevron {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  color: var(--text-muted);
+}
+
+.about-copyright {
+  text-align: center;
+  font-size: 15px;
+  color: var(--text-muted);
+  padding: 14px 0 6px;
+}
+
+/* Support (FAQ) section: fixed intro, scrollable FAQ list, pinned button. */
+.settings-content--support {
+  overflow: hidden;
+  gap: 0;
+  padding: 4px 40px 0 16px;
+}
+
+.support-intro {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  padding: 8px 2px 12px;
+}
+
+.support-faq-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  /* Clip the scrollbar that we push past the right edge below. WebKitGTK
+     ignores ::-webkit-scrollbar for vertical scrollbars, so we hide it by
+     over-widening the scroller and clipping the overflow here. */
+  overflow: hidden;
+}
+
+.support-faq {
+  flex: 1;
+  min-height: 0;
+  overflow-y: scroll;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* margin-right cancels padding-right so content stays full width, but the
+     native scrollbar sits in the padding gutter beyond the clip. */
+  padding: 4px 24px 12px 0;
+  margin-right: -24px;
+}
+
+/* ↑/↓ scroll hints that fade in when there's more to scroll. */
+.support-arrow {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--text-muted);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+
+.support-arrow--top {
+  top: 2px;
+}
+
+.support-arrow--bottom {
+  bottom: 2px;
+}
+
+.support-arrow.is-visible {
+  opacity: 1;
+}
+
+.support-actions {
+  flex-shrink: 0;
+  padding: 12px 0 16px;
+  background: var(--bg);
+}
+
+.support-contact-btn {
+  width: 100%;
+  height: 48px;
+  border: none;
+  border-radius: 14px;
+  background: var(--cta-bg);
+  color: var(--cta-text);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: background 120ms;
+}
+
+.support-contact-btn:hover {
+  background: var(--cta-hover);
+}
+
+.faq-item {
+  flex-shrink: 0;
+  background: var(--surface);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.faq-item__q {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 14px 16px;
+  color: var(--text);
+  text-align: left;
+}
+
+.faq-item__q-text {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.faq-item__chevron {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.faq-item__chevron svg {
+  transition: transform 200ms ease;
+}
+
+.faq-item--open .faq-item__chevron svg {
+  transform: rotate(180deg);
+}
+
+.faq-item__a-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms ease;
+}
+
+.faq-item--open .faq-item__a-wrap {
+  grid-template-rows: 1fr;
+}
+
+.faq-item__a {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  padding: 0 16px 14px;
+}
+
+/* Content */
+.settings-content {
+  flex: 1;
+  overflow-y: scroll;
+  /* Right padding is 16 (visible) + 24 (scrollbar gutter, clipped by
+     .settings-root via the negative margin) so no scrollbar shows. */
+  padding: 4px 40px 24px 16px;
+  margin-right: -24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  scrollbar-width: none;
+}
+
+.settings-content::-webkit-scrollbar,
+.support-faq::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Cross-fade between the tile grid and a category section — old layer fades +
+   scales out, new fades + scales in, matching the app's screen transitions. */
+.settings-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.settings-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.settings-layer--enter {
+  animation: settings-layer-in 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.settings-layer--exit {
+  animation: settings-layer-out 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes settings-layer-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes settings-layer-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(1.04); }
 }
 
 /* Cards */
@@ -183,6 +742,133 @@
 :root[data-theme="light"] .settings-chip--active {
   border-color: transparent;
   color: #000000;
+}
+
+/* Personalization: section headers + theme swatch tiles */
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.section-title__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.section-title__text {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.theme-tiles {
+  display: flex;
+  gap: 10px;
+}
+
+.theme-tile {
+  width: 104px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.theme-tile__swatch {
+  position: relative;
+  width: 100%;
+  height: 72px;
+  border-radius: 16px;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.theme-tile.is-selected .theme-tile__swatch {
+  border: 2px solid #8b7cf6;
+}
+
+.theme-tile__fill {
+  width: 100%;
+  height: 100%;
+}
+
+.theme-tile__fill--dark { background: #1b1b1d; }
+.theme-tile__fill--light { background: #f2f2f2; }
+
+.theme-tile__check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #8b7cf6;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.theme-tile__label {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.theme-tile.is-selected .theme-tile__label {
+  color: var(--text);
+  font-weight: 700;
+}
+
+/* Name-under-avatar pills */
+.label-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.label-tile {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  transition: background 120ms;
+}
+
+.label-tile:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.label-tile.is-selected {
+  padding: 9px 15px;
+  font-weight: 700;
+  background: color-mix(in srgb, #4caf50 14%, transparent);
+  border: 2px solid #4caf50;
+}
+
+.label-tile__check {
+  flex-shrink: 0;
+  color: #4caf50;
 }
 
 /* Email edit */
@@ -371,4 +1057,18 @@
 
 .dialog__btn--primary:hover {
   background: var(--cta-hover);
+}
+
+.dialog__btn--danger {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+.dialog__btn--danger:hover {
+  filter: brightness(1.08);
+}
+
+.dialog__btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }

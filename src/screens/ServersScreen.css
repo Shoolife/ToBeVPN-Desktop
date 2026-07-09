@@ -3,6 +3,8 @@
   flex-direction: column;
   height: 100%;
   background: var(--bg);
+  /* Clip the scrollbar gutter that .servers-list pushes past the edge. */
+  overflow: hidden;
 }
 
 /* Top bar */
@@ -63,8 +65,19 @@
 /* Server list */
 .servers-list {
   flex: 1;
-  overflow-y: auto;
-  padding: 8px 18px 24px;
+  overflow-y: scroll;
+  scrollbar-width: none;
+  /* Right padding is 18 (visible) + 24 (scrollbar gutter, clipped by
+     .servers-root via the negative margin) so no scrollbar shows —
+     WebKitGTK ignores ::-webkit-scrollbar for vertical scrollbars. */
+  padding: 8px 42px 24px 18px;
+  margin-right: -24px;
+}
+
+.servers-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 /* Server item */

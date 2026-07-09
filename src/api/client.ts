@@ -610,6 +610,33 @@ async function request<T>(
   return expectJson<T>(response);
 }
 
+// --- User avatar ---
+
+// Fetches the current user's Telegram avatar (binary JPEG from
+// GET /api/user/avatar, same endpoint the Android client uses). Returns the
+// image bytes as a Blob, or null when the user has no photo / the request
+// fails. The endpoint is rate-limited, so callers should cache the result
+// for the app session instead of re-fetching on every screen open.
+export async function fetchUserAvatar(): Promise<Blob | null> {
+  const headers = new Headers();
+  const accessToken = await getAccessTokenForRequest();
+  if (accessToken) headers.set(DIRECT_AUTH_HEADER, `Bearer ${accessToken}`);
+
+  let response = await performFetch("api/user/avatar", { method: "GET", headers });
+  if (isInvalidSessionStatus(response.status)) {
+    const recovered = await recoverAccessTokenAfter401(accessToken);
+    if (recovered) {
+      const retryHeaders = new Headers();
+      retryHeaders.set(DIRECT_AUTH_HEADER, `Bearer ${recovered}`);
+      response = await performFetch("api/user/avatar", { method: "GET", headers: retryHeaders });
+    }
+  }
+
+  if (!response.ok) return null;
+  const blob = await response.blob();
+  return blob.size > 0 ? blob : null;
+}
+
 // --- Deep-link authentication ---
 
 export function requestAuth(

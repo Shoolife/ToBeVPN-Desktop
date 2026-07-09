@@ -146,6 +146,9 @@ export interface PanelUserDto {
   user_traffic: PanelUserTrafficDto | null;
   hwid_device_limit?: number | null;
   email?: string | null;
+  // The bot stores the Telegram profile here as "name: <full name>\n
+  // username: <handle>"; parsed for the account-card display name.
+  description?: string | null;
 }
 
 // --- Panel nodes ---
