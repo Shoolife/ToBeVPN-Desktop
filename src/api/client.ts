@@ -633,11 +633,14 @@ export async function fetchUserAvatar(): Promise<Blob | null> {
   }
 
   if (!response.ok) return null;
-  const blob = await response.blob();
-  // Guard against a non-image 200 (e.g. a rate-limit / error body served with
-  // a 200), which would otherwise become a broken <img> and an empty avatar.
-  if (blob.size === 0 || !blob.type.toLowerCase().startsWith("image/")) return null;
-  return blob;
+  // Match the Android client: the endpoint returns raw JPEG bytes, but the
+  // Content-Type can be generic (e.g. application/octet-stream). Read the
+  // bytes and re-wrap them as image/jpeg so the object URL renders in <img>
+  // regardless of the server's declared type. A broken/HTML body still just
+  // fails to decode and the UI falls back to the placeholder via onError.
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength === 0) return null;
+  return new Blob([bytes], { type: "image/jpeg" });
 }
 
 // --- Deep-link authentication ---
