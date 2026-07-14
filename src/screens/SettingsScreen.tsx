@@ -16,6 +16,7 @@ import {
   type ProfileNameDisplay,
 } from "../session/profileDisplay";
 import UpdateCheckRow from "../components/UpdateCheckRow";
+import WhatsNewDialog from "../components/WhatsNewDialog";
 import {
   getAutoUpdateEnabled,
   saveAutoUpdateEnabled,
@@ -134,6 +135,7 @@ export default function SettingsScreen({
   const [languageDialogClosing, setLanguageDialogClosing] = useState(false);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [logoutClosing, setLogoutClosing] = useState(false);
+  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [xrayVersion, setXrayVersion] = useState("Xray-core ...");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -822,6 +824,11 @@ export default function SettingsScreen({
 
             <div className="settings-card settings-card--flush">
               <AboutLinkRow
+                label={t("about_whats_new_title")}
+                onClick={() => setWhatsNewOpen(true)}
+                iconPath="m12 2 1.32 3.68L17 7l-3.68 1.32L12 12l-1.32-3.68L7 7l3.68-1.32L12 2zm6 10 .88 2.12L21 15l-2.12.88L18 18l-.88-2.12L15 15l2.12-.88L18 12zM6 13l1.1 2.9L10 17l-2.9 1.1L6 21l-1.1-2.9L2 17l2.9-1.1L6 13z"
+              />
+              <AboutLinkRow
                 label={t("about_news_title")}
                 onClick={() => openLink(t("about_news_link"))}
                 iconPath="M18 11v2h4v-2h-4zm-2 6.61c.96.71 2.21 1.65 3.2 2.39.4-.53.8-1.07 1.2-1.6-.99-.74-2.24-1.68-3.2-2.4-.4.54-.8 1.08-1.2 1.61zM19.4 5.6c-.4-.53-.8-1.07-1.2-1.6-.99.74-2.24 1.68-3.2 2.4.4.53.8 1.07 1.2 1.6.96-.72 2.21-1.65 3.2-2.4zM4 9c-1.1 0-2 .9-2 2v2c0 1.1.9 2 2 2h1v4h2v-4h1l5 3V6L8 9H4zm11.5 3c0-1.33-.58-2.53-1.5-3.35v6.69c.92-.81 1.5-2.01 1.5-3.34z"
@@ -847,6 +854,8 @@ export default function SettingsScreen({
           );
         })}
       </div>
+
+      {whatsNewOpen && <WhatsNewDialog onClose={() => setWhatsNewOpen(false)} />}
 
       {/* Restart dialog */}
       {pendingLang && (
