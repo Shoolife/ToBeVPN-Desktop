@@ -218,11 +218,15 @@ jobs:
 
           echo "Downloading tun2socks (Linux amd64)..."
           curl -fsSL -o tun2socks.zip \
-            https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-amd64.zip
+            https://github.com/xjasonlyu/tun2socks/releases/download/v2.7.0/tun2socks-linux-amd64.zip
+          echo "a612baa287a3b6de6221f74fd02b442a50888508227ecf51e1288a5ccbb77381  tun2socks.zip" \
+            | sha256sum -c -
           unzip -o tun2socks.zip -d tun2socks-extracted
           cp tun2socks-extracted/tun2socks-linux-amd64 \
              src-tauri/bin/tun2socks-x86_64-unknown-linux-gnu
           chmod +x src-tauri/bin/tun2socks-x86_64-unknown-linux-gnu
+          src-tauri/bin/tun2socks-x86_64-unknown-linux-gnu --version \
+            | grep -qx 'tun2socks-2.7.0'
 
           echo "--- bin/ contents ---"
           ls -la src-tauri/bin
@@ -447,9 +451,18 @@ jobs:
           }
 
           Write-Host "Downloading tun2socks (Windows amd64)..."
-          Invoke-WebRequest -Uri "https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-windows-amd64.zip" -OutFile tun2socks.zip
+          Invoke-WebRequest -Uri "https://github.com/xjasonlyu/tun2socks/releases/download/v2.7.0/tun2socks-windows-amd64.zip" -OutFile tun2socks.zip
+          $expectedTun2socksSha256 = "c5d46e9452f6c9cc7c15ab9158d6d6a0169ceecd6bca019ce476b49337d2be43"
+          $actualTun2socksSha256 = (Get-FileHash -Algorithm SHA256 tun2socks.zip).Hash.ToLowerInvariant()
+          if ($actualTun2socksSha256 -ne $expectedTun2socksSha256) {
+            throw "tun2socks v2.7.0 SHA-256 mismatch"
+          }
           Expand-Archive -Path tun2socks.zip -DestinationPath tun2socks-extracted -Force
           Copy-Item tun2socks-extracted/tun2socks-windows-amd64.exe src-tauri/bin/tun2socks-x86_64-pc-windows-msvc.exe
+          $tun2socksVersion = & src-tauri/bin/tun2socks-x86_64-pc-windows-msvc.exe --version 2>&1
+          if ($LASTEXITCODE -ne 0 -or -not ($tun2socksVersion -match '^tun2socks-2\.7\.0$')) {
+            throw "Unexpected tun2socks version: $tun2socksVersion"
+          }
 
           Write-Host "Downloading Wintun driver..."
           Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip

@@ -820,15 +820,15 @@ impl VpnManager {
         // Spawn tun2socks. It creates the wintun adapter on first packet.
         let mut t2s_child = Command::new(&tun2socks_bin)
             .args([
-                "-device",
+                "--device",
                 // xjasonlyu/tun2socks uses `tun://NAME` on every OS;
                 // on Windows it auto-loads wintun.dll under the hood.
                 // The `wintun://` scheme does not exist and produces
                 // "unsupported driver: wintun" at startup.
                 &format!("tun://{}", WINTUN_ADAPTER),
-                "-proxy",
+                "--proxy",
                 &format!("socks5://127.0.0.1:{}", SOCKS_PORT),
-                "-loglevel",
+                "--loglevel",
                 "error",
             ])
             .stdout(Stdio::null())
@@ -896,7 +896,9 @@ impl VpnManager {
             sleep(Duration::from_millis(250)).await;
         };
         *self.wintun_interface_index.lock().await = Some(wintun_idx);
-        log_win!("[TUN-WIN] wintun IPv4 ready & address set (idx={wintun_idx}, after {iter} polls)");
+        log_win!(
+            "[TUN-WIN] wintun IPv4 ready & address set (idx={wintun_idx}, after {iter} polls)"
+        );
         attempt.ensure_active()?;
         self.configure_wintun_ipv4_interface(wintun_idx).await;
         attempt.ensure_active()?;

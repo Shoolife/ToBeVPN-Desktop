@@ -19,6 +19,7 @@ TUN_TABLE="100"
 FWMARK="0x1"
 SOCKS_PORT="10809"
 PID_FILE="/tmp/tobevpn_tun2socks.pid"
+LOG_FILE="/run/tobevpn_tun2socks.log"
 
 # Allowed tun2socks binary locations. The Tauri sidecar lives in the resource
 # tree under the app's install dir; on a stock .deb that's somewhere in
@@ -97,7 +98,10 @@ cleanup_routing() {
         kill "$OLD" 2>/dev/null || true
         rm -f "$PID_FILE"
     fi
-    pkill -9 -f "tun2socks.*-device[[:space:]]+${TUN_NAME}" 2>/dev/null || true
+    # Match both legacy `-device` and current `--device` command lines so an
+    # update can always clean up a tunnel created by the previous release.
+    pkill -9 -f "tun2socks.*--?device[[:space:]]+${TUN_NAME}" 2>/dev/null || true
+    rm -f "$LOG_FILE"
     for _ in 1 2 3 4 5; do
         ip rule del table "$TUN_TABLE" 2>/dev/null || break
     done
@@ -146,9 +150,16 @@ case "$1" in
     echo "${DEFAULT_GW:-on-link} $DEFAULT_DEV" > /tmp/tobevpn_orig_route
     echo "$SERVER_IP" > /tmp/tobevpn_server_ip
 
-    setsid "$TUN2SOCKS_BIN" -device "$TUN_NAME" \
-        -proxy "socks5://127.0.0.1:${SOCKS_PORT}" \
-        -fwmark "$FWMARK" &>/dev/null &
+    # Use GNU-style long options. tun2socks 2.7 switched from Go's flag
+    # package to pflag, where legacy single-dash long options such as
+    # `-device` are parsed as malformed short-option bundles and the process
+    # exits before creating the TUN device. Double-dash options are required by
+    # the pinned 2.7 release and remain compatible with the preceding release.
+    : > "$LOG_FILE"
+    chmod 600 "$LOG_FILE"
+    setsid "$TUN2SOCKS_BIN" --device "$TUN_NAME" \
+        --proxy "socks5://127.0.0.1:${SOCKS_PORT}" \
+        --fwmark "$FWMARK" --loglevel error >"$LOG_FILE" 2>&1 &
     T2S_PID=$!
     echo "$T2S_PID" > "$PID_FILE"
     disown $T2S_PID 2>/dev/null || true
@@ -163,6 +174,10 @@ case "$1" in
             echo "  tun2socks PID $T2S_PID still running" >&2
         else
             echo "  tun2socks PID $T2S_PID has exited" >&2
+        fi
+        if [ -s "$LOG_FILE" ]; then
+            echo "  tun2socks log:" >&2
+            tail -20 "$LOG_FILE" | sed 's/^/    /' >&2
         fi
         exit 1
     fi

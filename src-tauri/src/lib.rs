@@ -799,10 +799,9 @@ pub fn run() {
                 .ok_or("default window icon not available")?
                 .clone();
             let quit_for_menu = quit_flag.clone();
-            let _tray = TrayIconBuilder::with_id("main")
+            let tray_builder = TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .tooltip("ToBeVPN")
-                .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => show_main_window(app),
@@ -821,8 +820,32 @@ pub fn run() {
                     {
                         show_main_window(tray.app_handle());
                     }
-                })
-                .build(app)?;
+                });
+
+            #[cfg(target_os = "linux")]
+            {
+                // libayatana-appindicator registers the StatusNotifierItem and
+                // its DBusMenu almost simultaneously. GNOME Shell 50 can race
+                // those signals, dispose the first menu actor, and leave a
+                // correctly exported `Показать`/`Выход` menu visually blank.
+                // Register the indicator first and attach its menu on the next
+                // settled GTK turn. Windows does not use AppIndicator and keeps
+                // the synchronous menu path below.
+                let tray = tray_builder.build(app)?;
+                let tray_for_menu = tray.clone();
+                let delayed_menu = menu.clone();
+                gtk::glib::timeout_add_local_once(Duration::from_millis(350), move || {
+                    match tray_for_menu.set_menu(Some(delayed_menu)) {
+                        Ok(()) => eprintln!("[TRAY] Linux menu attached after indicator setup"),
+                        Err(error) => eprintln!("[TRAY] Linux menu attach failed: {error}"),
+                    }
+                });
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _tray = tray_builder.menu(&menu).build(app)?;
+            }
 
             // Intercept the [X] button per-window: send the window to the tray
             // instead of exiting so the tunnel keeps running in the background.

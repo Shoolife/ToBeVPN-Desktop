@@ -978,7 +978,8 @@ if [ -f /tmp/tobevpn_tun2socks.pid ]; then
     kill $OLD_PID 2>/dev/null || true
     rm -f /tmp/tobevpn_tun2socks.pid
 fi
-pkill -9 -f "tun2socks.*-device[[:space:]]+{tun}" 2>/dev/null || true
+pkill -9 -f "tun2socks.*--?device[[:space:]]+{tun}" 2>/dev/null || true
+rm -f /run/tobevpn_tun2socks.log
 # Remove ALL rules for our table (handles 'not fwmark' selector mismatches)
 for _ in 1 2 3 4 5; do
     ip rule del table {table} 2>/dev/null || break
@@ -1011,7 +1012,10 @@ echo "{server_ip}" > /tmp/tobevpn_server_ip
 
 # 2. Start tun2socks as a detached daemon (setsid prevents pkexec from waiting)
 echo "[TUN-SCRIPT] Starting tun2socks..."
-setsid {tun2socks} -device {tun} -proxy socks5://127.0.0.1:{socks_port} -fwmark {fwmark} &>/dev/null &
+TUN2SOCKS_LOG=/run/tobevpn_tun2socks.log
+: > "$TUN2SOCKS_LOG"
+chmod 600 "$TUN2SOCKS_LOG"
+setsid {tun2socks} --device {tun} --proxy socks5://127.0.0.1:{socks_port} --fwmark {fwmark} --loglevel error >"$TUN2SOCKS_LOG" 2>&1 &
 T2S_PID=$!
 echo $T2S_PID > /tmp/tobevpn_tun2socks.pid
 disown $T2S_PID 2>/dev/null || true
@@ -1032,6 +1036,10 @@ if ! ip link show {tun} >/dev/null 2>&1; then
         echo "[TUN-SCRIPT] tun2socks PID $T2S_PID has exited" >&2
         wait $T2S_PID 2>/dev/null
         echo "[TUN-SCRIPT] tun2socks exit code: $?" >&2
+    fi
+    if [ -s "$TUN2SOCKS_LOG" ]; then
+        echo "[TUN-SCRIPT] tun2socks log:" >&2
+        tail -20 "$TUN2SOCKS_LOG" | sed 's/^/    /' >&2
     fi
     exit 1
 fi
@@ -1119,7 +1127,7 @@ echo "[TUN-SCRIPT] Done!"
 
         if !output.status.success() {
             return Err(format!(
-                "TUN setup failed (exit {}): {}",
+                "TUN setup failed ({}): {}",
                 output.status,
                 stderr.trim()
             ));
@@ -1276,7 +1284,7 @@ echo "INSTALLED"
 
         if !output.status.success() {
             return Err(format!(
-                "TUN setup failed (exit {}): {}",
+                "TUN setup failed ({}): {}",
                 output.status,
                 stderr.trim()
             ));
@@ -1350,7 +1358,8 @@ fi
 {kill_pid}
 
 # Nuke any leftover tun2socks process bound to our TUN
-pkill -9 -f "tun2socks.*-device[[:space:]]+{tun}" 2>/dev/null || true
+pkill -9 -f "tun2socks.*--?device[[:space:]]+{tun}" 2>/dev/null || true
+rm -f /run/tobevpn_tun2socks.log
 
 # Remove ALL ip rules pointing at our table (handles 'not fwmark' selector mismatches)
 echo "[CLEANUP] Removing ip rules for table {table}..."
