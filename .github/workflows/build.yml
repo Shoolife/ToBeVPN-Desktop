@@ -138,7 +138,13 @@ jobs:
                   keep[items[i]] = 1
                 }
               }
-              /^  - name: / { in_category = ($3 in keep); next }
+              /^  - name: / {
+                category=$0
+                sub(/^  - name: /, "", category)
+                gsub(/^"|"$/, "", category)
+                in_category = (category in keep)
+                next
+              }
               in_category && /^      - "/ {
                 rule=$0
                 sub(/^      - "/, "", rule)
@@ -331,7 +337,8 @@ jobs:
             $domains = [System.Collections.Generic.HashSet[string]]::new()
             Get-Content $InputPath | ForEach-Object {
               if ($_ -match '^  - name: (.+)$') {
-                $inCategory = $Categories -contains $Matches[1]
+                $category = $Matches[1].Trim().Trim('"')
+                $inCategory = $Categories -contains $category
                 return
               }
               if ($inCategory -and $_ -match '^      - "(domain|full):([^":]+)(?::[^"]*)?"$') {
