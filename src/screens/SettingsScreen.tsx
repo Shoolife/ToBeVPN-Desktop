@@ -659,7 +659,7 @@ export default function SettingsScreen({
               </div>
             </div>
 
-            {/* Install an already-offered update on the next app launch. */}
+            {/* Check for and install a newer release on the next app launch. */}
             <div className="settings-card">
               <div className="settings-card__row">
                 <div className="settings-card__col">

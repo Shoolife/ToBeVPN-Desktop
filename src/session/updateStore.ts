@@ -3,12 +3,13 @@
 // updates" row, so dismiss/check/start-download stay in sync across screens.
 //
 // Persistence:
-//   - 7-day cache only for "no update" probes (avoids burning the 60 req/h
-//     anonymous rate limit on every cold start; available updates are always
-//     revalidated so users never walk through old versions one-by-one)
-//   - a pending-update marker. The first launch that discovers a release keeps
-//     the existing banner flow; if the update is still pending on the next app
-//     launch, it is installed automatically when that preference is enabled
+//   - when automatic installation is enabled, every new app process checks the
+//     network and immediately installs a newer release. This deliberately
+//     bypasses the negative cache so a release published after the previous
+//     check is not missed on the next launch
+//   - the 7-day cache for "no update" probes is used only when automatic
+//     installation is disabled (avoids burning the 60 req/h anonymous rate
+//     limit while preserving the manual/banner update paths)
 //   - 7-day "dismissed for version X" record so once the user clicks
 //     "Позже" the banner stays hidden until that window expires or until
 //     a new release ships (automatic installation on the next launch, when
@@ -43,7 +44,6 @@ export type DesktopUpdateState =
 const CACHE_KEY = "tobevpn_update_check_cache_v1";
 const DISMISS_KEY = "tobevpn_update_dismiss_v1";
 const AUTO_UPDATE_KEY = "tobevpn_auto_update_on_restart_v1";
-const PENDING_AUTO_UPDATE_KEY = "tobevpn_pending_auto_update_v1";
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -55,11 +55,6 @@ interface CachedCheck {
 interface DismissRecord {
   version: string;
   ts: number;
-}
-
-interface PendingAutoUpdate {
-  version: string;
-  detectedAt: number;
 }
 
 type ProbeResult =
@@ -191,45 +186,12 @@ function clearDismiss() {
   }
 }
 
-function readPendingAutoUpdate(): PendingAutoUpdate | null {
-  try {
-    const raw = localStorage.getItem(PENDING_AUTO_UPDATE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<PendingAutoUpdate>;
-    if (typeof parsed.version !== "string" || parsed.version.trim() === "") return null;
-    if (typeof parsed.detectedAt !== "number" || !Number.isFinite(parsed.detectedAt)) return null;
-    return { version: parsed.version, detectedAt: parsed.detectedAt };
-  } catch {
-    return null;
-  }
-}
-
-function writePendingAutoUpdate(version: string) {
-  try {
-    localStorage.setItem(
-      PENDING_AUTO_UPDATE_KEY,
-      JSON.stringify({ version, detectedAt: Date.now() } satisfies PendingAutoUpdate),
-    );
-  } catch {
-    // Without persistent storage the banner/manual flows still work.
-  }
-}
-
-function clearPendingAutoUpdate() {
-  try {
-    localStorage.removeItem(PENDING_AUTO_UPDATE_KEY);
-  } catch {
-    // ignore
-  }
-}
-
 async function probeNetwork(): Promise<ProbeResult> {
   try {
     const update = await check();
     if (!update) {
       cachedUpdate = null;
       writeCache(null);
-      clearPendingAutoUpdate();
       return { kind: "current" };
     }
     cachedUpdate = update;
@@ -239,7 +201,6 @@ async function probeNetwork(): Promise<ProbeResult> {
       pubDate: update.date ?? undefined,
     };
     clearCache();
-    writePendingAutoUpdate(info.version);
     return { kind: "available", info };
   } catch (e) {
     console.warn("[updateStore] check failed:", e);
@@ -255,12 +216,12 @@ export async function ensureInitialCheck(): Promise<void> {
   if (probeStarted) return;
   probeStarted = true;
 
-  // Only an update discovered during a previous process run is eligible for
-  // automatic installation. A version found right now is offered through the
-  // existing top banner first, preserving all three requested update paths.
-  const autoInstallPending = getAutoUpdateEnabled() && readPendingAutoUpdate() !== null;
+  const autoInstall = getAutoUpdateEnabled();
 
-  if (!autoInstallPending) {
+  // Automatic mode must always reach the network on a new process launch.
+  // Otherwise a cached "no update" result from before a release was published
+  // can suppress that release for up to seven days.
+  if (!autoInstall) {
     const cached = readCache();
     if (cached !== null) {
       if (cached.info) {
@@ -276,7 +237,7 @@ export async function ensureInitialCheck(): Promise<void> {
   const result = await probeNetwork();
   if (result.kind !== "available") return;
 
-  if (autoInstallPending) {
+  if (autoInstall) {
     clearDismiss();
     setState({ kind: "available", info: result.info });
     await startUpdateDownload();
@@ -349,7 +310,6 @@ export async function startUpdateDownload(): Promise<void> {
     });
     try {
       await invoke("install_latest_linux_update", { version: info.version });
-      clearPendingAutoUpdate();
       clearDismiss();
       setState({ kind: "ready", info });
       await relaunch();
@@ -420,7 +380,6 @@ export async function startUpdateDownload(): Promise<void> {
           break;
       }
     });
-    clearPendingAutoUpdate();
     clearDismiss();
     setState({ kind: "ready", info });
     await relaunch();
