@@ -32,6 +32,7 @@ export interface DesktopUpdateProgress {
   downloaded: number;
   total: number;
   indeterminate?: boolean;
+  phase?: "downloading" | "installing";
 }
 
 export type DesktopUpdateState =
@@ -46,6 +47,8 @@ const DISMISS_KEY = "tobevpn_update_dismiss_v1";
 const AUTO_UPDATE_KEY = "tobevpn_auto_update_on_restart_v1";
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const UPDATE_CHECK_TIMEOUT_MS = 8_000;
+const UPDATE_DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
 
 interface CachedCheck {
   ts: number;
@@ -62,6 +65,12 @@ type ProbeResult =
   | { kind: "current" }
   | { kind: "failed" };
 
+export type InitialUpdateCheckResult =
+  | "current"
+  | "available"
+  | "failed"
+  | "relaunching";
+
 interface Snapshot {
   state: DesktopUpdateState;
   manualCheckInFlight: boolean;
@@ -69,7 +78,7 @@ interface Snapshot {
 
 let snapshot: Snapshot = { state: { kind: "idle" }, manualCheckInFlight: false };
 let cachedUpdate: Update | null = null;
-let probeStarted = false;
+let initialCheckPromise: Promise<InitialUpdateCheckResult> | null = null;
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -188,7 +197,7 @@ function clearDismiss() {
 
 async function probeNetwork(): Promise<ProbeResult> {
   try {
-    const update = await check();
+    const update = await check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
     if (!update) {
       cachedUpdate = null;
       writeCache(null);
@@ -209,13 +218,19 @@ async function probeNetwork(): Promise<ProbeResult> {
 }
 
 /**
- * Idempotent — calling on every banner mount is fine. First call kicks off
- * the cold-start probe, subsequent calls are no-ops.
+ * Idempotent — every caller awaits the same cold-start flow. Sharing the
+ * promise (instead of only a boolean guard) is important for React StrictMode:
+ * a remounted startup screen must not continue into the app while the first
+ * update check is still running.
  */
-export async function ensureInitialCheck(): Promise<void> {
-  if (probeStarted) return;
-  probeStarted = true;
+export function ensureInitialCheck(): Promise<InitialUpdateCheckResult> {
+  if (!initialCheckPromise) {
+    initialCheckPromise = runInitialCheck();
+  }
+  return initialCheckPromise;
+}
 
+async function runInitialCheck(): Promise<InitialUpdateCheckResult> {
   const autoInstall = getAutoUpdateEnabled();
 
   // Automatic mode must always reach the network on a new process launch.
@@ -230,23 +245,36 @@ export async function ensureInitialCheck(): Promise<void> {
           setState({ kind: "available", info: cached.info });
         }
       }
-      return;
+      return cached.info ? "available" : "current";
     }
   }
 
   const result = await probeNetwork();
-  if (result.kind !== "available") return;
+  if (result.kind === "failed") return "failed";
+  if (result.kind === "current") return "current";
 
   if (autoInstall) {
     clearDismiss();
     setState({ kind: "available", info: result.info });
     await startUpdateDownload();
-    return;
+    return snapshot.state.kind === "failed" ? "failed" : "relaunching";
   }
 
   const dismissed = readDismiss();
   if (!dismissed || dismissed.version !== result.info.version) {
     setState({ kind: "available", info: result.info });
+  }
+  return "available";
+}
+
+/**
+ * A startup failure is shown on the branded launch screen and then cleared
+ * without writing a 7-day dismissal. The next process launch may retry the
+ * automatic update, while the current launch remains usable.
+ */
+export function clearStartupUpdateFailure(): void {
+  if (snapshot.state.kind === "failed") {
+    setState({ kind: "idle" });
   }
 }
 
@@ -300,13 +328,17 @@ export async function startUpdateDownload(): Promise<void> {
   const current = snapshot.state;
   if (current.kind !== "available") return;
   const info = current.info;
-  setState({ kind: "downloading", info, progress: { downloaded: 0, total: 0 } });
+  setState({
+    kind: "downloading",
+    info,
+    progress: { downloaded: 0, total: 0, phase: "downloading" },
+  });
 
   if (isLinuxDesktop()) {
     setState({
       kind: "downloading",
       info,
-      progress: { downloaded: 0, total: 0, indeterminate: true },
+      progress: { downloaded: 0, total: 0, indeterminate: true, phase: "installing" },
     });
     try {
       await invoke("install_latest_linux_update", { version: info.version });
@@ -323,7 +355,7 @@ export async function startUpdateDownload(): Promise<void> {
   let update = cachedUpdate;
   if (!update) {
     try {
-      update = await check();
+      update = await check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
     } catch (e) {
       console.warn("[updateStore] update re-check failed:", e);
       setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
@@ -344,10 +376,17 @@ export async function startUpdateDownload(): Promise<void> {
   // them onto a single rAF tick so we update the UI at most ~60Hz, with
   // the latest cumulative byte count.
   let rafScheduled = false;
+  let downloadFinished = false;
   const flushProgress = () => {
     rafScheduled = false;
     if (snapshot.state.kind === "downloading") {
-      setState({ kind: "downloading", info, progress: { downloaded, total } });
+      setState({
+        kind: "downloading",
+        info,
+        progress: downloadFinished
+          ? { downloaded, total, indeterminate: true, phase: "installing" }
+          : { downloaded, total, phase: "downloading" },
+      });
     }
   };
   const scheduleProgress = () => {
@@ -361,7 +400,11 @@ export async function startUpdateDownload(): Promise<void> {
         case "Started":
           total = event.data.contentLength ?? 0;
           if (snapshot.state.kind === "downloading") {
-            setState({ kind: "downloading", info, progress: { downloaded: 0, total } });
+            setState({
+              kind: "downloading",
+              info,
+              progress: { downloaded: 0, total, phase: "downloading" },
+            });
           }
           break;
         case "Progress":
@@ -369,17 +412,23 @@ export async function startUpdateDownload(): Promise<void> {
           scheduleProgress();
           break;
         case "Finished":
+          downloadFinished = true;
           downloaded = total > 0 ? total : downloaded;
           if (snapshot.state.kind === "downloading") {
             setState({
               kind: "downloading",
               info,
-              progress: { downloaded, total },
+              progress: {
+                downloaded,
+                total,
+                indeterminate: true,
+                phase: "installing",
+              },
             });
           }
           break;
       }
-    });
+    }, { timeout: UPDATE_DOWNLOAD_TIMEOUT_MS });
     clearDismiss();
     setState({ kind: "ready", info });
     await relaunch();

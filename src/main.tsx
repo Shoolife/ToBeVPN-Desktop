@@ -11,6 +11,7 @@ import { seedVpnServersForBrowserPreview, type VpnServer } from "./session/auth"
 import { isBrowserPreviewRuntime } from "./session/browserPreview";
 import { updateSession } from "./session/store";
 import { applyTheme, type ThemeMode } from "./session/theme";
+import { saveLang } from "./i18n";
 // Twemoji Country Flags font is registered via @font-face in App.css so the
 // flag glyphs are guaranteed available before any first paint, including
 // when the WebView has no outbound network yet (jsDelivr is unreachable
@@ -27,6 +28,7 @@ const requestedRoutingMode = browserPreview
   ? searchParams?.get("routing")
   : null;
 const requestedTheme = browserPreview ? searchParams?.get("theme") : null;
+const requestedLanguage = browserPreview ? searchParams?.get("lang") : null;
 const previewTheme: ThemeMode | null =
   requestedTheme === "light" || requestedTheme === "dark"
     ? requestedTheme
@@ -37,6 +39,9 @@ const compareServersPreview =
   searchParams?.get("compare") === "1";
 const adminPreview = browserPreview ? searchParams?.get("admin") !== "0" : false;
 applyTheme(previewTheme ?? undefined);
+if (requestedLanguage === "ru" || requestedLanguage === "en") {
+  saveLang(requestedLanguage);
+}
 const routingModes = new Set<RoutingMode>(["blocked_only", "selective", "all_vpn"]);
 if (requestedRoutingMode && routingModes.has(requestedRoutingMode as RoutingMode)) {
   saveRoutingSettings({
@@ -44,7 +49,7 @@ if (requestedRoutingMode && routingModes.has(requestedRoutingMode as RoutingMode
     mode: requestedRoutingMode as RoutingMode,
   });
 }
-const previewScreens = new Set<Screen>(["home", "settings", "servers", "routing"]);
+const previewScreens = new Set<Screen>(["splash", "home", "settings", "servers", "routing"]);
 const initialScreen: Screen =
   requestedPreviewScreen && previewScreens.has(requestedPreviewScreen as Screen)
     ? (requestedPreviewScreen as Screen)

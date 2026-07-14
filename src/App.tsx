@@ -161,6 +161,7 @@ export default function App({
   browserPreview?: boolean;
 }) {
   const [currentScreen, setCurrentScreen] = useState<Screen>(initialScreen);
+  const startupComplete = currentScreen !== "splash";
   const [prevScreen, setPrevScreen] = useState<Screen | null>(null);
   const [direction, setDirection] = useState<Direction>("none");
   const [animating, setAnimating] = useState(false);
@@ -396,13 +397,13 @@ export default function App({
     });
   }, []);
 
-  // Start device-link polling when already authenticated on mount.
+  // Start device-link polling only after the startup update gate has finished.
   useEffect(() => {
-    if (!browserPreview && isPaired()) {
+    if (!browserPreview && startupComplete && isPaired()) {
       startDeviceLinkPolling();
     }
     return () => stopDeviceLinkPolling();
-  }, [browserPreview]);
+  }, [browserPreview, startupComplete]);
 
   // Adaptive scaling for laptops whose screen height is below the design
   // target of 895px (1366x768 / 1280x720 / netbooks). The CSS frame is
@@ -479,7 +480,7 @@ export default function App({
   const renderScreen = (screen: Screen) => {
     switch (screen) {
       case "splash":
-        return <SplashScreen onDone={handleSplashDone} />;
+        return <SplashScreen onDone={handleSplashDone} browserPreview={browserPreview} />;
       case "onboarding":
         return <OnboardingScreen onContinue={handleOnboardingComplete} />;
       case "pairing":

@@ -88,6 +88,7 @@ function Downloading({
   info: DesktopUpdateInfo;
   progress: DesktopUpdateProgress;
 }) {
+  const installing = progress.phase === "installing";
   const fraction =
     progress.total > 0 ? Math.min(progress.downloaded / progress.total, 1) : 0;
   const downloadedMb = (progress.downloaded / (1024 * 1024)).toFixed(1);
@@ -98,7 +99,10 @@ function Downloading({
   return (
     <>
       <div className="update-banner__title">
-        {t("update_banner_downloading_title").replace("{version}", info.version)}
+        {t(installing ? "update_banner_installing_title" : "update_banner_downloading_title").replace(
+          "{version}",
+          info.version,
+        )}
       </div>
       <div className={progressClass}>
         <div
@@ -107,7 +111,7 @@ function Downloading({
         />
       </div>
       <div className="update-banner__progress-text">
-        {progress.indeterminate
+        {installing || progress.indeterminate
           ? t("update_banner_installing_privileged")
           : totalMb
             ? `${downloadedMb} МБ / ${totalMb} МБ`
