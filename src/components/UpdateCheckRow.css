@@ -5,6 +5,46 @@
   gap: 12px;
 }
 
+.update-check-row__version {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 3px 0;
+  background: none;
+  border: 0;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.update-check-row__version:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.update-check-row__whats-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.3;
+  transition: color 120ms;
+}
+
+.update-check-row__version:hover .update-check-row__whats-new {
+  color: var(--text);
+}
+
+.update-check-row__whats-new svg {
+  flex-shrink: 0;
+}
+
 .settings-info-row__label--muted {
   color: var(--text-muted);
   font-size: 13px;

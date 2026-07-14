@@ -326,8 +326,9 @@
   padding: 8px 12px;
 }
 
-.about-version-card .about-link {
-  padding: 10px 12px;
+.about-version-card .update-check-row {
+  padding-bottom: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
 }
 
 .about-version-card .settings-info-row__label,

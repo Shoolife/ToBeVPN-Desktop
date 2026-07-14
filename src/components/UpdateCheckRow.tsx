@@ -14,7 +14,7 @@ import {
 } from "../session/updateStore";
 import "./UpdateCheckRow.css";
 
-export default function UpdateCheckRow() {
+export default function UpdateCheckRow({ onWhatsNew }: { onWhatsNew: () => void }) {
   const state = useUpdateState();
   const checking = useManualCheckInFlight();
   const updateBusy = state.kind === "downloading" || state.kind === "ready";
@@ -37,10 +37,34 @@ export default function UpdateCheckRow() {
 
   return (
     <div className="settings-info-row update-check-row">
-      <span className="settings-info-row__label settings-info-row__label--muted">
-        {status}
-      </span>
       <button
+        type="button"
+        className="update-check-row__version"
+        onClick={onWhatsNew}
+        aria-label={`${status}. ${t("about_whats_new_current")}`}
+      >
+        <span className="settings-info-row__label settings-info-row__label--muted">
+          {status}
+        </span>
+        <span className="update-check-row__whats-new">
+          {t("about_whats_new_current")}
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </span>
+      </button>
+      <button
+        type="button"
         className="update-check-row__btn"
         onClick={onClick}
         disabled={checking || updateBusy}
