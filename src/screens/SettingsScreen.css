@@ -657,6 +657,54 @@
   margin-top: 0;
 }
 
+.settings-card__hint--error {
+  color: var(--danger);
+}
+
+.settings-switch {
+  position: relative;
+  width: 50px;
+  height: 30px;
+  flex-shrink: 0;
+  margin-left: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+  cursor: pointer;
+  transition: background 160ms ease, opacity 160ms ease;
+}
+
+.settings-switch--on {
+  background: var(--accent);
+}
+
+.settings-switch:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.settings-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.settings-switch__thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+  transition: transform 160ms ease;
+}
+
+.settings-switch--on .settings-switch__thumb {
+  transform: translateX(20px);
+}
+
 .settings-card__arrow {
   color: var(--text-muted);
   flex-shrink: 0;

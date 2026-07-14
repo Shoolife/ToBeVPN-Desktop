@@ -13,6 +13,7 @@
         "resizable": false,
         "maximizable": false,
         "fullscreen": false,
+        "visible": false,
         "center": true,
         "decorations": false,
         "transparent": true,

@@ -1,3 +1,4 @@
+mod autostart;
 #[cfg(target_os = "linux")]
 pub mod linux_update;
 mod vpn;
@@ -700,6 +701,7 @@ pub fn run() {
     // previous instance still owns the database.
     compact_legacy_webkit_localstorage();
 
+    let launched_from_autostart = autostart::launched_from_autostart();
     let mut builder = tauri::Builder::default();
 
     // Single-instance must be the FIRST plugin registered. When a second copy
@@ -708,9 +710,16 @@ pub fn run() {
     // and the second one exits — preventing the duplicate-process bug.
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main_window(app);
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !autostart::args_contain_autostart(argv.iter()) {
+                show_main_window(app);
+            }
         }));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        builder = builder.plugin(autostart::linux_plugin());
     }
 
     builder
@@ -719,7 +728,7 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(|app| {
+        .setup(move |app| {
             // Deep-link `tobevpn://open` handling: we deliberately do NOT use
             // tauri-plugin-deep-link. Its init() writes a user-level
             // ~/.local/share/applications/*-handler.desktop on Linux, which
@@ -850,6 +859,17 @@ pub fn run() {
                 });
             }
 
+            // The window is configured as initially hidden so an OS-triggered
+            // launch never flashes on screen. Normal launches explicitly show
+            // it here; autostart launches stay available through the tray.
+            if launched_from_autostart {
+                if let Some(main_window) = app.get_webview_window("main") {
+                    send_window_to_background(main_window);
+                }
+            } else {
+                show_main_window(app.handle());
+            }
+
             // Recover from a previous unclean shutdown (crash / SIGKILL / dev HMR
             // restart). If leftover ip rules + TUN are present, internet is broken
             // until they're removed. Run the cleanup off the setup thread so the
@@ -870,6 +890,8 @@ pub fn run() {
             get_os_name,
             get_device_model,
             hide_main_window_to_tray,
+            autostart::get_autostart_enabled,
+            autostart::set_autostart_enabled,
             load_secure_session,
             save_secure_session,
             clear_secure_session,

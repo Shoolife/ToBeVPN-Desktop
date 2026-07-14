@@ -7,6 +7,7 @@ import { getXrayVersion } from "../session/vpn";
 import { formatDateDots } from "../session/dateFormat";
 import { loadRoutingSettings, type RoutingMode } from "../session/routingSettings";
 import { getSavedTheme, saveTheme, type ThemeMode } from "../session/theme";
+import { getAutostartEnabled, setAutostartEnabled } from "../session/autostart";
 import { getUserAvatarUrl, clearUserAvatarCache } from "../session/avatar";
 import { getUserProfile, clearUserProfileCache, type TelegramProfile } from "../session/profileName";
 import {
@@ -138,6 +139,9 @@ export default function SettingsScreen({
   const [routingMode, setRoutingMode] = useState<RoutingMode>(
     () => loadRoutingSettings().mode,
   );
+  const [autostartEnabled, setAutostartState] = useState(false);
+  const [autostartLoading, setAutostartLoading] = useState(true);
+  const [autostartError, setAutostartError] = useState(false);
 
   // Email editing
   const [editingEmail, setEditingEmail] = useState(false);
@@ -248,6 +252,22 @@ export default function SettingsScreen({
     if (mode !== nameMode) setNameMode(saveProfileNameDisplay(mode));
   };
 
+  const handleAutostartToggle = async () => {
+    if (autostartLoading) return;
+    const next = !autostartEnabled;
+    setAutostartLoading(true);
+    setAutostartError(false);
+    try {
+      await setAutostartEnabled(next);
+      setAutostartState(next);
+    } catch (error) {
+      console.error("Could not update autostart", error);
+      setAutostartError(true);
+    } finally {
+      setAutostartLoading(false);
+    }
+  };
+
   const openLogoutDialog = () => {
     clearLogoutDialogTimer();
     setLogoutClosing(false);
@@ -323,6 +343,27 @@ export default function SettingsScreen({
     refreshRoutingMode();
     window.addEventListener("focus", refreshRoutingMode);
     return () => window.removeEventListener("focus", refreshRoutingMode);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getAutostartEnabled()
+      .then((enabled) => {
+        if (!cancelled) {
+          setAutostartState(enabled);
+          setAutostartError(false);
+        }
+      })
+      .catch((error) => {
+        console.error("Could not read autostart state", error);
+        if (!cancelled) setAutostartError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setAutostartLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => clearLanguageDialogTimer, []);
@@ -580,6 +621,32 @@ export default function SettingsScreen({
 
         {s === "advanced" && (
           <>
+            {/* Start with the OS */}
+            <div className="settings-card">
+              <div className="settings-card__row">
+                <div className="settings-card__col">
+                  <div className="settings-card__header">{t("autostart_title")}</div>
+                  <div
+                    className={`settings-card__hint ${autostartError ? "settings-card__hint--error" : ""}`}
+                  >
+                    {autostartError ? t("autostart_error") : t("autostart_hint")}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className={`settings-switch ${autostartEnabled ? "settings-switch--on" : ""}`}
+                  role="switch"
+                  aria-checked={autostartEnabled}
+                  aria-label={t("autostart_title")}
+                  aria-busy={autostartLoading}
+                  disabled={autostartLoading}
+                  onClick={handleAutostartToggle}
+                >
+                  <span className="settings-switch__thumb" />
+                </button>
+              </div>
+            </div>
+
             {/* Devices card */}
             <div className="settings-card settings-card--clickable" onClick={onDevices}>
               <div className="settings-card__row">

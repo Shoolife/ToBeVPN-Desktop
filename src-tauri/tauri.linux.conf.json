@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "title": "ToBeVPN",
+        "width": 494,
+        "height": 895,
+        "minWidth": 380,
+        "maxWidth": 494,
+        "minHeight": 600,
+        "maxHeight": 895,
+        "resizable": true,
+        "maximizable": false,
+        "fullscreen": false,
+        "visible": false,
+        "center": true,
+        "backgroundColor": "#0d0d0d"
+      }
+    ]
+  }
+}

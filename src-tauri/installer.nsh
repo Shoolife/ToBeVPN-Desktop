@@ -39,6 +39,10 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; Remove the per-user elevated logon task created by the in-app autostart
+  ; switch. Ignore a missing task so uninstall remains idempotent.
+  nsExec::ExecToLog `"$SYSDIR\schtasks.exe" /Delete /TN "ToBeVPN Autostart" /F`
+
   ; Stop the tray instance and bundled helpers before removing Program Files.
   nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root=[IO.Path]::GetFullPath('$INSTDIR').TrimEnd('\') + '\'; $$names=@('ToBeVPN.exe','tobevpn-desktop.exe','xray.exe','tun2socks.exe'); Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $$proc=$$_; $$path=$$proc.ExecutablePath; if ($$path -and ($$names -contains $$proc.Name) -and $$path.StartsWith($$root,[StringComparison]::OrdinalIgnoreCase)) { Stop-Process -Id $$proc.ProcessId -Force -ErrorAction SilentlyContinue } }; Start-Sleep -Milliseconds 700"`
 !macroend
