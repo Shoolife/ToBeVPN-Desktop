@@ -17,6 +17,7 @@ import "./UpdateCheckRow.css";
 export default function UpdateCheckRow() {
   const state = useUpdateState();
   const checking = useManualCheckInFlight();
+  const updateBusy = state.kind === "downloading" || state.kind === "ready";
 
   // "Available" is the only state that should override the default
   // "На последней версии {current}" message — once the user dismisses
@@ -30,7 +31,7 @@ export default function UpdateCheckRow() {
       : t("update_check_uptodate").replace("{version}", __APP_VERSION__);
 
   const onClick = () => {
-    if (checking) return;
+    if (checking || updateBusy) return;
     void forceCheckUpdate();
   };
 
@@ -42,7 +43,7 @@ export default function UpdateCheckRow() {
       <button
         className="update-check-row__btn"
         onClick={onClick}
-        disabled={checking}
+        disabled={checking || updateBusy}
       >
         {checking ? t("update_check_button_loading") : t("update_check_button")}
       </button>

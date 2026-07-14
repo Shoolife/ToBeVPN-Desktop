@@ -16,6 +16,10 @@ import {
   type ProfileNameDisplay,
 } from "../session/profileDisplay";
 import UpdateCheckRow from "../components/UpdateCheckRow";
+import {
+  getAutoUpdateEnabled,
+  saveAutoUpdateEnabled,
+} from "../session/updateStore";
 import Spinner from "../components/Spinner";
 import brandLogo from "../assets/onboarding_logo.svg";
 import "./SettingsScreen.css";
@@ -142,6 +146,7 @@ export default function SettingsScreen({
   const [autostartEnabled, setAutostartState] = useState(false);
   const [autostartLoading, setAutostartLoading] = useState(true);
   const [autostartError, setAutostartError] = useState(false);
+  const [autoUpdateEnabled, setAutoUpdateState] = useState(() => getAutoUpdateEnabled());
 
   // Email editing
   const [editingEmail, setEditingEmail] = useState(false);
@@ -266,6 +271,11 @@ export default function SettingsScreen({
     } finally {
       setAutostartLoading(false);
     }
+  };
+
+  const handleAutoUpdateToggle = () => {
+    const next = !autoUpdateEnabled;
+    setAutoUpdateState(saveAutoUpdateEnabled(next));
   };
 
   const openLogoutDialog = () => {
@@ -641,6 +651,26 @@ export default function SettingsScreen({
                   aria-busy={autostartLoading}
                   disabled={autostartLoading}
                   onClick={handleAutostartToggle}
+                >
+                  <span className="settings-switch__thumb" />
+                </button>
+              </div>
+            </div>
+
+            {/* Install an already-offered update on the next app launch. */}
+            <div className="settings-card">
+              <div className="settings-card__row">
+                <div className="settings-card__col">
+                  <div className="settings-card__header">{t("auto_update_title")}</div>
+                  <div className="settings-card__hint">{t("auto_update_hint")}</div>
+                </div>
+                <button
+                  type="button"
+                  className={`settings-switch ${autoUpdateEnabled ? "settings-switch--on" : ""}`}
+                  role="switch"
+                  aria-checked={autoUpdateEnabled}
+                  aria-label={t("auto_update_title")}
+                  onClick={handleAutoUpdateToggle}
                 >
                   <span className="settings-switch__thumb" />
                 </button>

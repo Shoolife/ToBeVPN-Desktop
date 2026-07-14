@@ -6,10 +6,14 @@
 //   - 7-day cache only for "no update" probes (avoids burning the 60 req/h
 //     anonymous rate limit on every cold start; available updates are always
 //     revalidated so users never walk through old versions one-by-one)
+//   - a pending-update marker. The first launch that discovers a release keeps
+//     the existing banner flow; if the update is still pending on the next app
+//     launch, it is installed automatically when that preference is enabled
 //   - 7-day "dismissed for version X" record so once the user clicks
 //     "Позже" the banner stays hidden until that window expires or until
-//     a new release ships. The Settings "Проверить" button also clears
-//     the dismissal so the banner can re-surface immediately.
+//     a new release ships (automatic installation on the next launch, when
+//     enabled, deliberately overrides this visual dismissal). The Settings
+//     "Проверить" button also clears it so the banner can re-surface.
 
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -38,6 +42,8 @@ export type DesktopUpdateState =
 
 const CACHE_KEY = "tobevpn_update_check_cache_v1";
 const DISMISS_KEY = "tobevpn_update_dismiss_v1";
+const AUTO_UPDATE_KEY = "tobevpn_auto_update_on_restart_v1";
+const PENDING_AUTO_UPDATE_KEY = "tobevpn_pending_auto_update_v1";
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -50,6 +56,16 @@ interface DismissRecord {
   version: string;
   ts: number;
 }
+
+interface PendingAutoUpdate {
+  version: string;
+  detectedAt: number;
+}
+
+type ProbeResult =
+  | { kind: "available"; info: DesktopUpdateInfo }
+  | { kind: "current" }
+  | { kind: "failed" };
 
 interface Snapshot {
   state: DesktopUpdateState;
@@ -91,6 +107,25 @@ export function useUpdateState(): DesktopUpdateState {
 
 export function useManualCheckInFlight(): boolean {
   return useSyncExternalStore(subscribeUpdate, () => snapshot.manualCheckInFlight);
+}
+
+/** Automatic installation is opt-out: existing users receive it by default. */
+export function getAutoUpdateEnabled(): boolean {
+  try {
+    return localStorage.getItem(AUTO_UPDATE_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function saveAutoUpdateEnabled(enabled: boolean): boolean {
+  try {
+    localStorage.setItem(AUTO_UPDATE_KEY, enabled ? "1" : "0");
+  } catch {
+    // Keep the in-memory UI responsive. If storage is unavailable, the safe
+    // default (enabled) is restored on the next process launch.
+  }
+  return enabled;
 }
 
 function readCache(): CachedCheck | null {
@@ -156,12 +191,46 @@ function clearDismiss() {
   }
 }
 
-async function probeNetwork(): Promise<DesktopUpdateInfo | null> {
+function readPendingAutoUpdate(): PendingAutoUpdate | null {
+  try {
+    const raw = localStorage.getItem(PENDING_AUTO_UPDATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PendingAutoUpdate>;
+    if (typeof parsed.version !== "string" || parsed.version.trim() === "") return null;
+    if (typeof parsed.detectedAt !== "number" || !Number.isFinite(parsed.detectedAt)) return null;
+    return { version: parsed.version, detectedAt: parsed.detectedAt };
+  } catch {
+    return null;
+  }
+}
+
+function writePendingAutoUpdate(version: string) {
+  try {
+    localStorage.setItem(
+      PENDING_AUTO_UPDATE_KEY,
+      JSON.stringify({ version, detectedAt: Date.now() } satisfies PendingAutoUpdate),
+    );
+  } catch {
+    // Without persistent storage the banner/manual flows still work.
+  }
+}
+
+function clearPendingAutoUpdate() {
+  try {
+    localStorage.removeItem(PENDING_AUTO_UPDATE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+async function probeNetwork(): Promise<ProbeResult> {
   try {
     const update = await check();
     if (!update) {
+      cachedUpdate = null;
       writeCache(null);
-      return null;
+      clearPendingAutoUpdate();
+      return { kind: "current" };
     }
     cachedUpdate = update;
     const info: DesktopUpdateInfo = {
@@ -170,10 +239,11 @@ async function probeNetwork(): Promise<DesktopUpdateInfo | null> {
       pubDate: update.date ?? undefined,
     };
     clearCache();
-    return info;
+    writePendingAutoUpdate(info.version);
+    return { kind: "available", info };
   } catch (e) {
     console.warn("[updateStore] check failed:", e);
-    return null;
+    return { kind: "failed" };
   }
 }
 
@@ -185,23 +255,37 @@ export async function ensureInitialCheck(): Promise<void> {
   if (probeStarted) return;
   probeStarted = true;
 
-  const cached = readCache();
-  if (cached !== null) {
-    if (cached.info) {
-      const dismissed = readDismiss();
-      if (!dismissed || dismissed.version !== cached.info.version) {
-        setState({ kind: "available", info: cached.info });
+  // Only an update discovered during a previous process run is eligible for
+  // automatic installation. A version found right now is offered through the
+  // existing top banner first, preserving all three requested update paths.
+  const autoInstallPending = getAutoUpdateEnabled() && readPendingAutoUpdate() !== null;
+
+  if (!autoInstallPending) {
+    const cached = readCache();
+    if (cached !== null) {
+      if (cached.info) {
+        const dismissed = readDismiss();
+        if (!dismissed || dismissed.version !== cached.info.version) {
+          setState({ kind: "available", info: cached.info });
+        }
       }
+      return;
     }
+  }
+
+  const result = await probeNetwork();
+  if (result.kind !== "available") return;
+
+  if (autoInstallPending) {
+    clearDismiss();
+    setState({ kind: "available", info: result.info });
+    await startUpdateDownload();
     return;
   }
 
-  const fresh = await probeNetwork();
-  if (fresh) {
-    const dismissed = readDismiss();
-    if (!dismissed || dismissed.version !== fresh.version) {
-      setState({ kind: "available", info: fresh });
-    }
+  const dismissed = readDismiss();
+  if (!dismissed || dismissed.version !== result.info.version) {
+    setState({ kind: "available", info: result.info });
   }
 }
 
@@ -211,15 +295,20 @@ export async function ensureInitialCheck(): Promise<void> {
  * "Проверить обновления" button.
  */
 export async function forceCheckUpdate(): Promise<void> {
-  if (snapshot.manualCheckInFlight) return;
+  if (
+    snapshot.manualCheckInFlight ||
+    snapshot.state.kind === "downloading" ||
+    snapshot.state.kind === "ready"
+  ) {
+    return;
+  }
   setSnapshot({ manualCheckInFlight: true });
   try {
     clearDismiss();
-    const info = await probeNetwork();
-    if (info) {
-      setState({ kind: "available", info });
-    } else if (snapshot.state.kind === "available") {
-      // Previously-cached "available" no longer current.
+    const result = await probeNetwork();
+    if (result.kind === "available") {
+      setState({ kind: "available", info: result.info });
+    } else if (result.kind === "current") {
       setState({ kind: "idle" });
     }
   } finally {
@@ -260,6 +349,8 @@ export async function startUpdateDownload(): Promise<void> {
     });
     try {
       await invoke("install_latest_linux_update", { version: info.version });
+      clearPendingAutoUpdate();
+      clearDismiss();
       setState({ kind: "ready", info });
       await relaunch();
     } catch (e) {
@@ -269,7 +360,16 @@ export async function startUpdateDownload(): Promise<void> {
     return;
   }
 
-  const update = cachedUpdate ?? (await check());
+  let update = cachedUpdate;
+  if (!update) {
+    try {
+      update = await check();
+    } catch (e) {
+      console.warn("[updateStore] update re-check failed:", e);
+      setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
+      return;
+    }
+  }
   if (!update) {
     setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
     return;
@@ -320,6 +420,8 @@ export async function startUpdateDownload(): Promise<void> {
           break;
       }
     });
+    clearPendingAutoUpdate();
+    clearDismiss();
     setState({ kind: "ready", info });
     await relaunch();
   } catch (e) {
