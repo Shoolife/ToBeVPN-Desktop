@@ -194,6 +194,8 @@ export default function HomeScreen({
   onSpeedTest,
   selectedServer,
   automaticServerSelection,
+  autostartConnectRequested = false,
+  onAutostartConnectHandled,
   browserPreview = false,
   onServerChange,
 }: {
@@ -204,6 +206,8 @@ export default function HomeScreen({
   onSpeedTest: () => void;
   selectedServer: SelectedServer | null;
   automaticServerSelection: boolean;
+  autostartConnectRequested?: boolean;
+  onAutostartConnectHandled?: () => void;
   browserPreview?: boolean;
   onServerChange: (server: SelectedServer) => void;
 }) {
@@ -230,6 +234,7 @@ export default function HomeScreen({
   const [checkingSubscriptionAccess, setCheckingSubscriptionAccess] = useState(false);
   const [preparingConnection, setPreparingConnection] = useState(false);
   const toggleGeneration = useRef(0);
+  const autostartConnectHandled = useRef(false);
   const activating = connecting || preparingConnection;
 
   const elapsed = sessionStartTime
@@ -361,24 +366,7 @@ export default function HomeScreen({
     return resolved;
   };
 
-  const handleToggle = async () => {
-    if (browserPreview) return;
-    if (disconnecting) return;
-    if (preparingConnection && !connecting && !connected) {
-      toggleGeneration.current++;
-      setPreparingConnection(false);
-      return;
-    }
-    if (connected || activating) {
-      toggleGeneration.current++;
-      setPreparingConnection(false);
-      try {
-        await disconnectVpn();
-      } catch (e) {
-        console.error("[VPN-UI] disconnectVpn() error:", e);
-      }
-      return;
-    }
+  const startConnection = async () => {
     if (!selectedServer && !automaticServerSelection) {
       setLocalError(t("server_choose"));
       return;
@@ -418,6 +406,52 @@ export default function HomeScreen({
       }
     }
   };
+
+  const handleToggle = async () => {
+    if (browserPreview) return;
+    if (disconnecting) return;
+    if (preparingConnection && !connecting && !connected) {
+      toggleGeneration.current++;
+      setPreparingConnection(false);
+      return;
+    }
+    if (connected || activating) {
+      toggleGeneration.current++;
+      setPreparingConnection(false);
+      try {
+        await disconnectVpn();
+      } catch (e) {
+        console.error("[VPN-UI] disconnectVpn() error:", e);
+      }
+      return;
+    }
+    await startConnection();
+  };
+
+  useEffect(() => {
+    if (!autostartConnectRequested) {
+      autostartConnectHandled.current = false;
+      return;
+    }
+    if (autostartConnectHandled.current) return;
+    autostartConnectHandled.current = true;
+    onAutostartConnectHandled?.();
+
+    // Reuse the same preparation path as the power button, but never toggle
+    // an existing/in-flight connection off when an autostart request arrives.
+    if (
+      browserPreview ||
+      subscriptionUsageBlocked ||
+      updateRequired ||
+      connected ||
+      connecting ||
+      disconnecting ||
+      preparingConnection
+    ) {
+      return;
+    }
+    void startConnection();
+  }, [autostartConnectRequested]);
 
   const statusText = activating
     ? t("state_connecting")

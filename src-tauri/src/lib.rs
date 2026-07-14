@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
@@ -701,7 +701,6 @@ pub fn run() {
     // previous instance still owns the database.
     compact_legacy_webkit_localstorage();
 
-    let launched_from_autostart = autostart::launched_from_autostart();
     let mut builder = tauri::Builder::default();
 
     // Single-instance must be the FIRST plugin registered. When a second copy
@@ -711,8 +710,11 @@ pub fn run() {
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if !autostart::args_contain_autostart(argv.iter()) {
-                show_main_window(app);
+            show_main_window(app);
+            if cfg!(any(target_os = "windows", target_os = "linux"))
+                && autostart::args_contain_autostart(argv.iter())
+            {
+                let _ = app.emit("autostart-connect-requested", ());
             }
         }));
     }
@@ -728,7 +730,7 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(move |app| {
+        .setup(|app| {
             // Deep-link `tobevpn://open` handling: we deliberately do NOT use
             // tauri-plugin-deep-link. Its init() writes a user-level
             // ~/.local/share/applications/*-handler.desktop on Linux, which
@@ -859,16 +861,10 @@ pub fn run() {
                 });
             }
 
-            // The window is configured as initially hidden so an OS-triggered
-            // launch never flashes on screen. Normal launches explicitly show
-            // it here; autostart launches stay available through the tray.
-            if launched_from_autostart {
-                if let Some(main_window) = app.get_webview_window("main") {
-                    send_window_to_background(main_window);
-                }
-            } else {
-                show_main_window(app.handle());
-            }
+            // Windows and Linux create the window hidden to avoid an early
+            // unstyled flash. Once setup is complete every launch, including
+            // an OS autostart launch, presents the main window.
+            show_main_window(app.handle());
 
             // Recover from a previous unclean shutdown (crash / SIGKILL / dev HMR
             // restart). If leftover ip rules + TUN are present, internet is broken
@@ -890,6 +886,7 @@ pub fn run() {
             get_os_name,
             get_device_model,
             hide_main_window_to_tray,
+            autostart::launched_from_autostart,
             autostart::get_autostart_enabled,
             autostart::set_autostart_enabled,
             load_secure_session,

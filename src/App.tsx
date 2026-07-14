@@ -28,6 +28,10 @@ import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
 import { hasSameVpnConfig, isSameServerSelection } from "./session/serverSelection";
 import { connectVpn, getVpnRuntime } from "./session/vpnState";
 import {
+  launchedFromAutostart,
+  listenForAutostartConnect,
+} from "./session/autostart";
+import {
   clearLastServer,
   clearSelectedServer,
   loadAutomaticServerSelection,
@@ -166,6 +170,8 @@ export default function App({
   );
   const selectedServerRef = useRef<SelectedServer | null>(selectedServer);
   const automaticServerSelectionRef = useRef(automaticServerSelection);
+  const [autostartConnectRequested, setAutostartConnectRequested] = useState(false);
+  const initialAutostartRequestQueuedRef = useRef(false);
   const updateRequired = useSyncExternalStore(
     subscribeSubscriptionUsageBlocked,
     getUpdateRequired,
@@ -180,6 +186,39 @@ export default function App({
     if (useWindowsFrame) document.documentElement.dataset.windowFrame = "windows";
     else delete document.documentElement.dataset.windowFrame;
   }, [useWindowsFrame]);
+
+  useEffect(() => {
+    if (browserPreview) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void listenForAutostartConnect(() => {
+      if (!cancelled) setAutostartConnectRequested(true);
+    })
+      .then((stopListening) => {
+        if (cancelled) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch((error) => console.error("Could not listen for autostart requests", error));
+
+    void launchedFromAutostart()
+      .then((launched) => {
+        if (
+          !cancelled &&
+          launched &&
+          !initialAutostartRequestQueuedRef.current
+        ) {
+          initialAutostartRequestQueuedRef.current = true;
+          setAutostartConnectRequested(true);
+        }
+      })
+      .catch((error) => console.error("Could not read launch context", error));
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [browserPreview]);
 
   const navigate = useCallback((to: Screen, dir: Direction) => {
     if (animating) return;
@@ -455,6 +494,8 @@ export default function App({
             onSpeedTest={() => goForward("speedtest")}
             selectedServer={selectedServer}
             automaticServerSelection={automaticServerSelection}
+            autostartConnectRequested={autostartConnectRequested}
+            onAutostartConnectHandled={() => setAutostartConnectRequested(false)}
             browserPreview={browserPreview}
             onServerChange={(server) => {
               selectedServerRef.current = server;

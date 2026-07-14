@@ -1,5 +1,5 @@
 // Persists the last server the user picked so it's pre-selected on next launch.
-// VPN is not auto-started — only the selection is restored.
+// An OS-autostart launch may use this selection after auth restoration.
 import type { SelectedServer } from "../App";
 import { getSession } from "./store";
 

@@ -9,8 +9,15 @@ where
         .any(|argument| argument.as_ref() == AUTOSTART_ARG)
 }
 
+#[tauri::command]
 pub fn launched_from_autostart() -> bool {
-    args_contain_autostart(std::env::args())
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        return args_contain_autostart(std::env::args());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    false
 }
 
 #[cfg(target_os = "linux")]
