@@ -326,6 +326,10 @@
   padding: 8px 12px;
 }
 
+.about-version-card .about-link {
+  padding: 10px 12px;
+}
+
 .about-version-card .settings-info-row__label,
 .about-version-card .settings-info-row__label--muted {
   font-size: 17px;

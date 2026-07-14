@@ -816,6 +816,11 @@ export default function SettingsScreen({
 
             <div className="settings-card about-version-card">
               <UpdateCheckRow />
+              <AboutLinkRow
+                label={t("about_whats_new_title")}
+                onClick={() => setWhatsNewOpen(true)}
+                iconPath="m12 2 1.32 3.68L17 7l-3.68 1.32L12 12l-1.32-3.68L7 7l3.68-1.32L12 2zm6 10 .88 2.12L21 15l-2.12.88L18 18l-.88-2.12L15 15l2.12-.88L18 12zM6 13l1.1 2.9L10 17l-2.9 1.1L6 21l-1.1-2.9L2 17l2.9-1.1L6 13z"
+              />
               <div className="settings-info-row">
                 <span className="settings-info-row__label about-spec-label">{t("xray")}</span>
                 <span className="settings-info-row__value">{xrayVersion}</span>
@@ -823,11 +828,6 @@ export default function SettingsScreen({
             </div>
 
             <div className="settings-card settings-card--flush">
-              <AboutLinkRow
-                label={t("about_whats_new_title")}
-                onClick={() => setWhatsNewOpen(true)}
-                iconPath="m12 2 1.32 3.68L17 7l-3.68 1.32L12 12l-1.32-3.68L7 7l3.68-1.32L12 2zm6 10 .88 2.12L21 15l-2.12.88L18 18l-.88-2.12L15 15l2.12-.88L18 12zM6 13l1.1 2.9L10 17l-2.9 1.1L6 21l-1.1-2.9L2 17l2.9-1.1L6 13z"
-              />
               <AboutLinkRow
                 label={t("about_news_title")}
                 onClick={() => openLink(t("about_news_link"))}
