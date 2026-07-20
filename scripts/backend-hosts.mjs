@@ -120,7 +120,9 @@ async function atomicWrite(path, content, mode) {
   try {
     await writeFile(tempPath, content, { encoding: "utf8", mode });
     await chmod(tempPath, mode);
-    const handle = await open(tempPath, "r");
+    // Windows requires a writable file handle for FlushFileBuffers/fsync.
+    // The file is already fully written; r+ only changes the handle rights.
+    const handle = await open(tempPath, "r+");
     try {
       await handle.sync();
     } finally {
