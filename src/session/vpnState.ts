@@ -20,17 +20,21 @@ import { getSession, subscribeSession } from "./store";
 import {
   fetchVpnServers,
   getSubscriptionUsageBlocked,
+  getUpdateRequired,
   isAvailableVpnServer,
   pingHwidOnly,
   registerCurrentDevice,
   type VpnServer,
 } from "./auth";
 import { t } from "../i18n";
+import { isBrowserPreviewRuntime } from "./browserPreview";
 import {
   loadAutomaticServerSelection,
   saveLastServer,
 } from "./lastServer";
+import type { RoutingSettings } from "./routingSettings";
 import { stableServerId } from "./serverSelection";
+import { isUpdateInstallInProgress } from "./updateInstallGate";
 import {
   recordServerConnectionFailure,
   recordServerConnectionSuccess,
@@ -71,6 +75,8 @@ export interface VpnRuntimeState {
   disconnecting: boolean;
   /** Epoch ms when the current session started; null when idle. */
   sessionStartTime: number | null;
+  /** Monotonic connected duration; immune to wall-clock/NTP changes. */
+  sessionElapsedSeconds: number;
   /** Bytes transferred since the current session began. */
   sessionBytes: number;
   /** Last connect error, surfaced once and cleared by the consumer. */
@@ -84,6 +90,7 @@ let state: VpnRuntimeState = {
   connecting: false,
   disconnecting: false,
   sessionStartTime: null,
+  sessionElapsedSeconds: 0,
   sessionBytes: 0,
   lastError: null,
   tick: 0,
@@ -106,8 +113,9 @@ export function getActiveVpnReconnectServer(): ServerVpnConfig | null {
 }
 
 let pollTimer: number | null = null;
+let pollGeneration = 0;
+let pollInFlightGeneration: number | null = null;
 let accessBlockCounter = 0;
-let accessBlockCheckInFlight = false;
 let heartbeatCounter = 0;
 let healthTimer: number | null = null;
 let connectionGeneration = 0;
@@ -117,6 +125,7 @@ let lastTunnelTrafficAt: number | null = null;
 let currentServerForRecovery: ServerVpnConfig | null = null;
 let resumeRecoveryInFlight = false;
 let trafficQualityConfirmed = false;
+let disconnectInFlight: Promise<void> | null = null;
 
 function toServerVpnConfig(server: Awaited<ReturnType<typeof fetchVpnServers>>[number]): ServerVpnConfig {
   return {
@@ -162,7 +171,8 @@ async function refreshServerConfigAfterAccessCheck(
   }
   const availableServers = servers.filter(isAvailableVpnServer);
   if (availableServers.length === 0) {
-    if (canFallbackToStale()) return server;
+    // A successful authoritative empty list means the old endpoint was
+    // removed/revoked. Stale fallback is allowed only for a network error.
     throw new Error(t("servers_empty"));
   }
   const automatic = loadAutomaticServerSelection();
@@ -177,7 +187,6 @@ async function refreshServerConfigAfterAccessCheck(
           candidate.sni === (server.sni ?? ""),
       ) ?? null;
   if (!fresh) {
-    if (canFallbackToStale()) return server;
     throw new Error(t("servers_empty"));
   }
   if (automatic) {
@@ -188,83 +197,112 @@ async function refreshServerConfigAfterAccessCheck(
 
 function startPolling() {
   if (pollTimer !== null) return;
+  const generation = ++pollGeneration;
   accessBlockCounter = 0;
   heartbeatCounter = 0;
-  let lastPollAt = Date.now();
+  // performance.now() is monotonic. Date.now() can jump backwards/forwards
+  // when Windows synchronizes its clock, which otherwise produces a bogus
+  // resume event or suppresses health recovery indefinitely.
+  let lastPollAt = performance.now();
   pollTimer = window.setInterval(async () => {
-    const now = Date.now();
+    if (
+      generation !== pollGeneration ||
+      pollInFlightGeneration === generation
+    ) return;
+    pollInFlightGeneration = generation;
+    const now = performance.now();
     const gapMs = now - lastPollAt;
     lastPollAt = now;
-    if (gapMs >= SYSTEM_RESUME_GAP_MS) {
-      void recoverTunnelAfterSystemResume(gapMs);
-      return;
-    }
 
-    let delta = 0;
     try {
-      const stats = await getTrafficStats();
-      delta = stats.uplink + stats.downlink;
-      if (delta > 0) {
-        lastTunnelTrafficAt = now;
+      if (gapMs >= SYSTEM_RESUME_GAP_MS) {
+        void recoverTunnelAfterSystemResume(gapMs);
+        return;
       }
-    } catch {
-      // Stats API may still be warming up after connect.
-    }
-    // Record one tick of session time even when idle, mirroring the phone.
-    // Persists into the local stats bucket store (used by StatsScreen).
-    // The panel-side trafficUsedBytes is refreshed independently via syncSubscription.
-    recordTraffic(delta, 1);
-    const nextSessionBytes = state.sessionBytes + delta;
-    setState({
-      sessionBytes: nextSessionBytes,
-      tick: state.tick + 1,
-    });
-    if (
-      !trafficQualityConfirmed &&
-      nextSessionBytes >= QUALITY_TRAFFIC_CONFIRM_BYTES &&
-      currentServerForRecovery
-    ) {
-      trafficQualityConfirmed = true;
-      void recordServerTraffic(currentServerForRecovery, nextSessionBytes);
-    }
-
-    if (!accessBlockCheckInFlight) accessBlockCounter++;
-    if (!accessBlockCheckInFlight && accessBlockCounter >= ACCESS_BLOCK_POLL_TICKS) {
-      accessBlockCounter = 0;
-      accessBlockCheckInFlight = true;
-      const checkedOwner = getSession().shortUuid;
+      let delta = 0;
       try {
+        const stats = await getTrafficStats();
+        const uplink = Number.isFinite(stats.uplink)
+          ? Math.max(0, Math.floor(stats.uplink))
+          : 0;
+        const downlink = Number.isFinite(stats.downlink)
+          ? Math.max(0, Math.floor(stats.downlink))
+          : 0;
+        delta = Math.min(Number.MAX_SAFE_INTEGER, uplink + downlink);
+        if (delta > 0) {
+          lastTunnelTrafficAt = now;
+        }
+      } catch {
+        // Stats API may still be warming up after connect.
+      }
+      if (generation !== pollGeneration) return;
+      // Use real monotonic elapsed time. Fixed one-second accounting
+      // undercounts throttled/background WebViews and overlapping callbacks.
+      recordTraffic(delta, Math.max(0, gapMs / 1000));
+      const nextSessionBytes = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        state.sessionBytes + delta,
+      );
+      setState({
+        sessionBytes: nextSessionBytes,
+        sessionElapsedSeconds: Math.min(
+          Number.MAX_SAFE_INTEGER,
+          state.sessionElapsedSeconds + Math.max(0, gapMs / 1000),
+        ),
+        tick: state.tick + 1,
+      });
+      if (
+        !trafficQualityConfirmed &&
+        nextSessionBytes >= QUALITY_TRAFFIC_CONFIRM_BYTES &&
+        currentServerForRecovery
+      ) {
+        trafficQualityConfirmed = true;
+        void recordServerTraffic(currentServerForRecovery, nextSessionBytes);
+      }
+
+      accessBlockCounter++;
+      if (accessBlockCounter >= ACCESS_BLOCK_POLL_TICKS) {
+        accessBlockCounter = 0;
+        const checkedOwner = getSession().shortUuid;
         const blocked = await pingHwidOnly().catch(() => false);
+        if (generation !== pollGeneration) return;
+        const updateRequired = getUpdateRequired();
         if (
-          blocked &&
+          (blocked || updateRequired) &&
           checkedOwner === getSession().shortUuid &&
           state.connected
         ) {
-          await stopVpnWithError(t("usage_blocked"));
+          await stopVpnWithError(
+            blocked ? t("usage_blocked") : t("update_required_message"),
+          );
           return;
         }
-      } finally {
-        accessBlockCheckInFlight = false;
       }
-    }
-    heartbeatCounter++;
-    if (heartbeatCounter >= DEVICE_HEARTBEAT_TICKS) {
-      heartbeatCounter = 0;
-      const { isLinked } = getSession();
-      if (isLinked) {
-        registerCurrentDevice().catch(() => {});
+      heartbeatCounter++;
+      if (heartbeatCounter >= DEVICE_HEARTBEAT_TICKS) {
+        heartbeatCounter = 0;
+        const { isLinked } = getSession();
+        if (isLinked) {
+          registerCurrentDevice().catch(() => {});
+        }
+      }
+    } catch (error) {
+      console.warn("[VPN] polling cycle failed:", error);
+    } finally {
+      if (pollInFlightGeneration === generation) {
+        pollInFlightGeneration = null;
       }
     }
   }, 1000);
 }
 
 function stopPolling() {
+  pollGeneration++;
   if (pollTimer !== null) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
   accessBlockCounter = 0;
-  accessBlockCheckInFlight = false;
   heartbeatCounter = 0;
 }
 
@@ -311,12 +349,13 @@ function userFacingVpnError(error: unknown, fallback = t("vpn_error_connect")): 
 async function startNativeVpnWithTimeout(
   server: ServerVpnConfig,
   gen: number,
+  routingOverride?: RoutingSettings,
 ): Promise<void> {
   let timedOut = false;
   let timeoutId: number | null = null;
   try {
     await Promise.race([
-      engineStart(server),
+      engineStart(server, routingOverride),
       new Promise<never>((_, reject) => {
         timeoutId = window.setTimeout(() => {
           timedOut = true;
@@ -337,6 +376,9 @@ async function startNativeVpnWithTimeout(
 }
 
 export async function connectVpn(server: ServerVpnConfig): Promise<void> {
+  // A native stop owns the route/DNS cleanup transaction. Starting while it
+  // is still in flight can make that cleanup remove the new tunnel's state.
+  if (disconnectInFlight) await disconnectInFlight;
   return connectVpnInternal(server, true);
 }
 
@@ -344,7 +386,13 @@ async function connectVpnInternal(
   server: ServerVpnConfig,
   resetWatchdogRecovery: boolean,
   avoidCurrentInAuto = false,
+  routingOverride?: RoutingSettings,
 ): Promise<void> {
+  if (isUpdateInstallInProgress()) {
+    const message = t("update_banner_installing_privileged");
+    setState({ connecting: false, disconnecting: false, lastError: message });
+    throw new Error(message);
+  }
   // Refuse the panel's "subscription expired" sentinel server before we
   // hand it to the Rust-side engine. xray would crash on its all-zeros
   // uuid / dummy address, taking the whole webview down with it.
@@ -367,6 +415,11 @@ async function connectVpnInternal(
     setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
     throw new Error(msg);
   }
+  if (getUpdateRequired()) {
+    const msg = t("update_required_message");
+    setState({ connecting: false, disconnecting: false, lastError: msg });
+    throw new Error(msg);
+  }
   const cancelInFlightStart = state.connecting && !state.connected;
   const hadConnectedTunnel = state.connected;
   const previousServerForRecovery = currentServerForRecovery;
@@ -385,7 +438,10 @@ async function connectVpnInternal(
     // resolving DNS or creating TUN routes. Cancel that obsolete attempt
     // before doing any preparation for the newly selected server.
     if (cancelInFlightStart) {
-      await engineStop().catch(() => {});
+      // Starting a second native tunnel after an ambiguous failed cleanup can
+      // orphan routes/processes. Propagate the stop failure and let the UI
+      // reflect the authoritative native state instead.
+      await engineStop();
       if (gen !== connectionGeneration) return;
     }
     // Run the usage-block ping and the server-config refresh concurrently:
@@ -396,24 +452,29 @@ async function connectVpnInternal(
     const blockPing = pingHwidOnly();
     const refresh = refreshServerConfigAfterAccessCheck(serverToStart, {
       avoidCurrentInAuto,
-    });
+    }).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
     const blocked = await blockPing;
     if (gen !== connectionGeneration) {
-      refresh.catch(() => {});
       return;
     }
-    if (blocked) {
-      refresh.catch(() => {});
+    if (blocked || getUpdateRequired()) {
       if (hadConnectedTunnel) {
-        await engineStop().catch(() => {});
+        await engineStop();
       }
-      throw new Error(t("usage_blocked"));
+      throw new Error(
+        blocked ? t("usage_blocked") : t("update_required_message"),
+      );
     }
-    serverToStart = await refresh;
+    const refreshResult = await refresh;
+    if (!refreshResult.ok) throw refreshResult.error;
+    serverToStart = refreshResult.value;
     if (gen !== connectionGeneration) return;
     currentServerForRecovery = serverToStart;
     serverStartAttempted = true;
-    await startNativeVpnWithTimeout(serverToStart, gen);
+    await startNativeVpnWithTimeout(serverToStart, gen, routingOverride);
     if (gen !== connectionGeneration) return;
     if (hadConnectedTunnel) statsSessionEnd();
     statsSessionStart();
@@ -422,6 +483,7 @@ async function connectVpnInternal(
       disconnecting: false,
       connected: true,
       sessionStartTime: Date.now(),
+      sessionElapsedSeconds: 0,
       sessionBytes: 0,
     });
     tunnelHealthFailedCycles = 0;
@@ -437,12 +499,30 @@ async function connectVpnInternal(
         await recordServerConnectionFailure(serverToStart);
       }
       const nativeState = await engineGetState().catch(() => null);
-      const oldTunnelPreserved =
-        hadConnectedTunnel && nativeState?.status === "Connected";
-      if (oldTunnelPreserved) {
-        currentServerForRecovery = previousServerForRecovery;
-        setState({ connecting: false, disconnecting: false, connected: true, lastError: msg });
-        startTunnelHealthCheck(gen);
+      const nativeConnected = nativeState?.status === "Connected";
+      const cleanupMayRemain =
+        nativeState?.status !== "Disconnected" &&
+        (hadConnectedTunnel || serverStartAttempted);
+      if (nativeConnected || cleanupMayRemain) {
+        currentServerForRecovery = hadConnectedTunnel
+          ? previousServerForRecovery
+          : serverToStart;
+        if (nativeConnected && !hadConnectedTunnel) statsSessionStart();
+        setState({
+          connecting: false,
+          disconnecting: false,
+          connected: true,
+          sessionStartTime:
+            state.sessionStartTime ?? (nativeConnected ? Date.now() : null),
+          lastError: msg,
+        });
+        if (nativeConnected) {
+          startPolling();
+          startTunnelHealthCheck(gen);
+        } else {
+          stopPolling();
+          stopTunnelHealthCheck();
+        }
       } else {
         currentServerForRecovery = null;
         stopTunnelHealthCheck();
@@ -455,43 +535,91 @@ async function connectVpnInternal(
   }
 }
 
-export async function disconnectVpn(): Promise<void> {
-  if (state.disconnecting) return;
-  connectionGeneration++;
-  currentServerForRecovery = null;
+export function disconnectVpn(): Promise<void> {
+  if (disconnectInFlight) return disconnectInFlight;
+  const promise = disconnectVpnInternal().finally(() => {
+    if (disconnectInFlight === promise) disconnectInFlight = null;
+  });
+  disconnectInFlight = promise;
+  return promise;
+}
+
+async function disconnectVpnInternal(): Promise<void> {
+  const gen = ++connectionGeneration;
+  const serverBeforeStop = currentServerForRecovery;
   resumeRecoveryInFlight = false;
   tunnelHealthFailedCycles = 0;
   lastTunnelTrafficAt = null;
   trafficQualityConfirmed = false;
   stopTunnelHealthCheck();
   stopPolling();
-  statsSessionEnd();
   setState({
-    connected: false,
+    connected: state.connected,
     connecting: false,
     disconnecting: true,
-    sessionStartTime: null,
-    sessionBytes: 0,
   });
   try {
     await engineStop();
-  } finally {
+    currentServerForRecovery = null;
+    statsSessionEnd();
     setState({
       connected: false,
       connecting: false,
       disconnecting: false,
       sessionStartTime: null,
+      sessionElapsedSeconds: 0,
       sessionBytes: 0,
     });
+  } catch (error) {
+    const nativeState = await engineGetState().catch(() => null);
+    if (nativeState?.status === "Disconnected") {
+      // The stop IPC may fail after cleanup has already committed. Native
+      // state is authoritative, so treat this as a successful disconnect.
+      currentServerForRecovery = null;
+      statsSessionEnd();
+      setState({
+        connected: false,
+        connecting: false,
+        disconnecting: false,
+        sessionStartTime: null,
+        sessionElapsedSeconds: 0,
+        sessionBytes: 0,
+      });
+      return;
+    }
+    // Every non-Disconnected/unknown result is ambiguous: keep credentials
+    // and recovery context so another Stop attempt can finish cleanup.
+    const cleanupIncomplete = true;
+    currentServerForRecovery = serverBeforeStop;
+    if (nativeState?.status === "Connected") {
+      startPolling();
+      startTunnelHealthCheck(gen);
+    }
+    setState({
+      connected: cleanupIncomplete,
+      connecting: false,
+      disconnecting: false,
+      lastError: userFacingVpnError(error, t("vpn_error_tunnel_stopped")),
+    });
+    throw error;
   }
 }
 
-export async function reconnectVpnWithFreshSubscription(server: ServerVpnConfig): Promise<void> {
+export function getVpnConnectionGeneration(): number {
+  return connectionGeneration;
+}
+
+export async function reconnectVpnWithFreshSubscription(
+  server: ServerVpnConfig,
+  expectedGeneration = connectionGeneration,
+): Promise<void> {
+  if (expectedGeneration !== connectionGeneration) return;
   setState({
     connected: false,
     connecting: true,
     disconnecting: false,
     sessionStartTime: null,
+    sessionElapsedSeconds: 0,
     sessionBytes: 0,
     lastError: null,
   });
@@ -499,23 +627,46 @@ export async function reconnectVpnWithFreshSubscription(server: ServerVpnConfig)
     const freshServer = await refreshServerConfigAfterAccessCheck(server, {
       allowStaleOnRefreshError: false,
     });
+    if (expectedGeneration !== connectionGeneration) return;
     await connectVpnInternal(freshServer, true);
   } catch (e) {
-    setState({
-      connected: false,
-      connecting: false,
-      disconnecting: false,
-      sessionStartTime: null,
-      sessionBytes: 0,
-      lastError: userFacingVpnError(e),
-    });
+    // connectVpnInternal owns its own generation and error state. Only a
+    // refresh failure that belongs to this still-current intent is handled
+    // here; a user pressing Stop invalidates expectedGeneration immediately.
+    if (expectedGeneration === connectionGeneration) {
+      setState({
+        connected: false,
+        connecting: false,
+        disconnecting: false,
+        sessionStartTime: null,
+        sessionElapsedSeconds: 0,
+        sessionBytes: 0,
+        lastError: userFacingVpnError(e),
+      });
+    }
   }
 }
 
-export async function reapplyRoutingSettings(): Promise<void> {
+export async function reapplyRoutingSettings(
+  routingSettings?: RoutingSettings,
+  rollbackSettings?: RoutingSettings,
+): Promise<void> {
   const server = currentServerForRecovery;
   if (!server || (!state.connected && !state.connecting)) return;
-  await connectVpnInternal(server, true);
+  try {
+    await connectVpnInternal(server, true, false, routingSettings);
+  } catch (error) {
+    // If native startup already tore the previous tunnel down, restore the
+    // last known-good routing profile before surfacing the apply failure.
+    if (rollbackSettings && !state.connected && !state.connecting) {
+      await connectVpnInternal(server, true, false, rollbackSettings).catch(
+        (rollbackError) => {
+          console.warn("[VPN] routing rollback failed:", rollbackError);
+        },
+      );
+    }
+    throw error;
+  }
 }
 
 function startTunnelHealthCheck(gen: number) {
@@ -535,7 +686,14 @@ function stopTunnelHealthCheck() {
 async function runTunnelHealthLoop(gen: number): Promise<void> {
   if (gen !== connectionGeneration || !state.connected) return;
 
-  if (navigator.onLine !== false) {
+  if (navigator.onLine === false) {
+    healthTimer = window.setTimeout(() => {
+      void runTunnelHealthLoop(gen);
+    }, TUNNEL_HEALTH_RETRY_MS);
+    return;
+  }
+
+  {
     const healthy = await probeTunnelWithRetries(TUNNEL_HEALTH_ATTEMPTS);
     if (gen !== connectionGeneration || !state.connected) return;
     if (healthy) {
@@ -579,9 +737,18 @@ async function recoverTunnelAfterHealthFailure(gen: number): Promise<void> {
   }
 
   watchdogRecoveryAttempts++;
-  await disconnectVpn().catch(() => {});
+  try {
+    await disconnectVpn();
+  } catch {
+    return;
+  }
+  const restartGeneration = connectionGeneration;
   await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
-  if (!state.connected && !state.connecting) {
+  if (
+    restartGeneration === connectionGeneration &&
+    !state.connected &&
+    !state.connecting
+  ) {
     await connectVpnInternal(server, false, true).catch(() => {});
   }
 }
@@ -600,9 +767,7 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
   setState({ connected: false, connecting: true, disconnecting: false, lastError: null });
 
   try {
-    await engineStop().catch((e) => {
-      console.warn("[VPN] resume cleanup failed before reconnect:", e);
-    });
+    await engineStop();
     statsSessionEnd();
     await waitForNetworkAfterResume();
     if (gen !== connectionGeneration) return;
@@ -610,7 +775,22 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
   } catch (e) {
     const msg = userFacingVpnError(e);
     if (gen === connectionGeneration) {
-      setState({ connected: false, connecting: false, disconnecting: false, lastError: msg });
+      const nativeState = await engineGetState().catch(() => null);
+      const cleanupIncomplete = nativeState?.status !== "Disconnected";
+      if (!cleanupIncomplete) {
+        currentServerForRecovery = null;
+        statsSessionEnd();
+      }
+      setState({
+        connected: cleanupIncomplete,
+        connecting: false,
+        disconnecting: false,
+        lastError: msg,
+      });
+      if (nativeState?.status === "Connected") {
+        startPolling();
+        startTunnelHealthCheck(gen);
+      }
     }
   } finally {
     resumeRecoveryInFlight = false;
@@ -619,32 +799,22 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
 
 async function waitForNetworkAfterResume(): Promise<void> {
   await sleepMs(SYSTEM_RESUME_NETWORK_SETTLE_MS);
-  const startedAt = Date.now();
-  while (navigator.onLine === false && Date.now() - startedAt < SYSTEM_RESUME_ONLINE_WAIT_MS) {
+  const startedAt = performance.now();
+  while (
+    navigator.onLine === false &&
+    performance.now() - startedAt < SYSTEM_RESUME_ONLINE_WAIT_MS
+  ) {
     await sleepMs(SYSTEM_RESUME_ONLINE_POLL_MS);
   }
 }
 
 async function stopVpnWithError(message: string): Promise<void> {
-  connectionGeneration++;
-  currentServerForRecovery = null;
-  resumeRecoveryInFlight = false;
-  tunnelHealthFailedCycles = 0;
-  lastTunnelTrafficAt = null;
-  trafficQualityConfirmed = false;
-  stopTunnelHealthCheck();
-  stopPolling();
   try {
-    await engineStop();
-  } finally {
-    statsSessionEnd();
+    await disconnectVpn();
+    setState({ lastError: message });
+  } catch (error) {
     setState({
-      connected: false,
-      connecting: false,
-      disconnecting: false,
-      sessionStartTime: null,
-      sessionBytes: 0,
-      lastError: message,
+      lastError: `${message}: ${userFacingVpnError(error, t("vpn_error_tunnel_stopped"))}`,
     });
   }
 }
@@ -695,9 +865,13 @@ async function probeTunnelOnce(): Promise<boolean> {
 }
 
 function hasRecentTunnelTraffic(): boolean {
+  const age =
+    lastTunnelTrafficAt === null
+      ? Number.POSITIVE_INFINITY
+      : performance.now() - lastTunnelTrafficAt;
   return (
-    lastTunnelTrafficAt !== null &&
-    Date.now() - lastTunnelTrafficAt <= RECENT_TUNNEL_TRAFFIC_GRACE_MS
+    age >= 0 &&
+    age <= RECENT_TUNNEL_TRAFFIC_GRACE_MS
   );
 }
 
@@ -710,8 +884,10 @@ export function clearVpnError() {
 // keeping a stale "Connected" badge over a tunnel that's no longer forwarding
 // traffic.
 let vpnDiedListenerRegistered = false;
+let vpnDiedListenerRetries = 0;
+let vpnDiedListenerRetryTimer: number | null = null;
 function ensureVpnDiedListener() {
-  if (vpnDiedListenerRegistered) return;
+  if (vpnDiedListenerRegistered || isBrowserPreviewRuntime()) return;
   vpnDiedListenerRegistered = true;
   listen<string>("vpn-died", (event) => {
     if (event.payload) {
@@ -731,6 +907,7 @@ function ensureVpnDiedListener() {
       connecting: false,
       disconnecting: false,
       sessionStartTime: null,
+      sessionElapsedSeconds: 0,
       sessionBytes: 0,
       lastError: t("vpn_error_tunnel_stopped"),
     });
@@ -738,20 +915,31 @@ function ensureVpnDiedListener() {
     if (failedServer) {
       void recordServerTunnelFailure(failedServer);
     }
+  }).then(() => {
+    vpnDiedListenerRetries = 0;
+    if (vpnDiedListenerRetryTimer !== null) {
+      clearTimeout(vpnDiedListenerRetryTimer);
+      vpnDiedListenerRetryTimer = null;
+    }
   }).catch((e) => {
+    vpnDiedListenerRegistered = false;
     console.warn("[vpnState] could not register vpn-died listener:", e);
+    if (vpnDiedListenerRetries >= 3 || vpnDiedListenerRetryTimer !== null) return;
+    vpnDiedListenerRetries += 1;
+    vpnDiedListenerRetryTimer = window.setTimeout(() => {
+      vpnDiedListenerRetryTimer = null;
+      ensureVpnDiedListener();
+    }, 1_000);
   });
 }
 ensureVpnDiedListener();
 
-// Auto-stop the tunnel the moment the user's plan transitions to
-// EXPIRED. Without this the green "Connected" badge stays on the
-// screen indefinitely (the panel told us we're expired but the local
-// xray keeps the tunnel up), and the next user action — picking a
-// server — would drag the expired sentinel through the live-switch
-// path and crash the engine.
+// Auto-stop the tunnel the moment the user's plan expires or any token/API
+// path reports that this device is no longer linked. Without this the UI can
+// navigate to pairing while an OS-level tunnel remains active with no Stop
+// control available on that screen.
 subscribeSession((session) => {
-  if (session.userPlan !== "EXPIRED") return;
+  if (session.isLinked && session.userPlan !== "EXPIRED") return;
   if (!state.connected && !state.connecting) return;
   void disconnectVpn().catch(() => {});
 });

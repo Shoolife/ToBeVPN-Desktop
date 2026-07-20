@@ -26,7 +26,7 @@ import {
 import { isPaired, useSession } from "./session/store";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
 import { hasSameVpnConfig, isSameServerSelection } from "./session/serverSelection";
-import { connectVpn, getVpnRuntime } from "./session/vpnState";
+import { connectVpn, disconnectVpn, getVpnRuntime } from "./session/vpnState";
 import {
   launchedFromAutostart,
   listenForAutostartConnect,
@@ -311,6 +311,8 @@ export default function App({
 
   useEffect(() => {
     if (!session.isLinked) {
+      selectedServerRef.current = null;
+      automaticServerSelectionRef.current = true;
       setSelectedServer(null);
       setAutomaticServerSelection(true);
       clearLastServer();
@@ -331,7 +333,11 @@ export default function App({
     let cancelled = false;
     void selectBestVpnServer(servers).then((best) => {
       if (cancelled || !best) return;
-      const resolved = toSelectedServer(best);
+      const fresh = getCachedVpnServers()
+        .filter(isAvailableVpnServer)
+        .find((candidate) => isSameServerSelection(candidate, best));
+      if (!fresh || !automaticServerSelectionRef.current) return;
+      const resolved = toSelectedServer(fresh);
       selectedServerRef.current = resolved;
       setSelectedServer(resolved);
       saveLastServer(resolved);
@@ -353,6 +359,15 @@ export default function App({
       const servers = getCachedVpnServers().filter(isAvailableVpnServer);
       const automatic = automaticServerSelectionRef.current;
       if (servers.length === 0) {
+        selectedServerRef.current = null;
+        setSelectedServer(null);
+        clearSelectedServer();
+        const runtime = getVpnRuntime();
+        if (runtime.connected || runtime.connecting) {
+          void disconnectVpn().catch((error) => {
+            console.error("Could not stop VPN after server access was revoked", error);
+          });
+        }
         return;
       }
       const matching = current
@@ -392,7 +407,16 @@ export default function App({
         return;
       }
       void selectBestVpnServer(servers).then((best) => {
-        if (best) applyFreshServer(best);
+        if (!best || !automaticServerSelectionRef.current) return;
+        const latestSelection = selectedServerRef.current;
+        const selectionUnchanged = current
+          ? Boolean(latestSelection && isSameServerSelection(latestSelection, current))
+          : latestSelection === null;
+        if (!selectionUnchanged) return;
+        const fresh = getCachedVpnServers()
+          .filter(isAvailableVpnServer)
+          .find((candidate) => isSameServerSelection(candidate, best));
+        if (fresh) applyFreshServer(fresh);
       });
     });
   }, []);
@@ -570,6 +594,10 @@ export default function App({
               }
             }}
             onSelectAutomatic={(vpnServer) => {
+              // Automatic selection is asynchronous. Revalidate here so a
+              // server that went offline while its ping was measured cannot
+              // become the active or persisted choice.
+              if (!isAvailableVpnServer(vpnServer)) return;
               const server = toSelectedServer(vpnServer);
               const prev = selectedServer;
               automaticServerSelectionRef.current = true;
@@ -600,9 +628,14 @@ export default function App({
                 }).catch((e) => {
                   console.error("[VPN] automatic live-switch failed:", e);
                   if (!prev || !getVpnRuntime().connected) return;
-                  selectedServerRef.current = prev;
-                  setSelectedServer(prev);
-                  saveLastServer(prev);
+                  setSelectedServer((current) => {
+                    // A later user selection wins over this older failed
+                    // reconnect; never roll a newer choice back.
+                    if (!current || !isSameServerSelection(current, server)) return current;
+                    selectedServerRef.current = prev;
+                    saveLastServer(prev);
+                    return prev;
+                  });
                 });
               }
             }}

@@ -7,14 +7,19 @@ import { invoke } from "@tauri-apps/api/core";
 // batches while the in-memory counters remain current for the UI.
 
 const LEGACY_STORAGE_KEY = "tobevpn_stats_v1";
-const FLUSH_INTERVAL_MS = 60_000;
+const FLUSH_INTERVAL_MS = 10_000;
+const STATS_CHANGED_EVENT = "tobevpn:stats-changed";
+const MAX_STORED_BUCKETS = 800;
+const MAX_COUNTER_VALUE = Number.MAX_SAFE_INTEGER;
+const NATIVE_INIT_RETRY_MS = 5_000;
+const NATIVE_INIT_MAX_ATTEMPTS = 3;
 
 export interface HourBucket {
-  /** Epoch seconds of the hour start (floored to hour) */
+  /** Epoch seconds of the local wall-clock hour start */
   ts: number;
   /** Total bytes transferred in this hour */
   bytes: number;
-  /** Number of distinct sessions that were active */
+  /** Number of VPN sessions started in this hour */
   sessions: number;
   /** Total connected seconds in this hour */
   seconds: number;
@@ -29,14 +34,52 @@ function parseStore(raw: string | null): StatsStore | null {
   try {
     const parsed = JSON.parse(raw) as Partial<StatsStore>;
     if (!Array.isArray(parsed.buckets)) return null;
+    const newestAllowed = floorHour(Date.now() / 1000) + 3600;
+    const oldestAllowed = newestAllowed - 32 * 86400;
+    const unique = new Map<number, HourBucket>();
+    for (const candidate of parsed.buckets.slice(0, MAX_STORED_BUCKETS * 4)) {
+      const bucket = candidate as Partial<HourBucket> | null;
+      const ts = Number(bucket?.ts);
+      const bytes = Number(bucket?.bytes);
+      const sessions = Number(bucket?.sessions);
+      const seconds = Number(bucket?.seconds);
+      if (
+        !bucket ||
+        !Number.isSafeInteger(ts) ||
+        ts < oldestAllowed ||
+        ts > newestAllowed ||
+        // Local hour boundaries are not always divisible by 3600 in UTC
+        // (for example India is UTC+05:30 and Nepal is UTC+05:45).
+        ts % 60 !== 0 ||
+        !Number.isFinite(bytes) ||
+        bytes < 0 ||
+        bytes > MAX_COUNTER_VALUE ||
+        !Number.isFinite(sessions) ||
+        sessions < 0 ||
+        sessions > MAX_COUNTER_VALUE ||
+        !Number.isFinite(seconds) ||
+        seconds < 0 ||
+        seconds > MAX_COUNTER_VALUE
+      ) continue;
+      const normalized: HourBucket = {
+        ts,
+        bytes: Math.floor(bytes),
+        sessions: Math.floor(sessions),
+        seconds: Math.floor(seconds),
+      };
+      const existing = unique.get(normalized.ts);
+      unique.set(normalized.ts, existing ? {
+        ts: normalized.ts,
+        bytes: Math.max(existing.bytes, normalized.bytes),
+        sessions: Math.max(existing.sessions, normalized.sessions),
+        seconds: Math.max(existing.seconds, normalized.seconds),
+      } : normalized);
+    }
     return {
-      buckets: parsed.buckets.filter(
-        (bucket): bucket is HourBucket =>
-          Number.isFinite(bucket?.ts) &&
-          Number.isFinite(bucket?.bytes) &&
-          Number.isFinite(bucket?.sessions) &&
-          Number.isFinite(bucket?.seconds),
-      ),
+      buckets: [...unique.values()]
+        .sort((a, b) => b.ts - a.ts)
+        .slice(0, MAX_STORED_BUCKETS)
+        .sort((a, b) => a.ts - b.ts),
     };
   } catch {
     return null;
@@ -71,8 +114,36 @@ function mergeStores(primary: StatsStore, secondary: StatsStore): StatsStore {
   return { buckets: [...merged.values()] };
 }
 
+function mergeNativeWithRuntime(
+  nativeStore: StatsStore,
+  startupBaseline: StatsStore,
+  runtimeStore: StatsStore,
+): StatsStore {
+  const merged = mergeStores(nativeStore, startupBaseline);
+  const baselineByTs = new Map(startupBaseline.buckets.map((bucket) => [bucket.ts, bucket]));
+  for (const runtimeBucket of runtimeStore.buckets) {
+    const baseline = baselineByTs.get(runtimeBucket.ts);
+    const target = getOrCreateBucket(merged, runtimeBucket.ts);
+    target.bytes = Math.min(
+      MAX_COUNTER_VALUE,
+      target.bytes + Math.max(0, runtimeBucket.bytes - (baseline?.bytes ?? 0)),
+    );
+    target.sessions = Math.min(
+      MAX_COUNTER_VALUE,
+      target.sessions + Math.max(0, runtimeBucket.sessions - (baseline?.sessions ?? 0)),
+    );
+    target.seconds = Math.min(
+      MAX_COUNTER_VALUE,
+      target.seconds + Math.max(0, runtimeBucket.seconds - (baseline?.seconds ?? 0)),
+    );
+  }
+  return merged;
+}
+
 function floorHour(epochSec: number): number {
-  return Math.floor(epochSec / 3600) * 3600;
+  const date = new Date(epochSec * 1000);
+  date.setMinutes(0, 0, 0);
+  return Math.floor(date.getTime() / 1000);
 }
 
 function prune(store: StatsStore) {
@@ -82,11 +153,15 @@ function prune(store: StatsStore) {
 }
 
 const legacy = readLegacyStore();
+const startupBaseline: StatsStore = {
+  buckets: legacy.store.buckets.map((bucket) => ({ ...bucket })),
+};
 let store = legacy.store;
 let nativeStorageReady = false;
 let dirty = false;
 let flushTimer: number | null = null;
 let saveChain: Promise<void> = Promise.resolve();
+let nativeInitAttempts = 0;
 
 function load(): StatsStore {
   return store;
@@ -126,15 +201,17 @@ function flushStats() {
 }
 
 async function initializeNativeStorage() {
+  nativeInitAttempts += 1;
   try {
     const raw = await invoke<string | null>("load_desktop_stats");
     const nativeStore = parseStore(raw);
     if (nativeStore) {
-      // Merge with counters collected while the asynchronous native read was
-      // running. max() also avoids double-counting the legacy migration.
-      store = mergeStores(nativeStore, store);
+      // Avoid double-counting the legacy snapshot while still ADDING counters
+      // recorded during the asynchronous native read.
+      store = mergeNativeWithRuntime(nativeStore, startupBaseline, store);
     }
     nativeStorageReady = true;
+    window.dispatchEvent(new Event(STATS_CHANGED_EVENT));
     if (legacy.raw !== null) {
       dirty = true;
       await persistNow();
@@ -149,6 +226,9 @@ async function initializeNativeStorage() {
     }
   } catch (error) {
     console.warn("Could not initialize native desktop stats", error);
+    if (nativeInitAttempts < NATIVE_INIT_MAX_ATTEMPTS) {
+      window.setTimeout(() => void initializeNativeStorage(), NATIVE_INIT_RETRY_MS);
+    }
   }
 }
 
@@ -167,35 +247,36 @@ function getOrCreateBucket(store: StatsStore, hourTs: number): HourBucket {
 
 // --- Public API called by VPN engine ---
 
-let activeSessionHour = -1;
-
 /** Call when a VPN session starts */
 export function sessionStart() {
   const hourTs = floorHour(Date.now() / 1000);
-  activeSessionHour = hourTs;
   const bucket = getOrCreateBucket(load(), hourTs);
-  bucket.sessions += 1;
+  bucket.sessions = Math.min(MAX_COUNTER_VALUE, bucket.sessions + 1);
   scheduleSave();
+  window.dispatchEvent(new Event(STATS_CHANGED_EVENT));
 }
 
 /** Call periodically while VPN is connected to record traffic delta */
 export function recordTraffic(deltaBytes: number, deltaSeconds: number) {
+  if (!Number.isFinite(deltaBytes) || !Number.isFinite(deltaSeconds)) return;
+  const safeBytes = Math.min(MAX_COUNTER_VALUE, Math.max(0, Math.floor(deltaBytes)));
+  const safeSeconds = Math.min(3600, Math.max(0, deltaSeconds));
   const hourTs = floorHour(Date.now() / 1000);
   const bucket = getOrCreateBucket(load(), hourTs);
-  bucket.bytes += deltaBytes;
-  bucket.seconds += deltaSeconds;
-  // If the hour rolled over since session started, count a new session.
-  if (activeSessionHour >= 0 && activeSessionHour !== hourTs) {
-    bucket.sessions += 1;
-    activeSessionHour = hourTs;
-  }
+  bucket.bytes = Math.min(MAX_COUNTER_VALUE, bucket.bytes + safeBytes);
+  bucket.seconds = Math.min(MAX_COUNTER_VALUE, bucket.seconds + safeSeconds);
   scheduleSave();
+  window.dispatchEvent(new Event(STATS_CHANGED_EVENT));
 }
 
 /** Call when VPN session ends */
 export function sessionEnd() {
-  activeSessionHour = -1;
   flushStats();
+}
+
+export function subscribeStats(listener: () => void): () => void {
+  window.addEventListener(STATS_CHANGED_EVENT, listener);
+  return () => window.removeEventListener(STATS_CHANGED_EVENT, listener);
 }
 
 // --- Query API used by StatsScreen ---
@@ -207,22 +288,31 @@ export interface StatSlot {
   totalSeconds: number;
 }
 
+// Buckets are aligned to the local wall-clock hour at recording time. Range
+// checks also keep older buckets usable after a timezone or DST transition.
+function slotFromRange(store: StatsStore, startSec: number, endSec: number): StatSlot {
+  let bytes = 0, sessions = 0, seconds = 0;
+  for (const bucket of store.buckets) {
+    if (bucket.ts >= startSec && bucket.ts < endSec) {
+      bytes += bucket.bytes;
+      sessions += bucket.sessions;
+      seconds += bucket.seconds;
+    }
+  }
+  return { period: startSec, totalBytes: bytes, sessions, totalSeconds: seconds };
+}
+
 export function getDayStats(): StatSlot[] {
   const stats = load();
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  const dayStart = Math.floor(now.getTime() / 1000);
-
-  return Array.from({ length: 24 }, (_, i) => {
-    const ts = dayStart + i * 3600;
-    const bucket = stats.buckets.find((item) => item.ts === ts);
-    return {
-      period: ts,
-      totalBytes: bucket?.bytes ?? 0,
-      sessions: bucket?.sessions ?? 0,
-      totalSeconds: bucket?.seconds ?? 0,
-    };
-  });
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  const slots: StatSlot[] = [];
+  for (let cursor = start.getTime(); cursor < end.getTime(); cursor += 3600_000) {
+    slots.push(slotFromRange(stats, cursor / 1000, Math.min(cursor + 3600_000, end.getTime()) / 1000));
+  }
+  return slots;
 }
 
 export function getWeekStats(): StatSlot[] {
@@ -232,21 +322,12 @@ export function getWeekStats(): StatSlot[] {
   const monday = new Date(now);
   monday.setDate(now.getDate() - ((day + 6) % 7));
   monday.setHours(0, 0, 0, 0);
-  const weekStart = Math.floor(monday.getTime() / 1000);
-
   return Array.from({ length: 7 }, (_, i) => {
-    const dayTs = weekStart + i * 86400;
-    // Sum all hour buckets in this day.
-    let bytes = 0, sessions = 0, seconds = 0;
-    for (let h = 0; h < 24; h++) {
-      const bucket = stats.buckets.find((item) => item.ts === dayTs + h * 3600);
-      if (bucket) {
-        bytes += bucket.bytes;
-        sessions += bucket.sessions;
-        seconds += bucket.seconds;
-      }
-    }
-    return { period: dayTs, totalBytes: bytes, sessions, totalSeconds: seconds };
+    const dayStart = new Date(monday);
+    dayStart.setDate(monday.getDate() + i);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayStart.getDate() + 1);
+    return slotFromRange(stats, dayStart.getTime() / 1000, dayEnd.getTime() / 1000);
   });
 }
 
@@ -254,21 +335,16 @@ export function getMonthStats(): StatSlot[] {
   const stats = load();
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const start = Math.floor(monthStart.getTime() / 1000);
-
-  return Array.from({ length: 4 }, (_, i) => {
-    const weekStart = start + i * 7 * 86400;
-    const weekEnd = weekStart + 7 * 86400;
-    let bytes = 0, sessions = 0, seconds = 0;
-    for (const bucket of stats.buckets) {
-      if (bucket.ts >= weekStart && bucket.ts < weekEnd) {
-        bytes += bucket.bytes;
-        sessions += bucket.sessions;
-        seconds += bucket.seconds;
-      }
-    }
-    return { period: weekStart, totalBytes: bytes, sessions, totalSeconds: seconds };
-  });
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const slots: StatSlot[] = [];
+  for (let weekStart = new Date(monthStart); weekStart < monthEnd;) {
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 7);
+    const cappedEnd = weekEnd < monthEnd ? weekEnd : monthEnd;
+    slots.push(slotFromRange(stats, weekStart.getTime() / 1000, cappedEnd.getTime() / 1000));
+    weekStart = weekEnd;
+  }
+  return slots;
 }
 
 /** Total bytes ever recorded in the retained buckets. */

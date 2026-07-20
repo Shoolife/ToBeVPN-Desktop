@@ -32,11 +32,10 @@ case "$1" in
     DESKTOP_FILE=/usr/share/applications/ToBeVPN.desktop
     [ -f "$DESKTOP_FILE" ] || DESKTOP_FILE=/usr/share/applications/tobevpn-desktop.desktop
     if [ -f "$DESKTOP_FILE" ]; then
-        if grep -q '^Exec=tobevpn-desktop$' "$DESKTOP_FILE"; then
-            sed -i 's|^Exec=tobevpn-desktop$|Exec=tobevpn-desktop %u|' "$DESKTOP_FILE"
-        fi
+        # Normalize any file placeholder to the URL form, or append one when
+        # the generated entry has no field code at all.
+        sed -i -E '/^Exec=/{s/%[fFU]/%u/g; /%[uU]/! s/[[:space:]]*$/ %u/;}' "$DESKTOP_FILE"
         update-desktop-database /usr/share/applications 2>/dev/null || true
-        xdg-mime default "$(basename "$DESKTOP_FILE")" x-scheme-handler/tobevpn 2>/dev/null || true
     fi
     ;;
 esac

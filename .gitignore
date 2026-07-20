@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
+src-tauri/.backend-hosts-backup.json
 
 # Local env (contains BOT_API_TOKEN)
 .env

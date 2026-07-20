@@ -5,6 +5,7 @@ import { getDeviceFingerprint } from "../session/fingerprint";
 import {
   clearSessionTokens,
   getSession,
+  getSessionGeneration,
   hasValidAccessToken,
   hasValidRefreshToken,
   updateSession,
@@ -96,6 +97,7 @@ function buildFallbackBotUrl(
       ? fallbackProxyUrl
       : `https://${fallbackProxyUrl}`;
     const url = new URL(normalizedFallback);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
     url.searchParams.set("u", target);
     return url.toString();
   } catch {
@@ -114,8 +116,12 @@ const REQUEST_TIMEOUT_MS = PRIMARY_TIMEOUT_MS + FALLBACK_TIMEOUT_MS;
 const FALLBACK_HEDGE_DELAY_MS = 400;
 const PRIMARY_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
 const FALLBACK_HTTP_STATUS = 403;
+const MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+const BODY_READ_TIMEOUT_MS = 8_000;
+const BODY_TOTAL_TIMEOUT_MS = 15_000;
 
-let tokenOperation: Promise<string | null> | null = null;
+let tokenOperation: { generation: number; promise: Promise<string | null> } | null = null;
 let primaryUnavailableUntil = 0;
 
 function publicErrorMessage(raw: string): string {
@@ -123,6 +129,19 @@ function publicErrorMessage(raw: string): string {
     .replace(/https?:\/\/[^\s)]+/gi, "[configured endpoint]")
     .replace(/[\n\r\t]+/g, " ")
     .trim();
+  const session = getSession();
+  for (const credential of [session.accessToken, session.refreshToken]) {
+    if (credential && credential.length >= 8) {
+      message = message.split(credential).join("[credential]");
+    }
+  }
+  // A buggy backend may echo a pairing/refresh token that is not yet stored
+  // in the session. Redact long token-shaped base64url values before the
+  // message reaches either the UI or developer console.
+  message = message.replace(
+    /\b[A-Za-z0-9_-]{24,}(?:\.[A-Za-z0-9_-]{8,}){0,2}\b/g,
+    "[credential]",
+  );
   for (const hostname of CONTROL_PLANE_BYPASS_HOSTS) {
     message = message.split(hostname).join("[configured host]");
   }
@@ -132,11 +151,13 @@ function publicErrorMessage(raw: string): string {
 function runTokenOperation(
   operation: () => Promise<string | null>,
 ): Promise<string | null> {
-  if (tokenOperation) return tokenOperation;
-  tokenOperation = operation().finally(() => {
-    tokenOperation = null;
+  const generation = getSessionGeneration();
+  if (tokenOperation?.generation === generation) return tokenOperation.promise;
+  const promise = operation().finally(() => {
+    if (tokenOperation?.promise === promise) tokenOperation = null;
   });
-  return tokenOperation;
+  tokenOperation = { generation, promise };
+  return promise;
 }
 
 function isInvalidSessionTokenError(error: unknown): boolean {
@@ -157,11 +178,12 @@ async function attemptFetch(
   userSignal: AbortSignal | null | undefined,
 ): Promise<Response> {
   const controller = new AbortController();
+  const abortFromUser = () => controller.abort();
   if (userSignal) {
     if (userSignal.aborted) {
       controller.abort();
     } else {
-      userSignal.addEventListener("abort", () => controller.abort(), { once: true });
+      userSignal.addEventListener("abort", abortFromUser, { once: true });
     }
   }
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -174,6 +196,7 @@ async function attemptFetch(
     throw new Error("Network request failed");
   } finally {
     clearTimeout(timeoutId);
+    userSignal?.removeEventListener("abort", abortFromUser);
   }
 }
 
@@ -206,14 +229,25 @@ async function fallbackFirstFetch(
   fallbackInit: RequestInit,
   userSignal: AbortSignal | null | undefined,
 ): Promise<Response> {
+  let rejectedFallbackResponse: Response | null = null;
   try {
     const response = await attemptFetch(fallbackUrl, fallbackInit, FALLBACK_TIMEOUT_MS, userSignal);
-    return await rejectProxyGatewayAuthError(response);
+    const checked = await rejectProxyGatewayAuthError(response);
+    if (checked.status === 429 || checked.status >= 500) {
+      rejectedFallbackResponse = checked;
+      throw new Error("Fallback route rejected request");
+    }
+    return checked;
   } catch (fallbackError) {
     if (userSignal?.aborted) throw fallbackError;
-    const response = await attemptFetch(primaryUrl, primaryInit, PRIMARY_TIMEOUT_MS, userSignal);
-    primaryUnavailableUntil = 0;
-    return response;
+    try {
+      const response = await attemptFetch(primaryUrl, primaryInit, PRIMARY_TIMEOUT_MS, userSignal);
+      primaryUnavailableUntil = 0;
+      return response;
+    } catch (primaryError) {
+      if (rejectedFallbackResponse) return rejectedFallbackResponse;
+      throw primaryError;
+    }
   }
 }
 
@@ -232,11 +266,13 @@ async function hedgedGetFetch(
   const primaryController = new AbortController();
   const fallbackController = new AbortController();
   let rejectedPrimaryResponse: Response | null = null;
+  let rejectedFallbackResponse: Response | null = null;
+  let primaryFailed = false;
+  const abortBoth = () => {
+    primaryController.abort();
+    fallbackController.abort();
+  };
   if (userSignal) {
-    const abortBoth = () => {
-      primaryController.abort();
-      fallbackController.abort();
-    };
     if (userSignal.aborted) abortBoth();
     else userSignal.addEventListener("abort", abortBoth, { once: true });
   }
@@ -247,11 +283,15 @@ async function hedgedGetFetch(
     PRIMARY_TIMEOUT_MS,
     primaryController.signal,
   ).then((response) => {
-    if (response.status === FALLBACK_HTTP_STATUS) {
+    if (response.status === FALLBACK_HTTP_STATUS || response.status === 429 || response.status >= 500) {
       rejectedPrimaryResponse = response;
+      primaryFailed = true;
       throw new Error("Primary route rejected request");
     }
     return { source: "primary" as const, response };
+  }).catch((error) => {
+    if (!primaryController.signal.aborted) primaryFailed = true;
+    throw error;
   });
   const fallbackPromise: Promise<HedgedResponse> = (async () => {
     await delayMs(FALLBACK_HEDGE_DELAY_MS);
@@ -261,7 +301,15 @@ async function hedgedGetFetch(
       FALLBACK_TIMEOUT_MS,
       fallbackController.signal,
     );
-    return await rejectProxyGatewayAuthError(response);
+    const checked = await rejectProxyGatewayAuthError(response);
+    // A fast 429/5xx from the proxy is not a successful hedge: let a slower
+    // healthy primary win. Preserve it only as the last-resort HTTP response
+    // if the primary transport also fails.
+    if (checked.status === 429 || checked.status >= 500) {
+      rejectedFallbackResponse = checked;
+      throw new Error("Fallback route rejected request");
+    }
+    return checked;
   })().then((response) => ({ source: "fallback" as const, response }));
 
   try {
@@ -271,13 +319,22 @@ async function hedgedGetFetch(
       primaryUnavailableUntil = 0;
     } else {
       primaryController.abort();
-      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      // A faster fallback does not prove the primary is unavailable. Enter
+      // cooldown only after an actual primary error/retriable HTTP response.
+      if (primaryFailed) {
+        primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      }
     }
     return winner.response;
   } catch {
-    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    if (!userSignal?.aborted) {
+      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    }
     if (rejectedPrimaryResponse) return rejectedPrimaryResponse;
+    if (rejectedFallbackResponse) return rejectedFallbackResponse;
     throw new Error("Network request failed");
+  } finally {
+    userSignal?.removeEventListener("abort", abortBoth);
   }
 }
 
@@ -331,11 +388,13 @@ async function performFetch(
     : null;
   const method = (init.method ?? "GET").toUpperCase();
 
-  if (fallbackUrl && primaryUnavailableUntil > Date.now()) {
+  const isSafeMethod = method === "GET" || method === "HEAD";
+
+  if (fallbackUrl && isSafeMethod && primaryUnavailableUntil > performance.now()) {
     return fallbackFirstFetch(primaryUrl, fallbackUrl, primaryInit, fallbackInit, userSignal);
   }
 
-  if (fallbackUrl && (method === "GET" || method === "HEAD")) {
+  if (fallbackUrl && isSafeMethod) {
     return hedgedGetFetch(primaryUrl, fallbackUrl, primaryInit, fallbackInit, userSignal);
   }
 
@@ -347,11 +406,13 @@ async function performFetch(
       userSignal,
     );
   } catch (primaryError) {
-    if (!BOT_API_FALLBACK_URL) throw primaryError;
+    // Never replay a state-changing request after a network error: the
+    // primary may have committed it before its response was lost.
+    if (!BOT_API_FALLBACK_URL || !isSafeMethod) throw primaryError;
     if (userSignal?.aborted) throw primaryError;
     console.warn(`[bot-api] primary request to ${path} failed, retrying via fallback`);
     if (!fallbackUrl) throw primaryError;
-    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
     const response = await attemptFetch(
       fallbackUrl,
       fallbackInit,
@@ -365,7 +426,7 @@ async function performFetch(
 async function isProxyGatewayAuthError(response: Response): Promise<boolean> {
   if (response.status !== FALLBACK_HTTP_STATUS) return false;
   try {
-    const text = await response.clone().text();
+    const text = await readTextLimited(response.clone(), 16 * 1024);
     if (!text) return false;
     const parsed = JSON.parse(text) as {
       errorCode?: unknown;
@@ -389,7 +450,7 @@ async function parseErrorMessage(response: Response): Promise<string> {
   // can't blow up the UI layout. React already escapes the text — no XSS — but
   // multi-MB error bodies or multi-line markdown break the layout.
   try {
-    const text = await response.text();
+    const text = await readTextLimited(response, 64 * 1024);
     if (!text) return `HTTP ${response.status}`;
     try {
       const parsed = JSON.parse(text) as { message?: string; detail?: string; errorMessage?: string };
@@ -408,11 +469,157 @@ async function parseErrorMessage(response: Response): Promise<string> {
   }
 }
 
+async function readTextLimited(response: Response, maxBytes: number): Promise<string> {
+  const declaredLength = readContentLength(response);
+  if (declaredLength !== null && declaredLength > maxBytes) {
+    throw new Error("Response is too large");
+  }
+  if (!response.body) {
+    if (declaredLength === 0 || response.status === 204 || response.status === 205) return "";
+    throw new Error("Response body is not available as a bounded stream");
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const deadline = performance.now() + BODY_TOTAL_TIMEOUT_MS;
+  try {
+    while (total <= maxBytes) {
+      const remainingTime = deadline - performance.now();
+      if (remainingTime <= 0) throw new Error("Response body timed out");
+      const { done, value } = await readBodyChunk(
+        reader,
+        Math.min(BODY_READ_TIMEOUT_MS, remainingTime),
+      );
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) throw new Error("Response is too large");
+      chunks.push(value);
+    }
+  } finally {
+    // cancel() can inherit the same stalled transport as read(); releasing it
+    // must not pin an API operation forever.
+    void reader.cancel().catch(() => {});
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function readBodyChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs = BODY_READ_TIMEOUT_MS,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timeoutId: number | null = null;
+  return Promise.race([
+    reader.read(),
+    new Promise<never>((_, reject) => {
+      timeoutId = window.setTimeout(
+        () => reject(new Error("Response body timed out")),
+        timeoutMs,
+      );
+    }),
+  ]).finally(() => {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+  });
+}
+
+async function readJsonLimited<T>(response: Response): Promise<T> {
+  const declaredLength = readContentLength(response);
+  if (declaredLength !== null && declaredLength > MAX_API_RESPONSE_BYTES) {
+    throw new Error("API response is too large");
+  }
+  if (!response.body) {
+    throw new Error("API response body is not available as a bounded stream");
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const deadline = performance.now() + BODY_TOTAL_TIMEOUT_MS;
+  try {
+    while (total <= MAX_API_RESPONSE_BYTES) {
+      const remainingTime = deadline - performance.now();
+      if (remainingTime <= 0) throw new Error("API response body timed out");
+      const { done, value } = await readBodyChunk(
+        reader,
+        Math.min(BODY_READ_TIMEOUT_MS, remainingTime),
+      );
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_API_RESPONSE_BYTES) {
+        throw new Error("API response is too large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(bytes)) as T;
+}
+
+async function readBytesLimited(response: Response, maxBytes: number): Promise<Uint8Array> {
+  const declaredLength = readContentLength(response);
+  if (declaredLength !== null && declaredLength > maxBytes) {
+    throw new Error("Response is too large");
+  }
+  if (!response.body) return new Uint8Array(0);
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const deadline = performance.now() + BODY_TOTAL_TIMEOUT_MS;
+  try {
+    while (total <= maxBytes) {
+      const remainingTime = deadline - performance.now();
+      if (remainingTime <= 0) throw new Error("Response body timed out");
+      const { done, value } = await readBodyChunk(
+        reader,
+        Math.min(BODY_READ_TIMEOUT_MS, remainingTime),
+      );
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) throw new Error("Response is too large");
+      chunks.push(value);
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function readContentLength(response: Response): number | null {
+  const raw = response.headers.get("content-length");
+  if (raw === null || !/^\d+$/.test(raw.trim())) return null;
+  const length = Number(raw);
+  return Number.isSafeInteger(length) && length >= 0 ? length : null;
+}
+
 async function expectJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     throw new ApiHttpError(response.status, await parseErrorMessage(response));
   }
-  return (await response.json()) as T;
+  return await readJsonLimited<T>(response);
 }
 
 async function stableDeviceIdFromHwid(hwid: string): Promise<string | null> {
@@ -458,6 +665,7 @@ async function resolveBootstrapDeviceId(): Promise<string> {
 }
 
 async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
+  const generation = getSessionGeneration();
   const deviceId = await resolveBootstrapDeviceId();
   const requestBody: BootstrapRequestDto = {
     device_id: deviceId,
@@ -471,6 +679,9 @@ async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
   if (!payload.success || !payload.data) {
     throw new Error(payload.message ?? "Bootstrap failed");
   }
+  if (getSessionGeneration() !== generation) {
+    throw new Error("Device session changed while bootstrap was in flight");
+  }
   updateSessionFromTokens(payload.data);
   await persistCurrentSessionSecrets();
   return payload.data;
@@ -481,6 +692,7 @@ export async function bootstrapDeviceSession(): Promise<void> {
 }
 
 async function refreshDeviceSessionInternal(refreshToken: string): Promise<SessionTokensDto> {
+  const generation = getSessionGeneration();
   const requestBody: RefreshRequestDto = {
     refresh_token: refreshToken,
   };
@@ -491,6 +703,9 @@ async function refreshDeviceSessionInternal(refreshToken: string): Promise<Sessi
   const payload = await expectJson<ApiResponse<SessionTokensDto>>(response);
   if (!payload.success || !payload.data) {
     throw new Error(payload.message ?? "Refresh failed");
+  }
+  if (getSessionGeneration() !== generation) {
+    throw new Error("Device session changed while refresh was in flight");
   }
   updateSessionFromTokens(payload.data);
   await persistCurrentSessionSecrets();
@@ -587,27 +802,45 @@ async function request<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   let accessToken: string | null = null;
+  const requestGeneration = authMode === "access" ? getSessionGeneration() : null;
+  const assertSessionIsCurrent = () => {
+    if (
+      requestGeneration !== null &&
+      getSessionGeneration() !== requestGeneration
+    ) {
+      throw new Error("Device session changed while request was in flight");
+    }
+  };
 
   if (authMode === "access") {
     accessToken = await getAccessTokenForRequest();
+    // Never turn an action queued by the old account into an action performed
+    // with credentials restored or linked for a newer account.
+    assertSessionIsCurrent();
     if (accessToken) {
       headers.set(DIRECT_AUTH_HEADER, `Bearer ${accessToken}`);
     }
   }
 
   const response = await performFetch(path, { ...init, headers }, query);
+  assertSessionIsCurrent();
+  const method = (init.method ?? "GET").toUpperCase();
   if (
     isInvalidSessionStatus(response.status) &&
     authMode === "access" &&
-    retryOnAuthFailure
+    retryOnAuthFailure &&
+    (method === "GET" || method === "HEAD")
   ) {
     const recoveredToken = await recoverAccessTokenAfter401(accessToken);
+    assertSessionIsCurrent();
     if (recoveredToken) {
       return request(path, init, query, authMode, false);
     }
   }
 
-  return expectJson<T>(response);
+  const payload = await expectJson<T>(response);
+  assertSessionIsCurrent();
+  return payload;
 }
 
 // --- User avatar ---
@@ -618,29 +851,50 @@ async function request<T>(
 // fails. The endpoint is rate-limited, so callers should cache the result
 // for the app session instead of re-fetching on every screen open.
 export async function fetchUserAvatar(): Promise<Blob | null> {
+  const requestGeneration = getSessionGeneration();
+  const assertSessionIsCurrent = () => {
+    if (getSessionGeneration() !== requestGeneration) {
+      throw new Error("Device session changed while avatar was in flight");
+    }
+  };
   const headers = new Headers();
   const accessToken = await getAccessTokenForRequest();
+  assertSessionIsCurrent();
   if (accessToken) headers.set(DIRECT_AUTH_HEADER, `Bearer ${accessToken}`);
 
   let response = await performFetch("api/user/avatar", { method: "GET", headers });
+  assertSessionIsCurrent();
   if (isInvalidSessionStatus(response.status)) {
     const recovered = await recoverAccessTokenAfter401(accessToken);
+    assertSessionIsCurrent();
     if (recovered) {
       const retryHeaders = new Headers();
       retryHeaders.set(DIRECT_AUTH_HEADER, `Bearer ${recovered}`);
       response = await performFetch("api/user/avatar", { method: "GET", headers: retryHeaders });
+      assertSessionIsCurrent();
     }
   }
 
-  if (!response.ok) return null;
-  // Match the Android client: the endpoint returns raw JPEG bytes, but the
-  // Content-Type can be generic (e.g. application/octet-stream). Read the
-  // bytes and re-wrap them as image/jpeg so the object URL renders in <img>
-  // regardless of the server's declared type. A broken/HTML body still just
-  // fails to decode and the UI falls back to the placeholder via onError.
-  const bytes = await response.arrayBuffer();
-  if (bytes.byteLength === 0) return null;
-  return new Blob([bytes], { type: "image/jpeg" });
+  if (response.status === 204 || response.status === 404) return null;
+  if (!response.ok) {
+    // Preserve the distinction between a confirmed missing avatar and a
+    // transient/auth/server error so callers do not negative-cache failures.
+    throw new ApiHttpError(response.status, "Avatar request failed");
+  }
+  // The endpoint returns raw JPEG bytes, sometimes with a generic MIME type.
+  // Bound both size and read time, then reject HTML/error payloads before an
+  // object URL reaches the image decoder.
+  const bytes = await readBytesLimited(response, MAX_AVATAR_BYTES);
+  assertSessionIsCurrent();
+  if (
+    bytes.byteLength < 4 ||
+    bytes[0] !== 0xff ||
+    bytes[1] !== 0xd8 ||
+    bytes[2] !== 0xff
+  ) return null;
+  const ownedBytes = new Uint8Array(bytes.byteLength);
+  ownedBytes.set(bytes);
+  return new Blob([ownedBytes.buffer], { type: "image/jpeg" });
 }
 
 // --- Deep-link authentication ---
@@ -655,7 +909,12 @@ export function requestAuth(
 }
 
 export function checkAuthStatus(token: string): Promise<ApiResponse<AuthStatusDto>> {
-  return request("api/auth/status", { method: "GET" }, { token }, "none");
+  return request(
+    "api/auth/status",
+    { method: "GET" },
+    { token: requireBoundedQueryValue(token, "authentication token", 2_048) },
+    "none",
+  );
 }
 
 // --- Devices ---
@@ -696,15 +955,100 @@ export function createTvPairing(
 }
 
 export function checkTvPairingStatus(code: string): Promise<ApiResponse<TvPairStatusDto>> {
-  return request("api/tv/pair/status", { method: "GET" }, { code }, "none");
+  return request(
+    "api/tv/pair/status",
+    { method: "GET" },
+    { code: requireBoundedQueryValue(code, "pairing code", 128) },
+    "none",
+  );
+}
+
+function requireBoundedQueryValue(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== "string") throw new Error(`Invalid ${label}`);
+  const trimmed = value.trim();
+  if (
+    !trimmed ||
+    trimmed.length > maxLength ||
+    /[\u0000-\u001f\u007f]/.test(trimmed)
+  ) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return trimmed;
 }
 
 // --- Panel proxy ---
 
-export function getUserByTelegramId(
+export async function getUserByTelegramId(
   telegramId: number,
 ): Promise<PanelResponse<PanelUserDto[]>> {
-  return request(`api/panel/user-by-telegram/${telegramId}`, { method: "GET" });
+  if (!Number.isSafeInteger(telegramId) || telegramId <= 0) {
+    throw new Error("Invalid Telegram identity");
+  }
+  const result = await request<PanelResponse<unknown>>(
+    `api/panel/user-by-telegram/${telegramId}`,
+    { method: "GET" },
+  );
+  const source = Array.isArray(result?.response) ? result.response : [];
+  const text = (value: unknown, max: number, required = false): string | null => {
+    if (typeof value !== "string") return required ? null : "";
+    const trimmed = value.trim();
+    if ((required && !trimmed) || trimmed.length > max || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+      return null;
+    }
+    return trimmed;
+  };
+  const nonnegative = (value: unknown): number =>
+    Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+  const users: PanelUserDto[] = [];
+  for (const raw of source.slice(0, 128)) {
+    if (raw === null || typeof raw !== "object") continue;
+    const user = raw as Record<string, unknown>;
+    const uuid = text(user.uuid, 128, true);
+    const shortUuid = text(user.short_uuid, 128, true);
+    if (!uuid || !shortUuid) continue;
+    const squads = Array.isArray(user.active_internal_squads)
+      ? user.active_internal_squads.slice(0, 128).flatMap((rawSquad) => {
+          if (rawSquad === null || typeof rawSquad !== "object") return [];
+          const squad = rawSquad as Record<string, unknown>;
+          const squadUuid = text(squad.uuid, 128, true);
+          const name = text(squad.name, 128, true);
+          return squadUuid && name ? [{ uuid: squadUuid, name }] : [];
+        })
+      : [];
+    const rawTraffic = user.user_traffic;
+    const traffic = rawTraffic !== null && typeof rawTraffic === "object"
+      ? rawTraffic as Record<string, unknown>
+      : null;
+    users.push({
+      uuid,
+      short_uuid: shortUuid,
+      username: text(user.username, 256) ?? "",
+      status: text(user.status, 64) ?? "",
+      traffic_limit_bytes: nonnegative(user.traffic_limit_bytes),
+      traffic_limit_strategy: text(user.traffic_limit_strategy, 64) ?? "",
+      expire_at: text(user.expire_at, 128) || null,
+      telegram_id:
+        Number.isSafeInteger(user.telegram_id) && Number(user.telegram_id) > 0
+          ? Number(user.telegram_id)
+          : null,
+      vless_uuid: text(user.vless_uuid, 128) ?? "",
+      subscription_url: text(user.subscription_url, 2_048) ?? "",
+      active_internal_squads: squads,
+      user_traffic: traffic ? {
+        used_traffic_bytes: nonnegative(traffic.used_traffic_bytes),
+        lifetime_used_traffic_bytes: nonnegative(traffic.lifetime_used_traffic_bytes),
+        online_at: text(traffic.online_at, 128) || null,
+        last_connected_node_uuid: text(traffic.last_connected_node_uuid, 128) || null,
+      } : null,
+      hwid_device_limit:
+        Number.isSafeInteger(user.hwid_device_limit) && Number(user.hwid_device_limit) >= 0
+          ? Number(user.hwid_device_limit)
+          : null,
+      email: text(user.email, 320) || null,
+      description: text(user.description, 4_096) || null,
+    });
+  }
+  return { response: users };
 }
 
 export function getNodes(): Promise<PanelResponse<PanelNodeDto[]>> {

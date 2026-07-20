@@ -11,7 +11,7 @@
     <defaults>
       <allow_any>auth_admin_keep</allow_any>
       <allow_inactive>auth_admin_keep</allow_inactive>
-      <allow_active>yes</allow_active>
+      <allow_active>auth_admin_keep</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tobevpn-update-helper.sh</annotate>
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>

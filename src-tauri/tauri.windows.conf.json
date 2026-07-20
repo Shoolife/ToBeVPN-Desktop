@@ -23,11 +23,11 @@
     ]
   },
   "bundle": {
-    "resources": [
-      "bin/geoip.dat",
-      "bin/geosite.dat",
-      "bin/wintun.dll"
-    ],
+    "resources": {
+      "bin/geoip.dat": "bin/geoip.dat",
+      "bin/geosite.dat": "bin/geosite.dat",
+      "bin/wintun.dll": "wintun.dll"
+    },
     "windows": {
       "allowDowngrades": false,
       "nsis": {

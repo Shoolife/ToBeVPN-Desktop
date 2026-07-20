@@ -9,13 +9,11 @@
 // human-readable error so the UI can prompt them to "Run as administrator".
 
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
@@ -31,44 +29,83 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
 const BYPASS_DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+const XRAY_CONFIG_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_LOG_LINE_CHARS: usize = 4 * 1024;
+// Unique marker on every route created by ToBeVPN. Cleanup matches protocol,
+// metric, destination, gateway and interface instead of deleting unrelated
+// administrator routes that happen to share a destination.
+const MANAGED_ROUTE_METRIC: u32 = 37_676;
+const KILLSWITCH_ROUTE_METRIC: u32 = 65_000;
+const DNS_GUARD_UDP_RULE: &str = "ToBeVPN-DnsLeakGuard-udp";
+const DNS_GUARD_TCP_RULE: &str = "ToBeVPN-DnsLeakGuard-tcp";
 
-/// Per-user app data dir (e.g. C:\Users\<user>\AppData\Local\ToBeVPN).
-/// %LOCALAPPDATA% is already per-user — by default other local users on
-/// the box only get traversal/list permissions on its parent, not read on
-/// our subdir. We rely on that default ACL inheritance instead of running
-/// icacls (which adds dependencies and can fail on locked-down systems).
-fn app_data_dir() -> PathBuf {
-    let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("ToBeVPN");
-    if !dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("[VPN-WIN] could not create {}: {e}", dir.display());
-            return std::env::temp_dir();
-        }
+async fn terminate_child_bounded(child: &mut Child, label: &str) -> Result<(), String> {
+    let kill_error = child
+        .start_kill()
+        .err()
+        .filter(|error| error.kind() != std::io::ErrorKind::InvalidInput);
+    match timeout(CHILD_STOP_TIMEOUT, child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(wait_error)) => match kill_error {
+            Some(kill_error) => Err(format!(
+                "failed to stop {label}: {kill_error}; failed to reap it: {wait_error}"
+            )),
+            None => Err(format!("failed to reap {label}: {wait_error}")),
+        },
+        Err(_) => match kill_error {
+            Some(kill_error) => Err(format!(
+                "failed to stop {label}: {kill_error}; process did not exit within {}s",
+                CHILD_STOP_TIMEOUT.as_secs()
+            )),
+            None => Err(format!(
+                "{label} did not exit within {}s",
+                CHILD_STOP_TIMEOUT.as_secs()
+            )),
+        },
     }
-    dir
 }
 
-// Append-only log under the per-user app dir so users can share diagnostics
-// when the GUI gives no useful error (Windows release builds discard stderr).
-fn log_path() -> PathBuf {
-    app_data_dir().join("tobevpn.log")
+fn ensure_trusted_runtime_file(path: &Path, label: &str) -> Result<(), String> {
+    if !path.is_file() {
+        return Err(format!("{label} is missing: {}", path.display()));
+    }
+    #[cfg(not(debug_assertions))]
+    crate::autostart::ensure_protected_runtime_path(path)?;
+    Ok(())
+}
+
+fn ensure_trusted_runtime_directory(path: &Path, label: &str) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err(format!("{label} is missing: {}", path.display()));
+    }
+    #[cfg(not(debug_assertions))]
+    crate::autostart::ensure_protected_runtime_path(path)?;
+    Ok(())
 }
 
 fn write_log_line(msg: &str) {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
-        .unwrap_or_else(|_| "0.000".into());
-    // Plain eprintln, NOT log_win! — calling the macro here would recurse.
-    eprintln!("{}", msg);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path())
-    {
-        let _ = writeln!(f, "[{ts}] {msg}");
-    }
+    static LOG_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = LOG_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let safe_msg: String = msg
+        .chars()
+        .map(|character| {
+            if character == '\n' || character == '\r' || character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_LOG_LINE_CHARS)
+        .collect();
+    // The Windows UI process is elevated. Never append diagnostics to
+    // user-controlled AppData: a junction/hard-link swap could redirect that
+    // privileged write. Plain eprintln is safe and still reaches development
+    // consoles / host-level capture without touching the filesystem.
+    eprintln!("{}", safe_msg);
 }
 
 macro_rules! log_win {
@@ -88,14 +125,18 @@ const WINTUN_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd66, 0x6f62, 0x6576, 0x706e, 0, 0
 const WINTUN_PUBLIC_IPV6_ROUTE: Ipv6Addr = Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0);
 const WINTUN_PUBLIC_IPV6_PREFIX: u8 = 3;
 
+#[derive(Clone)]
 pub struct VpnManager {
     state: Arc<Mutex<VpnState>>,
     xray_process: Arc<Mutex<Option<Child>>>,
     tun2socks_process: Arc<Mutex<Option<Child>>>,
     server_ip: Arc<Mutex<Option<String>>>,
     control_bypass_ips: Arc<Mutex<Vec<String>>>,
+    managed_direct_ips: Arc<Mutex<Vec<String>>>,
+    route_update_lock: Arc<Mutex<()>>,
     physical_route: Arc<Mutex<Option<PhysicalRoute>>>,
     wintun_interface_index: Arc<Mutex<Option<u32>>>,
+    wintun_ipv6_interface_index: Arc<Mutex<Option<u32>>>,
     /// Bumps every time start() reaches Connected. Watchdog tasks compare
     /// against the snapshot they captured at spawn time and exit when the
     /// generation changes — so a watchdog from a previous session doesn't
@@ -114,8 +155,11 @@ impl VpnManager {
             tun2socks_process: Arc::new(Mutex::new(None)),
             server_ip: Arc::new(Mutex::new(None)),
             control_bypass_ips: Arc::new(Mutex::new(Vec::new())),
+            managed_direct_ips: Arc::new(Mutex::new(Vec::new())),
+            route_update_lock: Arc::new(Mutex::new(())),
             physical_route: Arc::new(Mutex::new(None)),
             wintun_interface_index: Arc::new(Mutex::new(None)),
+            wintun_ipv6_interface_index: Arc::new(Mutex::new(None)),
             session_gen: Arc::new(Mutex::new(0)),
             bin_dir,
             asset_dir,
@@ -136,14 +180,52 @@ impl VpnManager {
 
     /// Best-effort cleanup of leftovers from a crashed previous run.
     pub async fn cleanup_stale_state(&self) {
-        // If the wintun adapter is still around, drop its IP config and any
-        // default route pointing through it. Otherwise route detection can
-        // pick our own leftover route as the "real" gateway and the bypass
-        // ends up looping through ourselves.
-        if let Some(interface_index) = windows_routes::adapter_index_by_alias(WINTUN_ADAPTER) {
-            log_win!("[VPN-WIN] Stale wintun adapter detected, resetting");
-            self.reset_wintun_ipv4_config(interface_index).await;
-            self.reset_ipv6_tunnel(interface_index).await;
+        let mut errors = Vec::new();
+        // Always inspect the exact bundled executable paths. A crash between
+        // spawning Xray and opening its SOCKS port creates neither an adapter
+        // nor a reachable proxy, but the orphan would later race the next
+        // connection and could make its port-readiness probe accept the wrong
+        // process.
+        if let Err(error) = self.terminate_stale_sidecars().await {
+            errors.push(error);
+        }
+        // Probe after terminating sidecars. A stale tun2socks may have been in
+        // the middle of creating Wintun when startup cleanup began; probing
+        // before termination could miss the adapter and leave its DNS/address
+        // state behind while the firewall is removed below.
+        let stale_adapter = windows_routes::adapter_is_wintun(WINTUN_ADAPTER);
+        if stale_adapter {
+            if let Some(interface_index) = windows_routes::adapter_ipv4_index(WINTUN_ADAPTER) {
+                log_win!("[VPN-WIN] Stale Wintun IPv4 state detected, resetting");
+                if let Err(error) = Self::reset_system_dns(interface_index).await {
+                    errors.push(error);
+                }
+                if let Err(error) = self.reset_wintun_ipv4_config(interface_index).await {
+                    errors.push(error);
+                }
+            }
+            if let Some(interface_index) = windows_routes::adapter_ipv6_index(WINTUN_ADAPTER) {
+                if let Err(error) = self.reset_ipv6_tunnel(interface_index).await {
+                    errors.push(error);
+                }
+            }
+        }
+        if let Err(error) = windows_routes::delete_tagged_ipv4_routes(MANAGED_ROUTE_METRIC) {
+            errors.push(format!("stale managed route cleanup failed: {error}"));
+        }
+        if let Err(error) = windows_routes::delete_tagged_ipv6_routes(MANAGED_ROUTE_METRIC) {
+            errors.push(format!("stale managed IPv6 route cleanup failed: {error}"));
+        }
+        // Keep the firewall fail-closed if route/DNS cleanup was incomplete.
+        if errors.is_empty() {
+            if let Err(error) = Self::remove_killswitch().await {
+                errors.push(error);
+            }
+        }
+        if !errors.is_empty() {
+            let message = errors.join("; ");
+            log_win!("[VPN-WIN] stale cleanup failed: {message}");
+            self.set_state(VpnState::Error { message }).await;
         }
     }
 
@@ -155,6 +237,9 @@ impl VpnManager {
         // tcp_ping to a fixed IP. Routing is only mutated when a tunnel is
         // up; off-tunnel the OS already routes ping packets directly.
         let mapping = Self::resolve_hosts_to_ipv4_pairs(&hosts).await;
+        let _route_guard = self.route_update_lock.lock().await;
+        // State may have changed while DNS resolution or lock acquisition was
+        // in flight. Never recreate a physical bypass after Stop began.
         if !matches!(self.get_state().await, VpnState::Connected) {
             return Ok(mapping);
         }
@@ -182,25 +267,78 @@ impl VpnManager {
             .clone()
             .or_else(get_default_route)
             .ok_or("Could not detect the physical IPv4 route")?;
+        let physical_interface_alias = physical_route
+            .interface_alias
+            .clone()
+            .or_else(|| windows_routes::interface_alias_by_index(physical_route.interface_index))
+            .filter(|alias| !alias.trim().is_empty())
+            .ok_or("Could not resolve the physical adapter alias")?;
         log_win!("[VPN-WIN] Preparing {} direct ping routes", new_ips.len());
+        let mut routed_ips = Vec::new();
+        let rollback_routes = |ips: &[String]| -> Vec<String> {
+            let mut errors = Vec::new();
+            for ip in ips {
+                let Ok(destination) = ip.parse::<Ipv4Addr>() else {
+                    continue;
+                };
+                if let Err(error) = windows_routes::delete_managed_ipv4_route(
+                    destination,
+                    32,
+                    physical_route.gateway,
+                    physical_route.interface_index,
+                    MANAGED_ROUTE_METRIC,
+                ) {
+                    errors.push(format!(
+                        "could not roll back direct route for {ip}: {error}"
+                    ));
+                }
+            }
+            errors
+        };
         for ip in &new_ips {
             let destination = ip
                 .parse::<Ipv4Addr>()
                 .map_err(|e| format!("Invalid ping destination {ip}: {e}"))?;
-            windows_routes::replace_ipv4_route(
+            if let Err(error) = windows_routes::add_managed_ipv4_route(
                 destination,
                 32,
                 physical_route.gateway,
                 physical_route.interface_index,
-                1,
-            )
-            .map_err(|e| format!("Could not add direct ping route: {e}"))?;
+                MANAGED_ROUTE_METRIC,
+            ) {
+                let rollback_errors = rollback_routes(&routed_ips);
+                let mut message = format!("Could not add direct ping route: {error}");
+                if !rollback_errors.is_empty() {
+                    message.push_str(&format!("; cleanup failed: {}", rollback_errors.join("; ")));
+                }
+                return Err(message);
+            }
+            // Include an already-existing exact tagged route: it may be a
+            // remnant of an earlier partial call and is ours to roll back.
+            routed_ips.push(ip.clone());
+        }
+        if let Err(error) = self
+            .install_or_update_killswitch(&physical_interface_alias)
+            .await
+        {
+            let rollback_errors = rollback_routes(&routed_ips);
+            let mut message = error;
+            if !rollback_errors.is_empty() {
+                message.push_str(&format!("; cleanup failed: {}", rollback_errors.join("; ")));
+            }
+            return Err(message);
         }
 
-        let mut control_bypass_ips = self.control_bypass_ips.lock().await;
-        for ip in new_ips {
-            if !control_bypass_ips.contains(&ip) {
-                control_bypass_ips.push(ip);
+        {
+            let mut managed = self.managed_direct_ips.lock().await;
+            managed.extend(routed_ips);
+        }
+        {
+            let mut control_bypass_ips = self.control_bypass_ips.lock().await;
+            for ip in new_ips {
+                if !control_bypass_ips.contains(&ip) {
+                    control_bypass_ips.push(ip);
+                }
             }
         }
         Ok(mapping)
@@ -213,8 +351,6 @@ impl VpnManager {
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
-        // Reset the diagnostic log so users sharing it only ship the latest run.
-        let _ = std::fs::remove_file(log_path());
         log_win!("══════════════════════════════════════════════════");
         log_win!("[VPN-WIN] START called");
 
@@ -255,6 +391,12 @@ impl VpnManager {
                 return Err(e);
             }
         };
+        let resolved_server_ip = server_ip
+            .parse::<Ipv4Addr>()
+            .map_err(|_| "VPN server did not resolve to IPv4".to_string())?;
+        if !config::is_allowed_server_ipv4(resolved_server_ip) {
+            return Err("VPN server resolved to a non-public IPv4 address".into());
+        }
         log_win!("[VPN-WIN] Server address resolved");
         let mut control_bypass_ips = match bypass_res {
             Ok(ips) => ips,
@@ -265,26 +407,26 @@ impl VpnManager {
             "[VPN-WIN] Resolved {} configured direct-access destinations",
             control_bypass_ips.len()
         );
-        let physical_route =
+        let mut physical_route =
             get_default_route().ok_or("Could not detect the physical IPv4 route")?;
+        let physical_interface_alias = physical_route
+            .interface_alias
+            .clone()
+            .or_else(|| windows_routes::interface_alias_by_index(physical_route.interface_index))
+            .filter(|alias| !alias.trim().is_empty())
+            .ok_or("Could not resolve the physical adapter alias")?;
+        if physical_interface_alias.eq_ignore_ascii_case(WINTUN_ADAPTER) {
+            return Err("The physical route unexpectedly points to the VPN adapter".into());
+        }
+        physical_route.interface_alias = Some(physical_interface_alias.clone());
         log_win!(
             "[VPN-WIN] Physical route detected (ifIndex={}, metric={})",
             physical_route.interface_index,
             physical_route.metric
         );
         let direct_interface = if server.requires_direct_interface() {
-            let interface = match physical_route.interface_alias.clone() {
-                Some(interface) => interface,
-                None => windows_routes::interface_alias_by_index(physical_route.interface_index)
-                    .ok_or_else(|| {
-                        format!(
-                            "Could not resolve physical adapter alias for ifIndex {} via gateway {}",
-                            physical_route.interface_index, physical_route.gateway
-                        )
-                    })?,
-            };
             log_win!("[VPN-WIN] Direct routing interface detected");
-            Some(interface)
+            Some(physical_interface_alias)
         } else {
             None
         };
@@ -292,17 +434,37 @@ impl VpnManager {
             return Err(CONNECT_CANCELLED.into());
         }
 
+        let replaces_existing = matches!(
+            &prev_state,
+            VpnState::Connected | VpnState::Connecting | VpnState::Error { .. }
+        );
         match prev_state {
-            VpnState::Connected | VpnState::Connecting => {
-                log_win!("[VPN-WIN] Previous session active — stopping first");
+            VpnState::Connected | VpnState::Connecting | VpnState::Error { .. } => {
+                log_win!("[VPN-WIN] Previous/guarded session state — cleaning up first");
+                // Publish Connecting before releasing the route-update lock in
+                // force_stop. Otherwise an in-flight ping bypass request can
+                // observe the stale Connected state and recreate a physical
+                // route after the old session has already been torn down.
+                self.set_state(VpnState::Connecting).await;
                 self.bump_session_gen().await;
-                self.force_stop().await;
+                if let Err(error) = self.force_stop_preserving_killswitch().await {
+                    self.set_state(VpnState::Error {
+                        message: error.clone(),
+                    })
+                    .await;
+                    return Err(error);
+                }
             }
             _ => {}
         }
 
         if attempt.is_cancelled() {
-            self.set_state(VpnState::Disconnected).await;
+            if replaces_existing {
+                self.cleanup_failed_start(CONNECT_CANCELLED.into(), true)
+                    .await;
+            } else {
+                self.set_state(VpnState::Disconnected).await;
+            }
             return Err(CONNECT_CANCELLED.into());
         }
         self.set_state(VpnState::Connecting).await;
@@ -315,23 +477,50 @@ impl VpnManager {
         if let Some(interface) = direct_interface {
             server.direct_interface = interface;
         }
-        *self.server_ip.lock().await = Some(server_ip.clone());
-        *self.control_bypass_ips.lock().await = control_bypass_ips.clone();
-
-        // 1. xray config — written under per-user %LOCALAPPDATA%\ToBeVPN\
-        // (NOT %TEMP%). Contains the user's UUID; %TEMP% is per-user but is
-        // sometimes scraped by AV / cleanup tools and the dir is not as
-        // tightly ACL'd on multi-user boxes.
+        // Both endpoints are fixed localhost ports. Without an availability
+        // check, the readiness probe could connect to an unrelated process and
+        // then route the machine into that process before Xray's bind failure
+        // becomes observable.
+        let mut port_error = None;
+        for (port, label) in [(SOCKS_PORT, "SOCKS"), (STATS_API_PORT, "stats API")] {
+            if let Err(error) = attempt.ensure_active() {
+                port_error = Some(error);
+                break;
+            }
+            match tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
+                Ok(listener) => drop(listener),
+                Err(error) => {
+                    port_error = Some(format!(
+                        "Xray {label} port {port} is already in use: {error}"
+                    ));
+                    break;
+                }
+            }
+        }
+        if let Some(error) = port_error {
+            let cancelled = attempt.is_cancelled();
+            let message = self.cleanup_failed_start(error, cancelled).await;
+            return if cancelled {
+                Err(CONNECT_CANCELLED.into())
+            } else {
+                Err(message)
+            };
+        }
+        // 1. Keep the credential-bearing Xray config in memory and send it
+        // over an anonymous pipe. This avoids both plaintext-at-rest and an
+        // elevated write through a user-controlled directory junction.
         let config_json = config::build_xray_config(&server);
-        let config_path = app_data_dir().join("xray.json");
-        std::fs::write(&config_path, &config_json)
-            .map_err(|e| format!("Failed to write xray config: {e}"))?;
         if attempt.is_cancelled() {
-            self.set_state(VpnState::Disconnected).await;
+            self.cleanup_failed_start(CONNECT_CANCELLED.into(), true)
+                .await;
             return Err(CONNECT_CANCELLED.into());
         }
 
         let asset_dir = self.find_asset_dir();
+        if let Err(error) = ensure_trusted_runtime_directory(&asset_dir, "Xray asset directory") {
+            let message = self.cleanup_failed_start(error, false).await;
+            return Err(message);
+        }
         log_win!(
             "[VPN-WIN] asset dir: {:?} (geoip.dat: {}, geosite.dat: {})",
             asset_dir,
@@ -341,28 +530,59 @@ impl VpnManager {
         if server.requires_geosite_assets() && !asset_dir.join("geosite.dat").is_file() {
             let message = format!("Routing database is missing from {}", asset_dir.display());
             log_win!("[VPN-WIN] ERROR: {message}");
-            self.set_state(VpnState::Error {
-                message: message.clone(),
-            })
-            .await;
+            let message = self.cleanup_failed_start(message, false).await;
             return Err(message);
         }
 
         // 2. xray.exe
         let xray_bin = self.resolve_bin("xray");
+        if let Err(error) = ensure_trusted_runtime_file(&xray_bin, "xray.exe") {
+            let message = self.cleanup_failed_start(error, false).await;
+            return Err(message);
+        }
         log_win!("[VPN-WIN] xray binary: {:?}", xray_bin);
 
-        let mut xray_child = Command::new(&xray_bin)
+        let mut xray_child = match Command::new(&xray_bin)
             .arg("run")
             .arg("-config")
-            .arg(&config_path)
+            .arg("stdin:")
             .env("XRAY_LOCATION_ASSET", &asset_dir)
-            .stdout(Stdio::piped())
+            // Xray logs to stderr; an unread stdout pipe can fill and freeze
+            // the process indefinitely.
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .stdin(Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW)
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("Failed to start xray: {e}"))?;
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let message = format!("Failed to start xray: {error}");
+                let message = self.cleanup_failed_start(message, false).await;
+                return Err(message);
+            }
+        };
+
+        let config_write: Result<(), String> = match xray_child.stdin.take() {
+            Some(mut stdin) => match timeout(
+                XRAY_CONFIG_WRITE_TIMEOUT,
+                stdin.write_all(config_json.as_bytes()),
+            )
+            .await
+            {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("timed out while writing Xray configuration".into()),
+            },
+            None => Err("Xray stdin was not created".into()),
+        };
+        if let Err(error) = config_write {
+            let _ = terminate_child_bounded(&mut xray_child, "xray").await;
+            let message = format!("Failed to send Xray configuration: {error}");
+            let message = self.cleanup_failed_start(message, false).await;
+            return Err(message);
+        }
 
         if let Some(stderr) = xray_child.stderr.take() {
             tokio::spawn(async move {
@@ -374,21 +594,31 @@ impl VpnManager {
         }
         *self.xray_process.lock().await = Some(xray_child);
         if attempt.is_cancelled() {
-            self.force_stop().await;
-            self.set_state(VpnState::Disconnected).await;
+            self.cleanup_failed_start(CONNECT_CANCELLED.into(), true)
+                .await;
             return Err(CONNECT_CANCELLED.into());
         }
 
         // 3. wait for SOCKS port
         if let Err(e) = wait_for_port(SOCKS_PORT, Duration::from_secs(10), attempt).await {
-            self.force_stop().await;
-            if attempt.is_cancelled() {
-                self.set_state(VpnState::Disconnected).await;
+            let cancelled = attempt.is_cancelled();
+            let message = self.cleanup_failed_start(e, cancelled).await;
+            return if cancelled {
+                Err(CONNECT_CANCELLED.into())
             } else {
-                self.set_state(VpnState::Error { message: e.clone() }).await;
-            }
-            return Err(e);
+                Err(message)
+            };
         }
+        if let Err(e) = wait_for_port(STATS_API_PORT, Duration::from_secs(5), attempt).await {
+            let cancelled = attempt.is_cancelled();
+            let message = self.cleanup_failed_start(e, cancelled).await;
+            return if cancelled {
+                Err(CONNECT_CANCELLED.into())
+            } else {
+                Err(message)
+            };
+        }
+        sleep(Duration::from_millis(150)).await;
 
         {
             let mut proc = self.xray_process.lock().await;
@@ -397,24 +627,20 @@ impl VpnManager {
                     Ok(Some(status)) => {
                         *proc = None;
                         drop(proc);
-                        self.force_stop().await;
-                        let msg = format!("xray exited immediately with {status}");
-                        self.set_state(VpnState::Error {
-                            message: msg.clone(),
-                        })
-                        .await;
+                        let msg = self
+                            .cleanup_failed_start(
+                                format!("xray exited immediately with {status}"),
+                                false,
+                            )
+                            .await;
                         return Err(msg);
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        *proc = None;
                         drop(proc);
-                        self.force_stop().await;
-                        let msg = format!("xray process check failed: {e}");
-                        self.set_state(VpnState::Error {
-                            message: msg.clone(),
-                        })
-                        .await;
+                        let msg = self
+                            .cleanup_failed_start(format!("xray process check failed: {e}"), false)
+                            .await;
                         return Err(msg);
                     }
                 }
@@ -426,18 +652,23 @@ impl VpnManager {
             .start_tun(&server_ip, &control_bypass_ips, &physical_route, attempt)
             .await
         {
-            self.force_stop().await;
-            if attempt.is_cancelled() {
-                self.set_state(VpnState::Disconnected).await;
+            let cancelled = attempt.is_cancelled();
+            let message = self.cleanup_failed_start(e, cancelled).await;
+            return if cancelled {
+                Err(CONNECT_CANCELLED.into())
             } else {
-                self.set_state(VpnState::Error { message: e.clone() }).await;
-            }
-            return Err(e);
+                Err(message)
+            };
         }
 
+        *self.server_ip.lock().await = Some(server_ip.clone());
+        *self.control_bypass_ips.lock().await = control_bypass_ips.clone();
+
         if attempt.is_cancelled() {
-            self.force_stop().await;
-            self.set_state(VpnState::Disconnected).await;
+            match self.force_stop().await {
+                Ok(()) => self.set_state(VpnState::Disconnected).await,
+                Err(message) => self.set_state(VpnState::Error { message }).await,
+            }
             return Err(CONNECT_CANCELLED.into());
         }
         self.set_state(VpnState::Connected).await;
@@ -480,8 +711,11 @@ impl VpnManager {
             tun2socks_process: self.tun2socks_process.clone(),
             server_ip: self.server_ip.clone(),
             control_bypass_ips: self.control_bypass_ips.clone(),
+            managed_direct_ips: self.managed_direct_ips.clone(),
+            route_update_lock: self.route_update_lock.clone(),
             physical_route: self.physical_route.clone(),
             wintun_interface_index: self.wintun_interface_index.clone(),
+            wintun_ipv6_interface_index: self.wintun_ipv6_interface_index.clone(),
             session_gen: self.session_gen.clone(),
             bin_dir: self.bin_dir.clone(),
             asset_dir: self.asset_dir.clone(),
@@ -521,10 +755,20 @@ impl VpnManager {
                     log_win!("[VPN-WIN-WATCHDOG] {msg} — running force_stop to kill switch");
                     // Critical: tear down routing/bypass so the user is NOT
                     // bridged onto the physical NIC after wintun disappears.
-                    manager_clone.force_stop().await;
-                    *state.lock().await = VpnState::Error {
-                        message: format!("VPN process stopped unexpectedly: {msg}"),
-                    };
+                    // An unexpected process death is not a user-requested
+                    // disconnect. Keep the blackhole/DNS guard installed
+                    // while tearing down stale tunnel state, otherwise a
+                    // partial cleanup would silently fail open to the LAN.
+                    let cleanup_error =
+                        manager_clone.force_stop_preserving_killswitch().await.err();
+                    let message = cleanup_error
+                        .map(|cleanup| {
+                            format!(
+                            "VPN process stopped unexpectedly: {msg}; cleanup failed: {cleanup}"
+                        )
+                        })
+                        .unwrap_or_else(|| format!("VPN process stopped unexpectedly: {msg}"));
+                    *state.lock().await = VpnState::Error { message };
                     if let Some(h) = &*app.lock().await {
                         use tauri::Emitter;
                         let _ = h.emit("vpn-died", &msg);
@@ -542,26 +786,39 @@ impl VpnManager {
         // teardown.
         self.bump_session_gen().await;
         self.set_state(VpnState::Disconnecting).await;
-        self.force_stop().await;
-        self.set_state(VpnState::Disconnected).await;
-        Ok(())
+        match self.force_stop().await {
+            Ok(()) => {
+                self.set_state(VpnState::Disconnected).await;
+                Ok(())
+            }
+            Err(message) => {
+                self.set_state(VpnState::Error {
+                    message: message.clone(),
+                })
+                .await;
+                Err(message)
+            }
+        }
     }
 
     pub async fn query_stats(&self) -> Option<TrafficStats> {
         let xray_bin = self.resolve_bin("xray");
+        if ensure_trusted_runtime_file(&xray_bin, "xray.exe").is_err() {
+            return None;
+        }
         let server_addr = format!("127.0.0.1:{}", STATS_API_PORT);
-        let up = query_stat_value(
-            &xray_bin,
-            &server_addr,
-            "outbound>>>proxy>>>traffic>>>uplink",
-        )
-        .await;
-        let down = query_stat_value(
-            &xray_bin,
-            &server_addr,
-            "outbound>>>proxy>>>traffic>>>downlink",
-        )
-        .await;
+        let (up, down) = tokio::join!(
+            query_stat_value(
+                &xray_bin,
+                &server_addr,
+                "outbound>>>proxy>>>traffic>>>uplink",
+            ),
+            query_stat_value(
+                &xray_bin,
+                &server_addr,
+                "outbound>>>proxy>>>traffic>>>downlink",
+            )
+        );
         Some(TrafficStats {
             uplink: up,
             downlink: down,
@@ -573,6 +830,9 @@ impl VpnManager {
     /// release.
     pub async fn xray_version(&self) -> String {
         let xray_bin = self.resolve_bin("xray");
+        if ensure_trusted_runtime_file(&xray_bin, "xray.exe").is_err() {
+            return "unknown".into();
+        }
         let output = match timeout(
             Duration::from_secs(2),
             Command::new(xray_bin)
@@ -594,14 +854,203 @@ impl VpnManager {
         *self.state.lock().await = state;
     }
 
+    /// Tear down every partially-created resource and publish a state that
+    /// matches the actual cleanup result. This is intentionally shared by all
+    /// post-switch failure paths: a preserved transition kill switch must not
+    /// survive a failed/cancelled replacement indefinitely.
+    async fn cleanup_failed_start(&self, primary: String, _cancelled: bool) -> String {
+        let cleanup_result = self.force_stop().await;
+        let cleanup_succeeded = cleanup_result.is_ok();
+        let message = match cleanup_result {
+            Ok(()) => primary,
+            Err(cleanup) => format!("{primary}; cleanup failed: {cleanup}"),
+        };
+        // Native state describes the resources that remain, not why Start
+        // failed. A fully committed cleanup is Disconnected even for a normal
+        // (non-cancellation) startup error; the frontend carries the error.
+        if cleanup_succeeded {
+            self.set_state(VpnState::Disconnected).await;
+        } else {
+            self.set_state(VpnState::Error {
+                message: message.clone(),
+            })
+            .await;
+        }
+        message
+    }
+
     async fn bump_session_gen(&self) {
         let mut g = self.session_gen.lock().await;
         *g = g.wrapping_add(1);
     }
 
-    async fn reset_wintun_ipv4_config(&self, interface_index: u32) {
+    async fn install_or_update_killswitch(
+        &self,
+        physical_interface_alias: &str,
+    ) -> Result<(), String> {
+        Self::install_killswitch_routes()?;
+
+        // Route guards cannot prevent Windows' multi-homed DNS client from
+        // querying a LAN resolver through a more-specific subnet route. Block
+        // classic DNS on every installed non-tunnel adapter (including a
+        // currently disconnected NIC that may become active mid-session).
+        // Broad InterfaceType rules can also classify Wintun itself as
+        // Wired/RemoteAccess and accidentally block the tunnel's own DNS.
+        let script = format!(
+            r#"$ErrorActionPreference = 'Stop'
+$rawInterfaceAlias = $env:TOBEVPN_PHYSICAL_INTERFACE
+if ([string]::IsNullOrWhiteSpace($rawInterfaceAlias)) {{ throw 'physical interface alias is missing' }}
+$adapterAliases = @($rawInterfaceAlias)
+try {{
+  $adapterAliases += @(Get-NetAdapter -ErrorAction Stop | Where-Object {{ $_.Name -ne 'ToBeVPN' }} | ForEach-Object {{ $_.Name }})
+}} catch {{}}
+$interfaceAliases = @($adapterAliases | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }} | Sort-Object -Unique | ForEach-Object {{ [WildcardPattern]::Escape($_) }})
+$udp = Get-NetFirewallRule -Name '{udp}' -ErrorAction SilentlyContinue
+if ($null -eq $udp) {{
+  New-NetFirewallRule -Name '{udp}' -DisplayName 'ToBeVPN DNS leak guard (UDP)' -Group 'ToBeVPN' -Direction Outbound -Action Block -Enabled True -Profile Any -InterfaceAlias $interfaceAliases -Protocol UDP -RemotePort 53 -RemoteAddress LocalSubnet | Out-Null
+}} else {{
+  $udp | Set-NetFirewallRule -Enabled True -Profile Any -Direction Outbound -Action Block -InterfaceType Any -InterfaceAlias $interfaceAliases -Protocol UDP -RemotePort 53 -RemoteAddress LocalSubnet | Out-Null
+}}
+$tcp = Get-NetFirewallRule -Name '{tcp}' -ErrorAction SilentlyContinue
+if ($null -eq $tcp) {{
+  New-NetFirewallRule -Name '{tcp}' -DisplayName 'ToBeVPN DNS leak guard (TCP)' -Group 'ToBeVPN' -Direction Outbound -Action Block -Enabled True -Profile Any -InterfaceAlias $interfaceAliases -Protocol TCP -RemotePort 53 -RemoteAddress LocalSubnet | Out-Null
+}} else {{
+  $tcp | Set-NetFirewallRule -Enabled True -Profile Any -Direction Outbound -Action Block -InterfaceType Any -InterfaceAlias $interfaceAliases -Protocol TCP -RemotePort 53 -RemoteAddress LocalSubnet | Out-Null
+}}"#,
+            udp = DNS_GUARD_UDP_RULE,
+            tcp = DNS_GUARD_TCP_RULE,
+        );
+        run_powershell(
+            &script,
+            &[("TOBEVPN_PHYSICAL_INTERFACE", physical_interface_alias)],
+            "install Windows DNS leak guard",
+        )
+        .await
+    }
+
+    fn install_killswitch_routes() -> Result<(), String> {
+        let loopback_v4 = windows_routes::loopback_ipv4_index()
+            .ok_or("Windows loopback IPv4 interface was not found")?;
+        for destination in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(128, 0, 0, 0)] {
+            windows_routes::add_managed_ipv4_route(
+                destination,
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                loopback_v4,
+                KILLSWITCH_ROUTE_METRIC,
+            )
+            .map_err(|e| format!("Could not add IPv4 kill-switch route: {e}"))?;
+        }
+        if let Some(loopback_v6) = windows_routes::loopback_ipv6_index() {
+            windows_routes::add_managed_ipv6_route(
+                WINTUN_PUBLIC_IPV6_ROUTE,
+                WINTUN_PUBLIC_IPV6_PREFIX,
+                loopback_v6,
+                KILLSWITCH_ROUTE_METRIC,
+            )
+            .map_err(|e| format!("Could not add IPv6 kill-switch route: {e}"))?;
+        }
+        Ok(())
+    }
+
+    async fn install_failure_dns_guard() -> Result<(), String> {
+        // Cleanup has already failed, so prefer a strict all-interface DNS
+        // block over a partially removed adapter-scoped rule. A later normal
+        // start rewrites these same named rules back to the physical-adapter
+        // scope, while a successful Stop removes them.
+        let script = format!(
+            r#"$ErrorActionPreference = 'Stop'
+$udp = Get-NetFirewallRule -Name '{udp}' -ErrorAction SilentlyContinue
+if ($null -eq $udp) {{
+  New-NetFirewallRule -Name '{udp}' -DisplayName 'ToBeVPN DNS leak guard (UDP)' -Group 'ToBeVPN' -Direction Outbound -Action Block -Enabled True -Profile Any -InterfaceType Any -Protocol UDP -RemotePort 53 -RemoteAddress Any | Out-Null
+}} else {{
+  $udp | Set-NetFirewallRule -Enabled True -Profile Any -Direction Outbound -Action Block -InterfaceType Any -InterfaceAlias Any -Protocol UDP -RemotePort 53 -RemoteAddress Any | Out-Null
+}}
+$tcp = Get-NetFirewallRule -Name '{tcp}' -ErrorAction SilentlyContinue
+if ($null -eq $tcp) {{
+  New-NetFirewallRule -Name '{tcp}' -DisplayName 'ToBeVPN DNS leak guard (TCP)' -Group 'ToBeVPN' -Direction Outbound -Action Block -Enabled True -Profile Any -InterfaceType Any -Protocol TCP -RemotePort 53 -RemoteAddress Any | Out-Null
+}} else {{
+  $tcp | Set-NetFirewallRule -Enabled True -Profile Any -Direction Outbound -Action Block -InterfaceType Any -InterfaceAlias Any -Protocol TCP -RemotePort 53 -RemoteAddress Any | Out-Null
+}}"#,
+            udp = DNS_GUARD_UDP_RULE,
+            tcp = DNS_GUARD_TCP_RULE,
+        );
+        run_powershell(&script, &[], "restore Windows DNS failure guard").await
+    }
+
+    async fn remove_killswitch() -> Result<(), String> {
+        let mut errors = Vec::new();
+        if let Err(error) = windows_routes::delete_tagged_ipv4_routes(KILLSWITCH_ROUTE_METRIC) {
+            errors.push(format!("remove IPv4 kill-switch routes: {error}"));
+        }
+        if let Err(error) = windows_routes::delete_tagged_ipv6_routes(KILLSWITCH_ROUTE_METRIC) {
+            errors.push(format!("remove IPv6 kill-switch routes: {error}"));
+        }
+        let script = format!(
+            r#"$ErrorActionPreference = 'Stop'
+Get-NetFirewallRule -Name '{udp}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+Get-NetFirewallRule -Name '{tcp}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule"#,
+            udp = DNS_GUARD_UDP_RULE,
+            tcp = DNS_GUARD_TCP_RULE,
+        );
+        if let Err(error) = run_powershell(&script, &[], "remove Windows DNS leak guard").await {
+            errors.push(error);
+        }
+        if errors.is_empty() {
+            return Ok(());
+        }
+
+        // Route/firewall deletion is not atomic. If any step failed, recreate
+        // both blackhole families and both DNS firewall rules so a half-removed
+        // kill switch cannot expose a subset of traffic while native state
+        // reports Error.
+        if let Err(error) = Self::install_killswitch_routes() {
+            errors.push(format!(
+                "restore kill-switch routes after cleanup failure: {error}"
+            ));
+        }
+        if let Err(error) = Self::install_failure_dns_guard().await {
+            errors.push(format!(
+                "restore DNS firewall after cleanup failure: {error}"
+            ));
+        }
+        Err(errors.join("; "))
+    }
+
+    async fn configure_system_dns(interface_index: u32) -> Result<(), String> {
+        let index = interface_index.to_string();
+        let script = r#"$ErrorActionPreference = 'Stop'
+$index = [uint32]$env:TOBEVPN_INTERFACE_INDEX
+Set-DnsClientServerAddress -InterfaceIndex $index -ServerAddresses @('1.1.1.1','8.8.8.8')
+Set-DnsClient -InterfaceIndex $index -RegisterThisConnectionsAddress $false"#;
+        run_powershell(
+            script,
+            &[("TOBEVPN_INTERFACE_INDEX", index.as_str())],
+            "configure tunnel DNS",
+        )
+        .await
+    }
+
+    async fn reset_system_dns(interface_index: u32) -> Result<(), String> {
+        let index = interface_index.to_string();
+        let script = r#"$ErrorActionPreference = 'Stop'
+$index = [uint32]$env:TOBEVPN_INTERFACE_INDEX
+$adapter = Get-DnsClient -InterfaceIndex $index -ErrorAction SilentlyContinue
+if ($null -ne $adapter) {
+  Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses
+}"#;
+        run_powershell(
+            script,
+            &[("TOBEVPN_INTERFACE_INDEX", index.as_str())],
+            "restore tunnel DNS",
+        )
+        .await
+    }
+
+    async fn reset_wintun_ipv4_config(&self, interface_index: u32) -> Result<(), String> {
+        let mut errors = Vec::new();
         if let Err(error) = windows_routes::delete_interface_ipv4_addresses(interface_index) {
-            log_win!("[TUN-WIN] IPv4 address reset failed: {error}");
+            errors.push(format!("IPv4 address reset failed: {error}"));
         }
         for (destination, prefix_length) in [
             (Ipv4Addr::UNSPECIFIED, 0),
@@ -613,12 +1062,17 @@ impl VpnManager {
                 prefix_length,
                 Some(interface_index),
             ) {
-                log_win!("[TUN-WIN] IPv4 route reset failed: {error}");
+                errors.push(format!("IPv4 route reset failed: {error}"));
             }
         }
         // Do not switch Wintun to DHCP here: there is no DHCP server behind
         // this adapter, and Windows can spend seconds probing before we set
         // the static tunnel address immediately below.
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     async fn configure_wintun_ipv4_interface(&self, interface_index: u32) {
@@ -650,6 +1104,59 @@ impl VpnManager {
         }
         self.bin_dir
             .join(format!("{}-x86_64-pc-windows-msvc.exe", name))
+    }
+
+    async fn terminate_stale_sidecars(&self) -> Result<(), String> {
+        let candidates = [
+            self.bin_dir.join("xray.exe"),
+            self.bin_dir.join("xray-x86_64-pc-windows-msvc.exe"),
+            self.bin_dir.join("tun2socks.exe"),
+            self.bin_dir.join("tun2socks-x86_64-pc-windows-msvc.exe"),
+        ];
+        let mut targets = Vec::new();
+        for path in candidates {
+            if let Ok(canonical) = path.canonicalize() {
+                let value = canonical.to_string_lossy().into_owned();
+                if !targets
+                    .iter()
+                    .any(|target: &String| target.eq_ignore_ascii_case(&value))
+                {
+                    targets.push(value);
+                }
+            }
+        }
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let joined = targets.join("\n");
+        let script = r#"$ErrorActionPreference = 'Stop'
+$targets = @($env:TOBEVPN_STALE_SIDECARS -split "`n" | Where-Object { $_ })
+$failures = @()
+foreach ($process in Get-Process -ErrorAction Stop) {
+  try { $path = $process.Path } catch { continue }
+  if (-not $path) { continue }
+  $matches = $false
+  foreach ($target in $targets) {
+    if ([string]::Equals($path, $target, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $matches = $true
+      break
+    }
+  }
+  if (-not $matches) { continue }
+  try {
+    Stop-Process -InputObject $process -Force -ErrorAction Stop
+    Wait-Process -Id $process.Id -Timeout 5 -ErrorAction SilentlyContinue
+  } catch {
+    $failures += "$($process.Id):$($_.Exception.Message)"
+  }
+}
+if ($failures.Count -gt 0) { throw "sidecar termination failed: $($failures -join ',')" }"#;
+        run_powershell(
+            script,
+            &[("TOBEVPN_STALE_SIDECARS", joined.as_str())],
+            "terminate stale ToBeVPN sidecars",
+        )
+        .await
     }
 
     fn find_asset_dir(&self) -> PathBuf {
@@ -716,6 +1223,9 @@ impl VpnManager {
                 continue;
             }
             if let Ok(ip) = trimmed.parse::<std::net::Ipv4Addr>() {
+                if !config::is_allowed_server_ipv4(ip) {
+                    return Err("Direct-access destination resolved to a non-public IPv4".into());
+                }
                 ips.insert(ip.to_string());
                 continue;
             }
@@ -730,7 +1240,19 @@ impl VpnManager {
                 _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
             };
             match result {
-                Ok(Ok(found)) => ips.extend(found),
+                Ok(Ok(found)) => {
+                    for value in found {
+                        let ip = value.parse::<std::net::Ipv4Addr>().map_err(|_| {
+                            "Direct-access destination returned an invalid IPv4".to_string()
+                        })?;
+                        if !config::is_allowed_server_ipv4(ip) {
+                            return Err(
+                                "Direct-access destination resolved to a non-public IPv4".into()
+                            );
+                        }
+                        ips.insert(ip.to_string());
+                    }
+                }
                 Ok(Err(_)) | Err(_) => {
                     log_win!("[VPN-WIN] Direct-access destination DNS lookup failed")
                 }
@@ -741,7 +1263,7 @@ impl VpnManager {
 
     /// Resolve each host to its first IPv4 address, preserving the input
     /// host string. Hosts that fail to resolve or that are IPv6-only are
-    /// omitted — the JS caller falls back to the hostname for ping.
+    /// omitted — callers must not fall back to another DNS lookup.
     async fn resolve_hosts_to_ipv4_pairs(hosts: &[String]) -> Vec<PingHostMapping> {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
@@ -754,7 +1276,10 @@ impl VpnManager {
             if !seen.insert(trimmed.to_string()) {
                 continue;
             }
-            if trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
+            if trimmed
+                .parse::<std::net::Ipv4Addr>()
+                .is_ok_and(config::is_allowed_server_ipv4)
+            {
                 out.push(PingHostMapping {
                     host: trimmed.to_string(),
                     ip: trimmed.to_string(),
@@ -766,7 +1291,13 @@ impl VpnManager {
                 let ip = Self::lookup_ipv4s(host.clone(), 443, BYPASS_DNS_RESOLVE_TIMEOUT)
                     .await
                     .ok()
-                    .and_then(|ips| ips.into_iter().next());
+                    .and_then(|ips| {
+                        ips.into_iter().find(|value| {
+                            value
+                                .parse::<std::net::Ipv4Addr>()
+                                .is_ok_and(config::is_allowed_server_ipv4)
+                        })
+                    });
                 ip.map(|ip| PingHostMapping { host, ip })
             }));
         }
@@ -788,6 +1319,7 @@ impl VpnManager {
     ) -> Result<(), String> {
         attempt.ensure_active()?;
         let tun2socks_bin = self.resolve_bin("tun2socks");
+        ensure_trusted_runtime_file(&tun2socks_bin, "tun2socks.exe")?;
         log_win!("[TUN-WIN] tun2socks binary: {:?}", tun2socks_bin);
 
         // wintun.dll must sit next to tun2socks.exe at runtime.
@@ -802,19 +1334,34 @@ impl VpnManager {
         direct_ips.extend(control_bypass_ips.iter().cloned());
         direct_ips.sort();
         direct_ips.dedup();
+        self.managed_direct_ips.lock().await.clear();
         for ip in &direct_ips {
             let destination = ip
                 .parse::<Ipv4Addr>()
                 .map_err(|e| format!("Invalid direct-access destination {ip}: {e}"))?;
-            windows_routes::replace_ipv4_route(
+            let created = windows_routes::add_managed_ipv4_route(
                 destination,
                 32,
                 physical_route.gateway,
                 physical_route.interface_index,
-                1,
+                MANAGED_ROUTE_METRIC,
             )
             .map_err(|e| format!("Could not add direct-access route: {e}"))?;
+            if created {
+                self.managed_direct_ips.lock().await.push(ip.clone());
+            }
         }
+        attempt.ensure_active()?;
+
+        // Install the fail-closed firewall before the Wintun lifecycle starts.
+        // Only the VPN server/control endpoints may leave through a physical
+        // interface; if tun2socks disappears, application traffic stays blocked.
+        let physical_interface_alias = physical_route
+            .interface_alias
+            .as_deref()
+            .ok_or("Physical adapter alias is unavailable")?;
+        self.install_or_update_killswitch(physical_interface_alias)
+            .await?;
         attempt.ensure_active()?;
 
         // Spawn tun2socks. It creates the wintun adapter on first packet.
@@ -874,7 +1421,11 @@ impl VpnManager {
                 if windows_routes::ipv4_interface_ready(idx) {
                     // Clear stale config on this interface, then claim the
                     // tunnel address. Success proves this is the live adapter.
-                    self.reset_wintun_ipv4_config(idx).await;
+                    if let Err(error) = self.reset_wintun_ipv4_config(idx).await {
+                        last_err = Some(error);
+                        sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
                     match windows_routes::ensure_ipv4_address(idx, WINTUN_IP, 30) {
                         Ok(()) => break idx,
                         Err(e) => {
@@ -912,20 +1463,27 @@ impl VpnManager {
             "[TUN-WIN] wintun ifIndex={}, installing split-default",
             wintun_idx
         );
-        windows_routes::replace_ipv4_route(Ipv4Addr::UNSPECIFIED, 1, WINTUN_GATEWAY, wintun_idx, 1)
-            .map_err(|e| format!("Could not add 0.0.0.0/1 tunnel route: {e}"))?;
+        windows_routes::add_managed_ipv4_route(
+            Ipv4Addr::UNSPECIFIED,
+            1,
+            WINTUN_GATEWAY,
+            wintun_idx,
+            MANAGED_ROUTE_METRIC,
+        )
+        .map_err(|e| format!("Could not add 0.0.0.0/1 tunnel route: {e}"))?;
         attempt.ensure_active()?;
-        windows_routes::replace_ipv4_route(
+        windows_routes::add_managed_ipv4_route(
             Ipv4Addr::new(128, 0, 0, 0),
             1,
             WINTUN_GATEWAY,
             wintun_idx,
-            1,
+            MANAGED_ROUTE_METRIC,
         )
         .map_err(|e| format!("Could not add 128.0.0.0/1 tunnel route: {e}"))?;
         attempt.ensure_active()?;
 
         self.configure_ipv6_tunnel(attempt).await?;
+        Self::configure_system_dns(wintun_idx).await?;
 
         Ok(())
     }
@@ -933,9 +1491,10 @@ impl VpnManager {
     async fn configure_ipv6_tunnel(&self, attempt: &ConnectAttempt) -> Result<(), String> {
         attempt.ensure_active()?;
 
-        // IPv6 is best-effort: on hosts with IPv6 disabled the stack may never
-        // bind to the wintun interface. Do not let that block an otherwise
-        // healthy IPv4 tunnel — wait briefly, then skip if it never appears.
+        // Physical IPv6 is already blocked by the kill switch. If Windows has
+        // IPv6 disabled, the Wintun stack may never bind and IPv4 can continue
+        // safely. Once an IPv6 interface does appear, however, every setup
+        // failure is fatal rather than silently advertising a leaky tunnel.
         // Resolve the dedicated IPv6 interface index (Ipv6IfIndex); it can
         // differ from the IPv4 IfIndex, so we must not reuse the IPv4 one here.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -947,105 +1506,162 @@ impl VpnManager {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                log_win!("[TUN-WIN] IPv6 interface not ready, skipping IPv6 tunnel config");
+                log_win!("[TUN-WIN] IPv6 interface not ready; physical IPv6 remains kill-switched");
                 return Ok(());
             }
             sleep(Duration::from_millis(200)).await;
         };
         attempt.ensure_active()?;
 
-        self.reset_ipv6_tunnel(interface_index).await;
+        *self.wintun_ipv6_interface_index.lock().await = Some(interface_index);
+        self.reset_ipv6_tunnel(interface_index).await?;
         attempt.ensure_active()?;
 
         // Retry the address like IPv4: it can transiently report 1168 while the
-        // interface settles. Failures here are logged, not fatal.
+        // interface settles.
         let addr_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
             match windows_routes::ensure_ipv6_address(interface_index, WINTUN_IPV6, 64) {
                 Ok(()) => break,
                 Err(error) => {
                     if tokio::time::Instant::now() >= addr_deadline {
-                        log_win!("[TUN-WIN] IPv6 address configuration failed: {error}");
-                        return Ok(());
+                        return Err(format!("IPv6 address configuration failed: {error}"));
                     }
                     sleep(Duration::from_millis(200)).await;
                 }
             }
         }
-        if let Err(error) = windows_routes::set_ipv6_interface_metric(interface_index, 1) {
-            log_win!("[TUN-WIN] IPv6 metric configuration failed: {error}");
-        }
-        if let Err(error) = windows_routes::replace_ipv6_route(
+        windows_routes::set_ipv6_interface_metric(interface_index, 1)
+            .map_err(|error| format!("IPv6 metric configuration failed: {error}"))?;
+        windows_routes::add_managed_ipv6_route(
             WINTUN_PUBLIC_IPV6_ROUTE,
             WINTUN_PUBLIC_IPV6_PREFIX,
             interface_index,
-            1,
-        ) {
-            log_win!("[TUN-WIN] IPv6 tunnel route configuration failed: {error}");
-        }
+            MANAGED_ROUTE_METRIC,
+        )
+        .map_err(|error| format!("IPv6 tunnel route configuration failed: {error}"))?;
 
         Ok(())
     }
 
-    async fn reset_ipv6_tunnel(&self, interface_index: u32) {
-        if let Err(error) = windows_routes::delete_ipv6_routes(
+    async fn reset_ipv6_tunnel(&self, interface_index: u32) -> Result<(), String> {
+        let mut errors = Vec::new();
+        if let Err(error) = windows_routes::delete_managed_ipv6_route(
             WINTUN_PUBLIC_IPV6_ROUTE,
             WINTUN_PUBLIC_IPV6_PREFIX,
-            Some(interface_index),
+            interface_index,
+            MANAGED_ROUTE_METRIC,
         ) {
-            log_win!("[TUN-WIN] IPv6 route reset failed: {error}");
+            errors.push(format!("IPv6 route reset failed: {error}"));
         }
         if let Err(error) =
             windows_routes::delete_interface_ipv6_address(interface_index, WINTUN_IPV6)
         {
-            log_win!("[TUN-WIN] IPv6 address reset failed: {error}");
+            errors.push(format!("IPv6 address reset failed: {error}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
         }
     }
 
-    /// Tauri puts wintun.dll in the resources dir, but tun2socks looks for it
-    /// next to its own .exe. Copy it on first connect (idempotent).
+    /// `wintun.dll` must be installed next to tun2socks. The Windows bundle
+    /// maps the resource directly into that directory so the elevated runtime
+    /// never needs to copy files into Program Files on first connection.
     fn ensure_wintun_dll(&self, tun2socks_path: &PathBuf) -> Result<(), String> {
         let dest = tun2socks_path
             .parent()
             .ok_or("tun2socks path has no parent")?
             .join("wintun.dll");
-        if dest.exists() {
-            return Ok(());
-        }
-
-        // Cover all Tauri NSIS resource layouts we have observed:
-        //   <install_dir>\wintun.dll                       (next to exe)
-        //   <install_dir>\bin\wintun.dll                   (resources kept their bin/ prefix)
-        //   <install_dir>\resources\bin\wintun.dll         (NSIS resources sub-dir)
-        //   <install_dir>\resources\wintun.dll
-        //   legacy: bin_dir = <install_dir>\resources\bin
-        let candidates = [
-            self.bin_dir.join("wintun.dll"),
-            self.bin_dir.join("bin").join("wintun.dll"),
-            self.bin_dir
-                .join("resources")
-                .join("bin")
-                .join("wintun.dll"),
-            self.bin_dir.join("resources").join("wintun.dll"),
-            self.bin_dir.join("../resources/bin/wintun.dll"),
-            self.bin_dir.join("../resources/wintun.dll"),
-        ];
-        for src in &candidates {
-            if src.exists() {
-                std::fs::copy(src, &dest)
-                    .map_err(|e| format!("copy wintun.dll {:?} -> {:?}: {e}", src, dest))?;
-                log_win!("[TUN-WIN] Copied wintun.dll: {:?} -> {:?}", src, dest);
-                return Ok(());
-            }
-        }
-        let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
-        Err(format!(
-            "wintun.dll not found near tun2socks. Tried: {}",
-            tried.join(" | ")
-        ))
+        ensure_trusted_runtime_file(&dest, "wintun.dll")
+            .map_err(|error| format!("{error}. Reinstall ToBeVPN"))
     }
 
-    async fn force_stop(&self) {
+    async fn force_stop_preserving_killswitch(&self) -> Result<(), String> {
+        self.force_stop_inner(true).await
+    }
+
+    async fn force_stop(&self) -> Result<(), String> {
+        self.force_stop_inner(false).await
+    }
+
+    async fn force_stop_inner(&self, preserve_killswitch: bool) -> Result<(), String> {
+        log_win!("[VPN-WIN] force_stop");
+        let _route_guard = self.route_update_lock.lock().await;
+        let mut errors = Vec::new();
+
+        // Stop proxy traffic while the firewall is still fail-closed.
+        if let Some(mut child) = self.xray_process.lock().await.take() {
+            if let Err(error) = terminate_child_bounded(&mut child, "xray").await {
+                errors.push(error);
+            }
+        }
+
+        // Stop the Wintun owner before inspecting/resetting adapter state. If
+        // it remains alive, it can delete/recreate the adapter between an index
+        // lookup and the cleanup calls below, stranding fresh routes or DNS.
+        if let Some(mut child) = self.tun2socks_process.lock().await.take() {
+            if let Err(error) = terminate_child_bounded(&mut child, "tun2socks").await {
+                errors.push(error);
+            }
+        }
+
+        let ipv4_index = self
+            .wintun_interface_index
+            .lock()
+            .await
+            .take()
+            .or_else(|| windows_routes::adapter_ipv4_index(WINTUN_ADAPTER));
+        let ipv6_index = self
+            .wintun_ipv6_interface_index
+            .lock()
+            .await
+            .take()
+            .or_else(|| windows_routes::adapter_ipv6_index(WINTUN_ADAPTER));
+
+        if let Some(interface_index) = ipv4_index {
+            if let Err(error) = Self::reset_system_dns(interface_index).await {
+                errors.push(error);
+            }
+            if let Err(error) = self.reset_wintun_ipv4_config(interface_index).await {
+                errors.push(error);
+            }
+        }
+        if let Some(interface_index) = ipv6_index {
+            if let Err(error) = self.reset_ipv6_tunnel(interface_index).await {
+                errors.push(error);
+            }
+        }
+        if let Err(error) = windows_routes::delete_tagged_ipv4_routes(MANAGED_ROUTE_METRIC) {
+            errors.push(format!("managed route cleanup failed: {error}"));
+        }
+        if let Err(error) = windows_routes::delete_tagged_ipv6_routes(MANAGED_ROUTE_METRIC) {
+            errors.push(format!("managed IPv6 route cleanup failed: {error}"));
+        }
+
+        self.server_ip.lock().await.take();
+        self.control_bypass_ips.lock().await.clear();
+        self.managed_direct_ips.lock().await.clear();
+        self.physical_route.lock().await.take();
+        // Removing the firewall is deliberately last. If any DNS/route/process
+        // cleanup failed, leave it enabled so the failure cannot turn into a
+        // transparent physical-network leak.
+        if errors.is_empty() && !preserve_killswitch {
+            if let Err(error) = Self::remove_killswitch().await {
+                errors.push(error);
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    #[cfg(any())]
+    async fn force_stop_legacy(&self) {
         log_win!("[VPN-WIN] force_stop");
 
         // Stop proxy traffic first, then remove only routes owned by this
@@ -1102,8 +1718,6 @@ impl VpnManager {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
-
-        let _ = std::fs::remove_file(app_data_dir().join("xray.json"));
     }
 }
 
@@ -1127,6 +1741,46 @@ fn get_default_route() -> Option<PhysicalRoute> {
             log_win!("[get_default_route] IP Helper query failed: {error}");
             None
         }
+    }
+}
+
+async fn run_powershell(
+    script: &str,
+    environment: &[(&str, &str)],
+    operation: &str,
+) -> Result<(), String> {
+    let powershell = crate::windows_system_binary("WindowsPowerShell\\v1.0\\powershell.exe")?;
+    let mut command = Command::new(powershell);
+    crate::configure_windows_powershell_environment(command.as_std_mut())?;
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .kill_on_drop(true);
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    let output = timeout(Duration::from_secs(20), command.output())
+        .await
+        .map_err(|_| format!("{operation} timed out"))?
+        .map_err(|e| format!("{operation} could not start PowerShell: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{operation} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
@@ -1196,8 +1850,8 @@ fn parse_stat_value(text: &str) -> Option<u64> {
             .trim_matches(',')
             .trim()
             .trim_matches('"');
-        if let Ok(v) = cleaned.parse::<i64>() {
-            return Some(v.unsigned_abs());
+        if let Ok(value) = cleaned.parse::<u64>() {
+            return Some(value);
         }
     }
     None
