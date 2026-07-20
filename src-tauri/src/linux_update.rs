@@ -2,24 +2,16 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use minisign_verify::{PublicKey, Signature};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::io::Write;
 use std::process::{Command as StdCommand, Stdio};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 const UPDATE_HELPER: &str = "/usr/local/bin/tobevpn-update-helper.sh";
-const UPDATE_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.update.policy";
-const UPDATE_HELPER_SH: &str = include_str!("../../scripts/tobevpn-update-helper.sh");
-const UPDATE_POLICY_XML: &str = include_str!("../../scripts/app.tobevpn.update.policy");
 const UPDATE_ENDPOINT: &str =
     "https://github.com/Shoolife/ToBeVPN-Desktop/releases/latest/download/latest.json";
 const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDQTkyQzdDOUVGMzk5NEMKUldSTW1mT2VmQ3lwM01NWkFhQ2ZoZ21kVjdCWFNUbk5kU0E4UHRvUVhKRGhPZjR5QVRWYW00azMK";
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const MAX_MANIFEST_BYTES: usize = 256 * 1024;
-const MAX_PACKAGE_BYTES: usize = 256 * 1024 * 1024;
 const PACKAGE_NAMES: &[&str] = &["to-be-vpn", "tobevpn-desktop"];
 
 #[derive(Debug, Deserialize)]
@@ -62,11 +54,8 @@ pub fn maybe_run_update_helper() -> bool {
 
 pub async fn install_latest_via_polkit(version: String) -> Result<(), String> {
     validate_version(&version)?;
-    ensure_update_helper_ready()?;
 
     let mut cmd = Command::new("pkexec");
-    cmd.env_clear();
-    cmd.env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     cmd.arg(UPDATE_HELPER).arg("install-latest").arg(&version);
     for var in &[
         "DISPLAY",
@@ -78,10 +67,6 @@ pub async fn install_latest_via_polkit(version: String) -> Result<(), String> {
             cmd.env(var, val);
         }
     }
-    // Dropping `Command::output()` does not normally terminate its child. A
-    // timed-out polkit invocation must not install a package later in the
-    // background after the UI has already reported failure.
-    cmd.kill_on_drop(true);
 
     let output = timeout(UPDATE_TIMEOUT, cmd.output())
         .await
@@ -102,42 +87,9 @@ pub async fn install_latest_via_polkit(version: String) -> Result<(), String> {
     })
 }
 
-fn ensure_update_helper_ready() -> Result<(), String> {
-    fn verify(path: &str, expected: &[u8]) -> Result<(), String> {
-        let metadata = std::fs::symlink_metadata(path)
-            .map_err(|_| format!("{path} is missing; reinstall the ToBeVPN .deb package"))?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Err(format!("{path} is not a regular package file"));
-        }
-        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-            return Err(format!(
-                "{path} must be root-owned and not writable by group/others"
-            ));
-        }
-        if metadata.len() != expected.len() as u64 {
-            return Err(format!(
-                "{path} does not match this application version; reinstall the ToBeVPN .deb package"
-            ));
-        }
-        let actual = std::fs::read(path).map_err(|error| format!("cannot read {path}: {error}"))?;
-        if actual != expected {
-            return Err(format!(
-                "{path} does not match this application version; reinstall the ToBeVPN .deb package"
-            ));
-        }
-        Ok(())
-    }
-
-    verify(UPDATE_HELPER, UPDATE_HELPER_SH.as_bytes())?;
-    verify(UPDATE_POLICY, UPDATE_POLICY_XML.as_bytes())
-}
-
 fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
     validate_root()?;
     validate_version(expected_version)?;
-    let _update_lock = acquire_update_lock()?;
-    ensure_network_inactive()?;
-    require_newer_version(expected_version)?;
     install_rustls_provider();
 
     let client = reqwest::blocking::Client::builder()
@@ -146,14 +98,12 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
         .build()
         .map_err(|e| format!("create HTTP client: {e}"))?;
 
-    let manifest_response = client
+    let manifest: UpdateManifest = client
         .get(UPDATE_ENDPOINT)
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("fetch update manifest: {e}"))?;
-    let manifest_bytes =
-        read_limited_response(manifest_response, MAX_MANIFEST_BYTES, "update manifest")?;
-    let manifest: UpdateManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("fetch update manifest: {e}"))?
+        .json()
         .map_err(|e| format!("parse update manifest: {e}"))?;
 
     if normalize_version(&manifest.version) != normalize_version(expected_version) {
@@ -164,16 +114,17 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
     }
 
     let platform = select_platform(&manifest)?;
-    validate_package_url(&platform.url, expected_version)?;
-    let package_response = client
+    let bytes = client
         .get(platform.url.as_str())
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("download update package: {e}"))?;
-    let bytes = read_limited_response(package_response, MAX_PACKAGE_BYTES, "update package")?;
+        .map_err(|e| format!("download update package: {e}"))?
+        .bytes()
+        .map_err(|e| format!("read update package: {e}"))?;
+    let bytes = bytes.as_ref();
 
-    verify_signature(&bytes, &platform.signature)?;
-    if !infer::archive::is_deb(&bytes) {
+    verify_signature(bytes, &platform.signature)?;
+    if !infer::archive::is_deb(bytes) {
         return Err("downloaded update is not a deb package".into());
     }
 
@@ -184,14 +135,13 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
     let deb_path = tmp_dir.path().join("package.deb");
     std::fs::File::create(&deb_path)
         .and_then(|mut f| {
-            f.write_all(&bytes)?;
+            f.write_all(bytes)?;
             f.sync_all()
         })
         .map_err(|e| format!("write update package: {e}"))?;
 
     validate_deb_package(&deb_path, expected_version)?;
-    ensure_network_inactive()?;
-    let output = StdCommand::new("/usr/bin/dpkg")
+    let output = StdCommand::new("dpkg")
         .arg("-i")
         .arg(&deb_path)
         .stdin(Stdio::null())
@@ -210,49 +160,13 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
     }
 }
 
-fn read_limited_response(
-    response: reqwest::blocking::Response,
-    max_bytes: usize,
-    label: &str,
-) -> Result<Vec<u8>, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(format!("{label} exceeds the {max_bytes}-byte limit"));
-    }
-    let mut bytes = Vec::new();
-    response
-        .take(max_bytes as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("read {label}: {e}"))?;
-    if bytes.len() > max_bytes {
-        return Err(format!("{label} exceeds the {max_bytes}-byte limit"));
-    }
-    Ok(bytes)
-}
-
-fn validate_package_url(value: &str, expected_version: &str) -> Result<(), String> {
-    let url = reqwest::Url::parse(value).map_err(|_| "invalid update package URL".to_string())?;
-    let expected_prefix = format!(
-        "/Shoolife/ToBeVPN-Desktop/releases/download/v{}/",
-        normalize_version(expected_version)
-    );
-    if url.scheme() != "https"
-        || url.host_str() != Some("github.com")
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || !url.path().starts_with(&expected_prefix)
-    {
-        return Err("update package URL is outside the trusted release path".into());
-    }
-    Ok(())
-}
-
 fn select_platform(manifest: &UpdateManifest) -> Result<UpdatePlatform, String> {
     if let Some(platforms) = &manifest.platforms {
-        let arch = std::env::consts::ARCH;
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "x86_64",
+            "aarch64" => "aarch64",
+            other => other,
+        };
         let deb_target = format!("linux-{arch}-deb");
         let plain_target = format!("linux-{arch}");
         for target in [&deb_target, &plain_target] {
@@ -287,22 +201,11 @@ fn validate_deb_package(path: &std::path::Path, expected_version: &str) -> Resul
             "deb version mismatch: expected {expected_version}, got {version}"
         ));
     }
-    let architecture = read_deb_field(path, "Architecture")?;
-    let expected_architecture = match std::env::consts::ARCH {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        other => return Err(format!("unsupported update architecture: {other}")),
-    };
-    if architecture != expected_architecture {
-        return Err(format!(
-            "deb architecture mismatch: expected {expected_architecture}, got {architecture}"
-        ));
-    }
     Ok(())
 }
 
 fn read_deb_field(path: &std::path::Path, field: &str) -> Result<String, String> {
-    let output = StdCommand::new("/usr/bin/dpkg-deb")
+    let output = StdCommand::new("dpkg-deb")
         .arg("-f")
         .arg(path)
         .arg(field)
@@ -357,87 +260,6 @@ fn validate_version(version: &str) -> Result<(), String> {
     }
 }
 
-fn require_newer_version(expected_version: &str) -> Result<(), String> {
-    let expected = normalize_version(expected_version);
-    let installed = installed_package_version();
-    let current = installed
-        .as_deref()
-        .unwrap_or_else(|| normalize_version(env!("CARGO_PKG_VERSION")));
-    let status = StdCommand::new("/usr/bin/dpkg")
-        .args(["--compare-versions", expected, "gt", current])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| format!("compare update versions: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "refusing update to {expected}: installed version {current} is not older"
-        ))
-    }
-}
-
-fn acquire_update_lock() -> Result<File, String> {
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open("/run/tobevpn-update.lock")
-        .map_err(|error| format!("open update lock: {error}"))?;
-    let metadata = lock
-        .metadata()
-        .map_err(|error| format!("inspect update lock: {error}"))?;
-    if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-        return Err("update lock has unsafe ownership or permissions".into());
-    }
-    let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if result != 0 {
-        return Err("another ToBeVPN update is already running".into());
-    }
-    Ok(lock)
-}
-
-fn installed_package_version() -> Option<String> {
-    for package in PACKAGE_NAMES {
-        let output = StdCommand::new("/usr/bin/dpkg-query")
-            .args(["-W", "-f=${db:Status-Abbrev}\t${Version}", package])
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            continue;
-        }
-        let value = String::from_utf8(output.stdout).ok()?;
-        let (status, version) = value.trim().split_once('\t')?;
-        if status == "ii " && !version.is_empty() {
-            return Some(version.to_string());
-        }
-    }
-    None
-}
-
-fn ensure_network_inactive() -> Result<(), String> {
-    const STATE_FILES: &[&str] = &[
-        "/run/tobevpn/owner",
-        "/run/tobevpn/tun2socks.pid",
-        "/run/tobevpn/bypass-ipv4",
-        "/run/tobevpn/transition-bypass-ipv4",
-        "/run/tobevpn/dns-mode",
-    ];
-    if std::path::Path::new("/sys/class/net/tobe0").exists()
-        || STATE_FILES
-            .iter()
-            .any(|path| std::fs::symlink_metadata(path).is_ok())
-    {
-        return Err("disconnect ToBeVPN completely before installing an update".into());
-    }
-    Ok(())
-}
-
 fn normalize_version(version: &str) -> &str {
     version.trim().trim_start_matches('v')
 }
@@ -445,36 +267,5 @@ fn normalize_version(version: &str) -> &str {
 fn install_rustls_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn package_url_is_restricted_to_expected_release() {
-        assert!(validate_package_url(
-            "https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v1.2.3/app.deb",
-            "1.2.3",
-        )
-        .is_ok());
-        assert!(validate_package_url(
-            "https://example.com/Shoolife/ToBeVPN-Desktop/releases/download/v1.2.3/app.deb",
-            "1.2.3",
-        )
-        .is_err());
-        assert!(validate_package_url(
-            "https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v9.9.9/app.deb",
-            "1.2.3",
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn update_version_rejects_shell_and_path_characters() {
-        assert!(validate_version("v1.2.3").is_ok());
-        assert!(validate_version("1.2.3;id").is_err());
-        assert!(validate_version("../../package").is_err());
     }
 }

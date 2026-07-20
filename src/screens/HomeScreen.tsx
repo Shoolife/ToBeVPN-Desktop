@@ -223,14 +223,7 @@ export default function HomeScreen({
     getUpdateRequired,
   );
   const vpn = useVpnRuntime();
-  const {
-    connected,
-    connecting,
-    disconnecting,
-    sessionBytes,
-    sessionElapsedSeconds,
-    lastError,
-  } = vpn;
+  const { connected, connecting, disconnecting, sessionBytes, sessionStartTime, lastError } = vpn;
   const previewSubscriptionOpen =
     browserPreview && new URLSearchParams(window.location.search).get("subscription") === "1";
   const [showSubscription, setShowSubscription] = useState(previewSubscriptionOpen);
@@ -244,7 +237,9 @@ export default function HomeScreen({
   const autostartConnectHandled = useRef(false);
   const activating = connecting || preparingConnection;
 
-  const elapsed = Math.max(0, Math.floor(sessionElapsedSeconds));
+  const elapsed = sessionStartTime
+    ? Math.floor((Date.now() - sessionStartTime) / 1000)
+    : 0;
 
   // Ping for the selected server (refreshed when selection changes).
   const [ping, setPing] = useState(0);
@@ -266,7 +261,7 @@ export default function HomeScreen({
     if (browserPreview) return;
     // Force-sync on mount so the block state lands before the user can act,
     // bypassing the 12h throttle of the unforced syncSubscription.
-    void syncSubscription({ force: true }).catch(() => {});
+    void syncSubscription({ force: true });
     void pingHwidOnly().catch(() => {});
     startPendingPurchaseRefreshIfNeeded();
 
@@ -345,23 +340,19 @@ export default function HomeScreen({
     if (!automaticServerSelection && !selectedServer) return null;
 
     await syncSubscription({ force: true }).catch(() => {});
-    let freshServers: VpnServer[];
-    try {
-      freshServers = (await fetchVpnServers()).filter(isAvailableVpnServer);
-    } catch (error) {
-      // A known-good endpoint is a useful offline fallback only when the
-      // authoritative lookup itself failed. A successful empty response means
-      // the endpoint was revoked/removed and must never resurrect stale data.
-      if (canUseSelectedServerFallback(selectedServer)) {
-        console.warn("[VPN-UI] server refresh failed; using cached selection", error);
-        return selectedServer;
-      }
-      return null;
-    }
+    const freshServers = (await fetchVpnServers().catch(() => []))
+      .filter(isAvailableVpnServer);
     const fresh = automaticServerSelection
       ? await selectBestVpnServer(freshServers, { forceProbe: true })
       : freshServers.find((server) => isSameServerSelection(selectedServer, server)) ?? null;
     if (!fresh) {
+      if (canUseSelectedServerFallback(selectedServer)) {
+        console.warn("[VPN-UI] using selected server fallback after fresh server lookup missed", {
+          freshServerCount: freshServers.length,
+          automaticServerSelection,
+        });
+        return selectedServer;
+      }
       return null;
     }
     if (!automaticServerSelection) {
@@ -443,37 +434,24 @@ export default function HomeScreen({
       return;
     }
     if (autostartConnectHandled.current) return;
+    autostartConnectHandled.current = true;
+    onAutostartConnectHandled?.();
 
     // Reuse the same preparation path as the power button, but never toggle
     // an existing/in-flight connection off when an autostart request arrives.
-    // Transient local preparation/stop states are intentionally not marked as
-    // handled; this effect reruns once they settle.
-    if (disconnecting || preparingConnection) return;
     if (
       browserPreview ||
       subscriptionUsageBlocked ||
       updateRequired ||
       connected ||
-      connecting
+      connecting ||
+      disconnecting ||
+      preparingConnection
     ) {
-      autostartConnectHandled.current = true;
-      onAutostartConnectHandled?.();
       return;
     }
-    autostartConnectHandled.current = true;
-    onAutostartConnectHandled?.();
     void startConnection();
-  }, [
-    autostartConnectRequested,
-    browserPreview,
-    connected,
-    connecting,
-    disconnecting,
-    onAutostartConnectHandled,
-    preparingConnection,
-    subscriptionUsageBlocked,
-    updateRequired,
-  ]);
+  }, [autostartConnectRequested]);
 
   const statusText = activating
     ? t("state_connecting")

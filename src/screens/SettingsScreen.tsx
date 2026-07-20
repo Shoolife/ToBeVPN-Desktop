@@ -137,7 +137,6 @@ export default function SettingsScreen({
   const [logoutClosing, setLogoutClosing] = useState(false);
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
-  const [logoutError, setLogoutError] = useState<string | null>(null);
   const [xrayVersion, setXrayVersion] = useState("Xray-core ...");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [avatarLoading, setAvatarLoading] = useState(false);
@@ -284,7 +283,6 @@ export default function SettingsScreen({
   const openLogoutDialog = () => {
     clearLogoutDialogTimer();
     setLogoutClosing(false);
-    setLogoutError(null);
     setLogoutOpen(true);
   };
 
@@ -302,17 +300,13 @@ export default function SettingsScreen({
   const handleLogout = async () => {
     if (loggingOut) return;
     setLoggingOut(true);
-    setLogoutError(null);
     try {
       await logout();
+    } finally {
       clearUserAvatarCache();
       clearUserProfileCache();
-      onLoggedOut();
-    } catch (error) {
-      console.error("Could not safely sign out", error);
-      setLogoutError(t("logout_failed"));
-    } finally {
       setLoggingOut(false);
+      onLoggedOut();
     }
   };
 
@@ -339,12 +333,7 @@ export default function SettingsScreen({
   }, []);
 
   useEffect(() => {
-    setAvatarUrl(null);
-    setProfile({ name: null, username: null });
-    if (!session.isLinked || session.telegramId === null) {
-      setAvatarLoading(false);
-      return;
-    }
+    if (!session.isLinked) return;
     let cancelled = false;
     setAvatarLoading(true);
     getUserAvatarUrl().then((url) => {
@@ -359,7 +348,7 @@ export default function SettingsScreen({
     return () => {
       cancelled = true;
     };
-  }, [session.deviceId, session.isLinked, session.shortUuid, session.telegramId]);
+  }, [session.isLinked]);
 
   useEffect(() => {
     const refreshRoutingMode = () => setRoutingMode(loadRoutingSettings().mode);
@@ -391,11 +380,6 @@ export default function SettingsScreen({
 
   useEffect(() => clearLanguageDialogTimer, []);
   useEffect(() => clearLogoutDialogTimer, []);
-  useEffect(() => () => {
-    if (sectionTimerRef.current !== null) {
-      window.clearTimeout(sectionTimerRef.current);
-    }
-  }, []);
 
   // Recompute the FAQ fade edges whenever we enter the Support section (after
   // its list has laid out).
@@ -898,9 +882,6 @@ export default function SettingsScreen({
           <div className="dialog" onClick={(e) => e.stopPropagation()}>
             <div className="dialog__title">{t("logout_confirm_title")}</div>
             <div className="dialog__message">{t("logout_confirm_message")}</div>
-            {logoutError && (
-              <div className="dialog__message" role="alert">{logoutError}</div>
-            )}
             <div className="dialog__actions">
               <button
                 className="dialog__btn dialog__btn--secondary"
@@ -1051,11 +1032,6 @@ function FaqItem({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const centerTimerRef = useRef<number | null>(null);
-
-  useEffect(() => () => {
-    if (centerTimerRef.current !== null) window.clearTimeout(centerTimerRef.current);
-  }, []);
 
   const toggle = () => {
     const next = !open;
@@ -1063,11 +1039,7 @@ function FaqItem({
     // Wait for the height animation to settle, then centre the expanded card.
     if (next && ref.current) {
       const el = ref.current;
-      if (centerTimerRef.current !== null) window.clearTimeout(centerTimerRef.current);
-      centerTimerRef.current = window.setTimeout(() => {
-        centerTimerRef.current = null;
-        onExpand(el);
-      }, 260);
+      window.setTimeout(() => onExpand(el), 260);
     }
   };
 

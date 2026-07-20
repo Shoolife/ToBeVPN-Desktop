@@ -1,6 +1,5 @@
-// Keeps the full selected server (including its VLESS credential) in memory
-// only. Persisting it in WebView localStorage lets any same-user process clone
-// VPN access. The non-secret AUTO preference may still be persisted.
+// Persists the last server the user picked so it's pre-selected on next launch.
+// An OS-autostart launch may use this selection after auth restoration.
 import type { SelectedServer } from "../App";
 import { getSession } from "./store";
 
@@ -9,82 +8,128 @@ const LEGACY_STORAGE_KEY = "tobevpn_last_server_v1";
 const AUTOMATIC_STORAGE_KEY = "tobevpn_automatic_server_selection_v1";
 const SERVER_SELECTION_EVENT = "tobevpn:server-selection-changed";
 
+interface StoredLastServer {
+  ownerKey: string;
+  server: SelectedServer;
+}
+
 interface StoredAutomaticSelection {
   ownerKey: string;
   automatic: boolean;
 }
 
-let memorySelection: { ownerKey: string; server: SelectedServer } | null = null;
+function isSelectedServer(value: unknown): value is SelectedServer {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.name === "string" &&
+    typeof candidate.country === "string" &&
+    typeof candidate.address === "string" &&
+    typeof candidate.port === "number" &&
+    typeof candidate.uuid === "string" &&
+    typeof candidate.flow === "string" &&
+    typeof candidate.security === "string" &&
+    typeof candidate.sni === "string" &&
+    typeof candidate.fingerprint === "string" &&
+    typeof candidate.public_key === "string" &&
+    typeof candidate.short_id === "string" &&
+    typeof candidate.network === "string" &&
+    typeof candidate.path === "string" &&
+    typeof candidate.mode === "string" &&
+    typeof candidate.spx === "string"
+  );
+}
 
-function removeLegacyServerSecrets(): void {
+function ownerKeyForShortUuid(shortUuid: string | null): string | null {
+  if (!shortUuid) return null;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < shortUuid.length; i++) {
+    hash ^= shortUuid.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function currentOwnerKey(): string | null {
+  return ownerKeyForShortUuid(getSession().shortUuid);
+}
+
+function isStoredLastServer(value: unknown): value is StoredLastServer {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.ownerKey === "string" &&
+    isSelectedServer(candidate.server)
+  );
+}
+
+export function loadLastServer(): SelectedServer | null {
   try {
+    const ownerKey = currentOwnerKey();
+    if (!ownerKey) {
+      return null;
+    }
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (isStoredLastServer(parsed) && parsed.ownerKey === ownerKey) {
+        return parsed.server;
+      }
+      localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
+    // v1 did not store the subscription owner. Drop it on upgrade instead of
+    // risking a stale server from a previous trial/account.
+    if (localStorage.getItem(LEGACY_STORAGE_KEY)) {
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+    }
     localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveLastServer(server: SelectedServer) {
+  try {
+    const ownerKey = currentOwnerKey();
+    if (!ownerKey) return;
+    const automatic = loadAutomaticServerSelection();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ownerKey, server }));
+    localStorage.setItem(
+      AUTOMATIC_STORAGE_KEY,
+      JSON.stringify({ ownerKey, automatic } satisfies StoredAutomaticSelection),
+    );
+    window.dispatchEvent(new Event(SERVER_SELECTION_EVENT));
   } catch {
     // ignore
   }
 }
 
-removeLegacyServerSecrets();
-
-function currentMemoryOwnerKey(): string | null {
-  const session = getSession();
-  if (!session.isLinked || session.telegramId === null || !session.shortUuid) return null;
-  // This key never leaves process memory. Use the complete identity instead of
-  // a collision-prone 32-bit hash so one session can never inherit another
-  // account's VLESS credential.
-  return JSON.stringify([
-    session.deviceId,
-    session.telegramId,
-    session.shortUuid,
-    session.panelUserUuid ?? "",
-  ]);
-}
-
-function currentPreferenceOwnerKey(): string | null {
-  const session = getSession();
-  if (!session.isLinked || session.telegramId === null) return null;
-  // Both values are already part of the non-secret session metadata. Do not
-  // persist shortUuid or panelUserUuid merely to scope a boolean preference.
-  return JSON.stringify([session.deviceId, session.telegramId]);
-}
-
-export function loadLastServer(): SelectedServer | null {
-  const ownerKey = currentMemoryOwnerKey();
-  if (!ownerKey || memorySelection?.ownerKey !== ownerKey) return null;
-  return memorySelection.server;
-}
-
-export function saveLastServer(server: SelectedServer): void {
-  const ownerKey = currentMemoryOwnerKey();
-  if (!ownerKey) return;
-  memorySelection = { ownerKey, server };
-  removeLegacyServerSecrets();
-  window.dispatchEvent(new Event(SERVER_SELECTION_EVENT));
-}
-
 export function loadAutomaticServerSelection(): boolean {
   try {
-    const ownerKey = currentPreferenceOwnerKey();
+    const ownerKey = currentOwnerKey();
     if (!ownerKey) return true;
     const raw = localStorage.getItem(AUTOMATIC_STORAGE_KEY);
-    if (!raw) return true;
-    const parsed = JSON.parse(raw) as Partial<StoredAutomaticSelection>;
-    if (parsed.ownerKey !== ownerKey || typeof parsed.automatic !== "boolean") {
-      localStorage.removeItem(AUTOMATIC_STORAGE_KEY);
-      return true;
+    if (!raw) {
+      // Existing users with a persisted server keep their explicit manual
+      // selection. New users start in AUTO.
+      return loadLastServer() === null;
     }
-    // A manual choice cannot survive a restart because its credential is not
-    // persisted. Fall back to AUTO until the user selects a server again.
-    return memorySelection?.ownerKey === ownerKey ? parsed.automatic : true;
+    const parsed = JSON.parse(raw) as Partial<StoredAutomaticSelection>;
+    if (parsed.ownerKey === ownerKey && typeof parsed.automatic === "boolean") {
+      return parsed.automatic;
+    }
+    localStorage.removeItem(AUTOMATIC_STORAGE_KEY);
+    return loadLastServer() === null;
   } catch {
-    return true;
+    return loadLastServer() === null;
   }
 }
 
 export function saveAutomaticServerSelection(automatic: boolean): void {
   try {
-    const ownerKey = currentPreferenceOwnerKey();
+    const ownerKey = currentOwnerKey();
     if (!ownerKey) return;
     localStorage.setItem(
       AUTOMATIC_STORAGE_KEY,
@@ -102,18 +147,22 @@ export function subscribeServerSelection(listener: () => void): () => void {
 }
 
 export function clearSelectedServer(): void {
-  memorySelection = null;
-  removeLegacyServerSecrets();
-  window.dispatchEvent(new Event(SERVER_SELECTION_EVENT));
-}
-
-export function clearLastServer(): void {
-  memorySelection = null;
-  removeLegacyServerSecrets();
   try {
-    localStorage.removeItem(AUTOMATIC_STORAGE_KEY);
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    window.dispatchEvent(new Event(SERVER_SELECTION_EVENT));
   } catch {
     // ignore
   }
-  window.dispatchEvent(new Event(SERVER_SELECTION_EVENT));
+}
+
+export function clearLastServer() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    localStorage.removeItem(AUTOMATIC_STORAGE_KEY);
+    window.dispatchEvent(new Event(SERVER_SELECTION_EVENT));
+  } catch {
+    // ignore
+  }
 }

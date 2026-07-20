@@ -7,7 +7,6 @@ import {
 import {
   loadRoutingSettings,
   normalizeRoutingDomain,
-  normalizeRoutingSettings,
   saveRoutingSettings,
   type RoutingSettings,
 } from "../session/routingSettings";
@@ -119,7 +118,6 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
   const [draft, setDraft] = useState<RoutingSettings>(initial);
   const [saved, setSaved] = useState<RoutingSettings>(initial);
   const [applying, setApplying] = useState(false);
-  const [applyError, setApplyError] = useState(false);
   const [database, setDatabase] = useState<string[]>([]);
   const [databaseVersion, setDatabaseVersion] = useState<string | null>(null);
   const [databaseLoading, setDatabaseLoading] = useState(false);
@@ -256,27 +254,11 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
   const apply = async () => {
     if (!dirty || applying) return;
     setApplying(true);
-    setApplyError(false);
-    const normalized = normalizeRoutingSettings(draft);
-    let nativeApplied = false;
+    const normalized = saveRoutingSettings(draft);
+    setDraft(normalized);
+    setSaved(normalized);
     try {
-      await reapplyRoutingSettings(normalized, saved);
-      nativeApplied = true;
-      const persisted = saveRoutingSettings(normalized);
-      setDraft(persisted);
-      setSaved(persisted);
-    } catch {
-      // localStorage can fail after the live tunnel has already switched.
-      // Restore the last persisted profile so UI, disk and native routing do
-      // not disagree for the rest of the session.
-      if (nativeApplied) {
-        await reapplyRoutingSettings(saved, normalized).catch((rollbackError) => {
-          console.error("Could not restore routing settings after persistence failure", rollbackError);
-        });
-      }
-      // Keep the draft dirty so the user can retry. vpnState attempts to
-      // restore the previously saved routing profile if restart had begun.
-      setApplyError(true);
+      await reapplyRoutingSettings();
     } finally {
       setApplying(false);
     }
@@ -458,11 +440,6 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
       </div>
 
       <div className="routing-actions">
-        {applyError && (
-          <div className="routing-apply-error" role="alert">
-            {t("routing_apply_error")}
-          </div>
-        )}
         <button
           type="button"
           onClick={apply}

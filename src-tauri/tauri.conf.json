@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ToBeVPN",
-  "version": "1.0.77",
+  "version": "1.0.76",
   "identifier": "com.tobevpn.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -31,8 +31,8 @@
         "default-src": "'self' tauri: ipc:",
         "img-src": "'self' data: blob: tauri: asset: ipc:",
         "style-src": "'self' 'unsafe-inline'",
-        "script-src": "'self'",
-        "connect-src": "'self' ipc: http://ipc.localhost https://__BOT_API_HOST__ https://__PANEL_HOST__ https://speed.cloudflare.com https://api.github.com",
+        "script-src": "'self' 'wasm-unsafe-eval'",
+        "connect-src": "'self' ipc: http://ipc.localhost https://__BOT_API_HOST__ https://__PANEL_HOST__ https://speed.cloudflare.com https://api.github.com https://github.com https://objects.githubusercontent.com",
         "font-src": "'self' data: tauri: ipc:"
       }
     },
@@ -59,12 +59,6 @@
     ],
     "linux": {
       "deb": {
-        "depends": [
-          "iproute2",
-          "procps",
-          "util-linux",
-          "pkexec | policykit-1"
-        ],
         "files": {
           "/usr/local/bin/tobevpn-helper.sh": "../scripts/tobevpn-helper.sh",
           "/usr/local/bin/tobevpn-update-helper.sh": "../scripts/tobevpn-update-helper.sh",

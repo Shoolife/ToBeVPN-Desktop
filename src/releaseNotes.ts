@@ -18,18 +18,8 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   highlights: [
     {
       icon: "notes",
-      titleKey: "whats_new_connection_title",
-      descriptionKey: "whats_new_connection_description",
-    },
-    {
-      icon: "notes",
-      titleKey: "whats_new_security_title",
-      descriptionKey: "whats_new_security_description",
-    },
-    {
-      icon: "update",
-      titleKey: "whats_new_safe_updates_title",
-      descriptionKey: "whats_new_safe_updates_description",
+      titleKey: "whats_new_in_app_title",
+      descriptionKey: "whats_new_in_app_description",
     },
   ],
 };

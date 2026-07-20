@@ -16,7 +16,6 @@ const LEGACY_STORAGE_KEYS = [
   "tobevpn_routing_settings_v1",
 ];
 const MAX_DOMAINS_PER_LIST = 128;
-const MAX_SERVICE_DOMAINS = 10_000;
 
 const DEFAULT_SETTINGS: RoutingSettings = {
   mode: "blocked_only",
@@ -45,14 +44,7 @@ function normalizeDomainValue(value: unknown): string | null {
     (!input.includes(".") && input.length < 2) ||
     input.startsWith(".") ||
     input.endsWith(".") ||
-    input.split(".").some(
-      (label) =>
-        !label ||
-        label.length > 63 ||
-        label.startsWith("-") ||
-        label.endsWith("-") ||
-        !/^[a-z0-9-]+$/.test(label),
-    )
+    input.split(".").some((label) => !label || label.length > 63)
   ) {
     return null;
   }
@@ -116,7 +108,7 @@ function normalizeSettings(value: unknown): RoutingSettings {
         parsed.directServiceDomains,
         parsed.ruServiceDomains,
       ),
-      MAX_SERVICE_DOMAINS,
+      100_000,
     ),
     excludedServiceDomains: normalizeDomainList(
       firstArray(
@@ -124,7 +116,7 @@ function normalizeSettings(value: unknown): RoutingSettings {
         parsed.excludedDomains,
         parsed.excludedRuDomains,
       ),
-      MAX_SERVICE_DOMAINS,
+      100_000,
     ),
     directDomains: normalizeDomainList(
       firstArray(
@@ -159,10 +151,6 @@ export function normalizeRoutingDomain(value: string): string | null {
   return normalizeDomainValue(value);
 }
 
-export function normalizeRoutingSettings(settings: RoutingSettings): RoutingSettings {
-  return normalizeSettings(settings);
-}
-
 export function loadRoutingSettings(): RoutingSettings {
   try {
     const stored = readStoredSettings();
@@ -177,7 +165,7 @@ export function loadRoutingSettings(): RoutingSettings {
 }
 
 export function saveRoutingSettings(settings: RoutingSettings): RoutingSettings {
-  const normalized = normalizeRoutingSettings(settings);
+  const normalized = normalizeSettings(settings);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
   return normalized;
 }

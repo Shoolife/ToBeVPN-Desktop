@@ -12,9 +12,9 @@ use windows::Win32::NetworkManagement::IpHelper::{
     GetAdaptersAddresses, GetIpForwardTable2, GetIpInterfaceEntry, GetUnicastIpAddressTable,
     InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
     SetIpInterfaceEntry, GAA_FLAG_INCLUDE_ALL_INTERFACES, GAA_FLAG_SKIP_ANYCAST,
-    GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK,
-    IP_ADAPTER_ADDRESSES_LH, IP_ADDRESS_PREFIX, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
-    MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
+    GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH, IP_ADDRESS_PREFIX,
+    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
+    MIB_UNICASTIPADDRESS_TABLE,
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Networking::WinSock::{
@@ -122,78 +122,6 @@ pub fn replace_ipv4_route(
     }
 }
 
-/// Add a route carrying a caller-selected metric marker without deleting any
-/// pre-existing route. Returns `true` only when this call created the row.
-pub fn add_managed_ipv4_route(
-    destination: Ipv4Addr,
-    prefix_length: u8,
-    gateway: Ipv4Addr,
-    interface_index: u32,
-    metric: u32,
-) -> Result<bool, String> {
-    let mut row = MIB_IPFORWARD_ROW2::default();
-    unsafe { InitializeIpForwardEntry(&mut row) };
-    row.InterfaceIndex = interface_index;
-    row.DestinationPrefix = IP_ADDRESS_PREFIX {
-        Prefix: sockaddr_v4(destination),
-        PrefixLength: prefix_length,
-    };
-    row.NextHop = sockaddr_v4(gateway);
-    row.SitePrefixLength = prefix_length;
-    row.Metric = metric;
-    row.Protocol = MIB_IPPROTO_NETMGMT;
-    row.Loopback = false;
-    row.AutoconfigureAddress = false;
-    row.Publish = false;
-    row.Immortal = false;
-
-    let status = unsafe { CreateIpForwardEntry2(&row) };
-    if status == ERROR_SUCCESS {
-        Ok(true)
-    } else if status == ERROR_ALREADY_EXISTS || status == ERROR_OBJECT_ALREADY_EXISTS {
-        Ok(false)
-    } else {
-        Err(format!(
-            "CreateIpForwardEntry2 failed with Win32 error {}",
-            status.0
-        ))
-    }
-}
-
-/// Delete only the exact NETMGMT route created by `add_managed_ipv4_route`.
-/// Destination/interface-only deletion is unsafe on enterprise machines
-/// because it can remove an administrator's pre-existing host route.
-pub fn delete_managed_ipv4_route(
-    destination: Ipv4Addr,
-    prefix_length: u8,
-    gateway: Ipv4Addr,
-    interface_index: u32,
-    metric: u32,
-) -> Result<usize, String> {
-    let rows = ipv4_routes()?;
-    delete_route_rows(
-        rows.into_iter().filter(|row| {
-            row.DestinationPrefix.PrefixLength == prefix_length
-                && sockaddr_ipv4(&row.DestinationPrefix.Prefix) == Some(destination)
-                && sockaddr_ipv4(&row.NextHop) == Some(gateway)
-                && row.InterfaceIndex == interface_index
-                && row.Metric == metric
-                && row.Protocol == MIB_IPPROTO_NETMGMT
-        }),
-        "DeleteIpForwardEntry2 managed IPv4",
-    )
-}
-
-/// Crash-recovery cleanup for ToBeVPN's unique route metric marker.
-pub fn delete_tagged_ipv4_routes(metric: u32) -> Result<usize, String> {
-    let rows = ipv4_routes()?;
-    delete_route_rows(
-        rows.into_iter()
-            .filter(|row| row.Metric == metric && row.Protocol == MIB_IPPROTO_NETMGMT),
-        "DeleteIpForwardEntry2 tagged IPv4",
-    )
-}
-
 pub fn replace_ipv6_route(
     destination: Ipv6Addr,
     prefix_length: u8,
@@ -227,86 +155,6 @@ pub fn replace_ipv6_route(
             status.0
         ))
     }
-}
-
-pub fn add_managed_ipv6_route(
-    destination: Ipv6Addr,
-    prefix_length: u8,
-    interface_index: u32,
-    metric: u32,
-) -> Result<bool, String> {
-    let mut row = MIB_IPFORWARD_ROW2::default();
-    unsafe { InitializeIpForwardEntry(&mut row) };
-    row.InterfaceIndex = interface_index;
-    row.DestinationPrefix = IP_ADDRESS_PREFIX {
-        Prefix: sockaddr_v6(destination),
-        PrefixLength: prefix_length,
-    };
-    row.NextHop = sockaddr_v6(Ipv6Addr::UNSPECIFIED);
-    row.SitePrefixLength = prefix_length;
-    row.Metric = metric;
-    row.Protocol = MIB_IPPROTO_NETMGMT;
-    row.Loopback = false;
-    row.AutoconfigureAddress = false;
-    row.Publish = false;
-    row.Immortal = false;
-
-    let status = unsafe { CreateIpForwardEntry2(&row) };
-    if status == ERROR_SUCCESS {
-        Ok(true)
-    } else if status == ERROR_ALREADY_EXISTS || status == ERROR_OBJECT_ALREADY_EXISTS {
-        Ok(false)
-    } else {
-        Err(format!(
-            "CreateIpForwardEntry2 IPv6 failed with Win32 error {}",
-            status.0
-        ))
-    }
-}
-
-pub fn delete_managed_ipv6_route(
-    destination: Ipv6Addr,
-    prefix_length: u8,
-    interface_index: u32,
-    metric: u32,
-) -> Result<usize, String> {
-    let rows = ip_routes(AF_INET6)?;
-    delete_route_rows(
-        rows.into_iter().filter(|row| {
-            row.DestinationPrefix.PrefixLength == prefix_length
-                && sockaddr_ipv6(&row.DestinationPrefix.Prefix) == Some(destination)
-                && sockaddr_ipv6(&row.NextHop) == Some(Ipv6Addr::UNSPECIFIED)
-                && row.InterfaceIndex == interface_index
-                && row.Metric == metric
-                && row.Protocol == MIB_IPPROTO_NETMGMT
-        }),
-        "DeleteIpForwardEntry2 managed IPv6",
-    )
-}
-
-pub fn delete_tagged_ipv6_routes(metric: u32) -> Result<usize, String> {
-    let rows = ip_routes(AF_INET6)?;
-    delete_route_rows(
-        rows.into_iter()
-            .filter(|row| row.Metric == metric && row.Protocol == MIB_IPPROTO_NETMGMT),
-        "DeleteIpForwardEntry2 tagged IPv6",
-    )
-}
-
-fn delete_route_rows(
-    rows: impl Iterator<Item = MIB_IPFORWARD_ROW2>,
-    operation: &str,
-) -> Result<usize, String> {
-    let mut deleted = 0;
-    for row in rows {
-        let status = unsafe { DeleteIpForwardEntry2(&row) };
-        if status == ERROR_SUCCESS {
-            deleted += 1;
-        } else if status != ERROR_NOT_FOUND {
-            return Err(format!("{operation} failed with Win32 error {}", status.0));
-        }
-    }
-    Ok(deleted)
 }
 
 pub fn delete_ipv4_routes(
@@ -471,29 +319,6 @@ pub fn adapter_ipv6_index(alias: &str) -> Option<u32> {
     let adapters = adapters().ok()?;
     adapters.into_iter().find_map(|adapter| {
         (adapter.friendly_name.eq_ignore_ascii_case(alias) && adapter.ipv6_index != 0)
-            .then_some(adapter.ipv6_index)
-    })
-}
-
-pub fn adapter_is_wintun(alias: &str) -> bool {
-    adapters().ok().is_some_and(|adapters| {
-        adapters.into_iter().any(|adapter| {
-            adapter.friendly_name.eq_ignore_ascii_case(alias)
-                && adapter.description.to_ascii_lowercase().contains("wintun")
-        })
-    })
-}
-
-pub fn loopback_ipv4_index() -> Option<u32> {
-    adapters().ok()?.into_iter().find_map(|adapter| {
-        (adapter.interface_type == IF_TYPE_SOFTWARE_LOOPBACK && adapter.ipv4_index != 0)
-            .then_some(adapter.ipv4_index)
-    })
-}
-
-pub fn loopback_ipv6_index() -> Option<u32> {
-    adapters().ok()?.into_iter().find_map(|adapter| {
-        (adapter.interface_type == IF_TYPE_SOFTWARE_LOOPBACK && adapter.ipv6_index != 0)
             .then_some(adapter.ipv6_index)
     })
 }
@@ -714,8 +539,6 @@ fn unicast_row_address(row: &MIB_UNICASTIPADDRESS_ROW) -> Option<IpAddress> {
 #[derive(Debug)]
 struct AdapterInfo {
     friendly_name: String,
-    description: String,
-    interface_type: u32,
     /// IPv4 interface index (IfIndex). 0 until Windows binds IPv4.
     ipv4_index: u32,
     /// IPv6 interface index (Ipv6IfIndex). 0 when IPv6 is not bound.
@@ -756,14 +579,11 @@ fn adapters() -> Result<Vec<AdapterInfo>, String> {
         while !current.is_null() {
             let adapter = unsafe { &*current };
             if let Some(friendly_name) = pwstr_to_string(adapter.FriendlyName) {
-                let description = pwstr_to_string(adapter.Description).unwrap_or_default();
                 let ipv4_index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
                 let ipv6_index = adapter.Ipv6IfIndex;
                 if ipv4_index != 0 || ipv6_index != 0 {
                     out.push(AdapterInfo {
                         friendly_name,
-                        description,
-                        interface_type: adapter.IfType,
                         ipv4_index,
                         ipv6_index,
                     });

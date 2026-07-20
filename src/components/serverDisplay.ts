@@ -124,15 +124,10 @@ const COUNTRY_NAME_TO_CODE: Record<string, string> = {
   "belarus": "BY",
 };
 
-const COUNTRY_NAME_TOKEN_SPLIT = /[^\p{L}]+/u;
-
 function countryCodeFromServerName(serverName: string): string | null {
-  // Whole-word matching only. A substring check would map "Ukraine 1" to GB
-  // (the "uk" key iterates before "ukraine") or "Baku" to GB — country
-  // keywords must match a complete token of the name.
-  for (const token of serverName.toLowerCase().split(COUNTRY_NAME_TOKEN_SPLIT)) {
-    const code = COUNTRY_NAME_TO_CODE[token];
-    if (code) return code;
+  const lower = serverName.toLowerCase();
+  for (const [keyword, code] of Object.entries(COUNTRY_NAME_TO_CODE)) {
+    if (lower.includes(keyword)) return code;
   }
   return null;
 }

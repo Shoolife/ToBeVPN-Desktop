@@ -380,14 +380,6 @@
   background: var(--bg);
 }
 
-.routing-apply-error {
-  margin: 0 0 10px;
-  color: var(--danger);
-  font-size: 13px;
-  line-height: 1.35;
-  text-align: center;
-}
-
 .routing-actions button {
   width: 100%;
   height: 46px;

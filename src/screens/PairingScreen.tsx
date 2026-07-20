@@ -24,16 +24,12 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
   const [qrValue, setQrValue] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openingTelegram, setOpeningTelegram] = useState(false);
-  const [authenticating, setAuthenticating] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<CopiedTarget | null>(null);
   const onPairedRef = useRef(onPaired);
   const mountedRef = useRef(true);
   const pollTimerRef = useRef<number | null>(null);
   const retryTimerRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
-  const flowGenerationRef = useRef(0);
-  const openingTelegramRef = useRef(false);
-  const authenticatingRef = useRef(false);
   onPairedRef.current = onPaired;
 
   const clearTimers = () => {
@@ -52,13 +48,11 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
   };
 
   const beginDevicePairing = async () => {
-    if (!mountedRef.current || authenticatingRef.current) return;
-    const generation = ++flowGenerationRef.current;
+    if (!mountedRef.current) return;
     clearTimers();
     clearPendingAuthToken();
     setMode("device");
     setError(null);
-    openingTelegramRef.current = false;
     setOpeningTelegram(false);
     setAuthToken(null);
     setPairingCode(null);
@@ -66,193 +60,138 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
     setCopiedTarget(null);
     try {
       const { code } = await createDevicePairingCode();
-      if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+      if (!mountedRef.current) return;
       setPairingCode(code);
       setQrValue(createPairingDeepLink(code));
-      scheduleDevicePoll(code, generation);
+      scheduleDevicePoll(code);
     } catch (e) {
-      if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+      if (!mountedRef.current) return;
       setError(messageOf(e));
-      scheduleDeviceRetry(generation);
+      scheduleDeviceRetry();
     }
   };
 
-  const scheduleDevicePoll = (code: string, generation: number) => {
-    if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+  const scheduleDevicePoll = (code: string) => {
+    if (!mountedRef.current) return;
     pollTimerRef.current = window.setTimeout(() => {
-      pollTimerRef.current = null;
-      void pollDevice(code, generation);
+      void pollDevice(code);
     }, POLL_INTERVAL_MS);
   };
 
-  const scheduleDeviceRetry = (generation: number) => {
-    if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+  const scheduleDeviceRetry = () => {
+    if (!mountedRef.current) return;
     retryTimerRef.current = window.setTimeout(() => {
       retryTimerRef.current = null;
-      if (generation !== flowGenerationRef.current) return;
       void beginDevicePairing();
     }, QR_RETRY_DELAY_MS);
   };
 
-  const pollDevice = async (code: string, generation: number) => {
-    if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+  const pollDevice = async (code: string) => {
+    if (!mountedRef.current) return;
     try {
       const result = await pollDevicePairing(code);
-      if (!mountedRef.current || generation !== flowGenerationRef.current) return;
-      setError(null);
+      if (!mountedRef.current) return;
       if (result.status === "completed") {
         const payload = result.payload;
-        authenticatingRef.current = true;
-        setAuthenticating(true);
-        try {
-          await authenticateWithTelegramId(
-            payload.telegram_id!,
-            payload.short_uuid ?? null,
-            payload.panel_user_uuid ?? null,
-          );
-        } catch (authError) {
-          if (mountedRef.current && generation === flowGenerationRef.current) {
-            authenticatingRef.current = false;
-            setAuthenticating(false);
-          }
-          throw authError;
-        }
-        if (mountedRef.current && generation === flowGenerationRef.current) {
-          onPairedRef.current();
-        }
+        await authenticateWithTelegramId(
+          payload.telegram_id!,
+          payload.short_uuid ?? null,
+          payload.panel_user_uuid ?? null,
+        );
+        if (mountedRef.current) onPairedRef.current();
         return;
       }
       if (result.status === "expired") {
         await beginDevicePairing();
         return;
       }
-      scheduleDevicePoll(code, generation);
+      scheduleDevicePoll(code);
     } catch (e) {
-      if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+      if (!mountedRef.current) return;
       setError(messageOf(e));
-      scheduleDevicePoll(code, generation);
+      scheduleDevicePoll(code);
     }
   };
 
   useEffect(() => {
     mountedRef.current = true;
-    void beginTelegramPairing();
+    void beginTelegramPairing(false);
     return () => {
       mountedRef.current = false;
-      flowGenerationRef.current += 1;
-      openingTelegramRef.current = false;
-      authenticatingRef.current = false;
       clearTimers();
     };
   }, []);
 
-  const beginTelegramPairing = async () => {
-    if (authenticatingRef.current) return;
-    const generation = ++flowGenerationRef.current;
+  const beginTelegramPairing = async (openTelegram = false) => {
+    if (openTelegram && openingTelegram) return;
     clearTimers();
-    openingTelegramRef.current = false;
     setMode("telegram");
-    setOpeningTelegram(false);
+    setOpeningTelegram(openTelegram);
     setError(null);
     setPairingCode(null);
     setCopiedTarget(null);
     try {
       const { authToken: freshAuthToken, qrUrl } = await createPairingCode();
-      if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+      if (!mountedRef.current) return;
       setAuthToken(freshAuthToken);
       setQrValue(qrUrl);
-      scheduleTelegramPoll(freshAuthToken, generation);
-    } catch (e) {
-      if (!mountedRef.current || generation !== flowGenerationRef.current) return;
-      setError(messageOf(e));
-    }
-  };
-
-  const openCurrentTelegramPairing = async () => {
-    if (
-      !authToken ||
-      authenticatingRef.current ||
-      openingTelegramRef.current ||
-      !mountedRef.current
-    ) return;
-    const generation = flowGenerationRef.current;
-    const { desktopUrl, browserUrl } = getPairingOpenTargets(authToken);
-    openingTelegramRef.current = true;
-    setOpeningTelegram(true);
-    setError(null);
-    try {
-      try {
-        await openUrl(desktopUrl);
-      } catch {
-        if (!mountedRef.current || generation !== flowGenerationRef.current) return;
-        await openUrl(browserUrl);
+      scheduleTelegramPoll(freshAuthToken);
+      if (openTelegram) {
+        const { desktopUrl, browserUrl } = getPairingOpenTargets(freshAuthToken);
+        try {
+          await openUrl(desktopUrl);
+        } catch {
+          await openUrl(browserUrl);
+        }
       }
     } catch (e) {
-      if (mountedRef.current && generation === flowGenerationRef.current) {
-        setError(messageOf(e) || t("pairing_open_failed"));
-      }
+      if (!mountedRef.current) return;
+      setError(messageOf(e) || t("pairing_open_failed"));
     } finally {
-      if (mountedRef.current && generation === flowGenerationRef.current) {
-        openingTelegramRef.current = false;
-        setOpeningTelegram(false);
-      }
+      if (mountedRef.current) setOpeningTelegram(false);
     }
   };
 
-  const scheduleTelegramPoll = (currentAuthToken: string, generation: number) => {
-    if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+  const scheduleTelegramPoll = (currentAuthToken: string) => {
+    if (!mountedRef.current) return;
     pollTimerRef.current = window.setTimeout(() => {
-      pollTimerRef.current = null;
-      void pollTelegram(currentAuthToken, generation);
+      void pollTelegram(currentAuthToken);
     }, POLL_INTERVAL_MS);
   };
 
-  const pollTelegram = async (currentAuthToken: string, generation: number) => {
-    if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+  const pollTelegram = async (currentAuthToken: string) => {
+    if (!mountedRef.current) return;
     try {
       const result = await pollPairing(currentAuthToken);
-      if (!mountedRef.current || generation !== flowGenerationRef.current) return;
-      setError(null);
+      if (!mountedRef.current) return;
       if (result.status === "completed") {
         const payload = result.payload;
-        authenticatingRef.current = true;
-        setAuthenticating(true);
-        try {
-          await authenticateWithTelegramId(
-            payload.telegram_id!,
-            payload.short_uuid ?? null,
-            null,
-          );
-        } catch (authError) {
-          if (mountedRef.current && generation === flowGenerationRef.current) {
-            authenticatingRef.current = false;
-            setAuthenticating(false);
-          }
-          throw authError;
-        }
+        await authenticateWithTelegramId(
+          payload.telegram_id!,
+          payload.short_uuid ?? null,
+          null,
+        );
         clearPendingAuthToken();
-        if (mountedRef.current && generation === flowGenerationRef.current) {
-          onPairedRef.current();
-        }
+        if (mountedRef.current) onPairedRef.current();
         return;
       }
       if (result.status === "expired") {
         clearPendingAuthToken();
-        await beginTelegramPairing();
+        await beginTelegramPairing(false);
         return;
       }
-      scheduleTelegramPoll(currentAuthToken, generation);
+      scheduleTelegramPoll(currentAuthToken);
     } catch (e) {
-      if (!mountedRef.current || generation !== flowGenerationRef.current) return;
+      if (!mountedRef.current) return;
       setError(messageOf(e));
-      scheduleTelegramPoll(currentAuthToken, generation);
+      scheduleTelegramPoll(currentAuthToken);
     }
   };
 
   const selectMode = (nextMode: PairingMode) => {
-    if (authenticatingRef.current || nextMode === mode) return;
+    if (nextMode === mode) return;
     if (nextMode === "telegram") {
-      void beginTelegramPairing();
+      void beginTelegramPairing(false);
     } else {
       void beginDevicePairing();
     }
@@ -288,7 +227,6 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
           type="button"
           role="tab"
           aria-selected={mode === "telegram"}
-          disabled={authenticating}
           className={`pairing__mode-btn ${mode === "telegram" ? "pairing__mode-btn--active" : ""}`}
           onClick={() => selectMode("telegram")}
         >
@@ -298,7 +236,6 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
           type="button"
           role="tab"
           aria-selected={mode === "device"}
-          disabled={authenticating}
           className={`pairing__mode-btn ${mode === "device" ? "pairing__mode-btn--active" : ""}`}
           onClick={() => selectMode("device")}
         >
@@ -343,8 +280,8 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
           <button
             type="button"
             className="cta-pill pairing__action-btn"
-            onClick={() => { void openCurrentTelegramPairing(); }}
-            disabled={!authToken || openingTelegram || authenticating}
+            onClick={() => { void beginTelegramPairing(true); }}
+            disabled={openingTelegram}
           >
             {openingTelegram ? t("pairing_opening_telegram") : t("pairing_open_telegram")}
           </button>

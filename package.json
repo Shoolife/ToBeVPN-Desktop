@@ -1,15 +1,16 @@
 {
   "name": "tobevpn-desktop",
   "private": true,
-  "version": "1.0.77",
+  "version": "1.0.76",
   "type": "module",
   "scripts": {
     "inject-host": "bash scripts/inject-backend-host.sh",
     "restore-host": "bash scripts/restore-placeholder.sh",
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "npm run inject-host && vite",
+    "build": "npm run inject-host && tsc && vite build",
     "preview": "vite preview",
-    "tauri": "bash scripts/with-backend-hosts.sh tauri"
+    "tauri": "tauri",
+    "post-tauri-build": "npm run restore-host"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

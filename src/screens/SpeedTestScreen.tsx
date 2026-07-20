@@ -20,45 +20,6 @@ const DOWNLOAD_URLS = [
 const PING_URL = "https://speed.cloudflare.com/__down?bytes=1";
 const PING_COUNT = 3;
 const TEST_DURATION_MS = 10_000;
-const PING_REQUEST_TIMEOUT_MS = 5_000;
-const DOWNLOAD_REQUEST_TIMEOUT_MS = 4_000;
-const FAILED_REQUEST_BACKOFF_MS = 120;
-
-async function withAbortTimeout<T>(
-  parentSignal: AbortSignal,
-  timeoutMs: number,
-  operation: (signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  const controller = new AbortController();
-  const forwardAbort = () => controller.abort(parentSignal.reason);
-  if (parentSignal.aborted) forwardAbort();
-  else parentSignal.addEventListener("abort", forwardAbort, { once: true });
-  const timeoutId = window.setTimeout(
-    () => controller.abort(new Error("Request timed out")),
-    Math.max(1, timeoutMs),
-  );
-  try {
-    return await operation(controller.signal);
-  } finally {
-    window.clearTimeout(timeoutId);
-    parentSignal.removeEventListener("abort", forwardAbort);
-  }
-}
-
-function abortableDelay(signal: AbortSignal, delayMs: number): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const timeoutId = window.setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, delayMs);
-    const onAbort = () => {
-      window.clearTimeout(timeoutId);
-      resolve();
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
 
 function gaugeColor(speed: number): string {
   if (speed < 10) return "var(--danger)";
@@ -108,14 +69,8 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
     const ping = async (): Promise<number | null> => {
       const start = performance.now();
       try {
-        await withAbortTimeout(signal, PING_REQUEST_TIMEOUT_MS, async (requestSignal) => {
-          const res = await fetch(PING_URL, {
-            cache: "no-store",
-            signal: requestSignal,
-          });
-          if (!res.ok) throw new Error(`Ping request failed: ${res.status}`);
-          await res.arrayBuffer();
-        });
+        const res = await fetch(PING_URL, { cache: "no-store", signal });
+        await res.arrayBuffer();
         return Math.round(performance.now() - start);
       } catch {
         return null;
@@ -156,50 +111,35 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
       const url = DOWNLOAD_URLS[urlIndex % DOWNLOAD_URLS.length];
       urlIndex++;
 
+      let res: Response;
       try {
-        const remainingMs = Math.max(1, deadline - performance.now());
-        await withAbortTimeout(
-          signal,
-          Math.min(DOWNLOAD_REQUEST_TIMEOUT_MS, remainingMs),
-          async (requestSignal) => {
-            const res = await fetch(url, {
-              signal: requestSignal,
-              cache: "no-store",
-            });
-            if (!res.ok || !res.body) {
-              throw new Error(`Download request failed: ${res.status}`);
-            }
-
-            const reader = res.body.getReader();
-            try {
-              while (performance.now() < deadline && !requestSignal.aborted) {
-                // The per-request controller also bounds a stalled read().
-                // Without it WebView fetch can remain pending forever after a
-                // route change, sleep/resume, or a half-open HTTP connection.
-                const { done, value } = await reader.read();
-                if (done) break;
-                totalBytes += value.byteLength;
-                const now = performance.now();
-                if (now - lastReport >= 200) {
-                  const elapsedSec = (now - startTime) / 1000;
-                  if (elapsedSec > 0) {
-                    onProgress((totalBytes * 8) / (elapsedSec * 1_000_000));
-                  }
-                  lastReport = now;
-                }
-              }
-            } finally {
-              // Do not await cancel(): some WebView implementations keep its
-              // promise pending with the same broken transport as read().
-              void reader.cancel().catch(() => {});
-            }
-          },
-        );
+        res = await fetch(url, { signal, cache: "no-store" });
       } catch {
-        // A fast DNS/TLS failure used to create a hot loop for the full test
-        // duration. Back off briefly before rotating to the next endpoint.
-        await abortableDelay(signal, FAILED_REQUEST_BACKOFF_MS);
+        // One endpoint may be unreachable through the tunnel; keep going
+        // with the next URL — only fail if every endpoint fails.
         continue;
+      }
+      if (!res.ok || !res.body) continue;
+
+      const reader = res.body.getReader();
+      while (performance.now() < deadline && !signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        const now = performance.now();
+        if (now - lastReport >= 200) {
+          const elapsedSec = (now - startTime) / 1000;
+          if (elapsedSec > 0) {
+            onProgress((totalBytes * 8) / (elapsedSec * 1_000_000));
+          }
+          lastReport = now;
+        }
+      }
+      // Drop the rest of the body — we control the loop, not the file size.
+      try {
+        await reader.cancel();
+      } catch {
+        // already done
       }
     }
 
@@ -232,9 +172,7 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
 
       setPhase("download");
       const finalMbps = await measureDownload(controller.signal, (mbps) => {
-        if (abortRef.current === controller && !controller.signal.aborted) {
-          setCurrentSpeed(mbps);
-        }
+        setCurrentSpeed(mbps);
       });
       if (controller.signal.aborted) return;
 
@@ -250,19 +188,12 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
         setPhase("done");
       }
     } finally {
-      // An aborted, older run must not unlock the button while a newer run is
-      // active. Only the controller that still owns the slot may release it.
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-        runningRef.current = false;
-      }
+      runningRef.current = false;
     }
   };
 
   const resetTest = () => {
-    const controller = abortRef.current;
-    abortRef.current = null;
-    controller?.abort();
+    abortRef.current?.abort();
     runningRef.current = false;
     setPhase("idle");
     setCurrentSpeed(0);

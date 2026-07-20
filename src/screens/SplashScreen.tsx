@@ -53,7 +53,7 @@ export default function SplashScreen({
     let doneTimer: number | null = null;
 
     void (async () => {
-      const startedAt = performance.now();
+      const startedAt = Date.now();
 
       if (getAutoUpdateEnabled()) {
         setPhase("checking");
@@ -91,10 +91,7 @@ export default function SplashScreen({
       }
       if (cancelled) return;
 
-      const remainingDelay = Math.max(
-        0,
-        SPLASH_HOLD_MS - (performance.now() - startedAt),
-      );
+      const remainingDelay = Math.max(0, SPLASH_HOLD_MS - (Date.now() - startedAt));
       leaveTimer = window.setTimeout(() => {
         if (cancelled) return;
         setLeaving(true);
@@ -382,7 +379,7 @@ function getBrowserPreviewState(): {
 } {
   const params = new URLSearchParams(window.location.search);
   const mode = params.get("startup") ?? "checking";
-  const version = params.get("updateVersion") ?? "1.0.77";
+  const version = params.get("updateVersion") ?? "1.0.76";
   const info = { version, notes: "" };
 
   if (mode === "downloading") {

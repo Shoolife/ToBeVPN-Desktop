@@ -87,18 +87,7 @@ export default function ServersScreen({
   const session = useSession();
   const showEndpoint = forceShowEndpoint ?? session.isAdminProfile;
   const pingGenRef = useRef(0);
-  const loadGenRef = useRef(0);
-  const mountedRef = useRef(true);
   const loading = serverLoading || pingLoading;
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      loadGenRef.current += 1;
-      pingGenRef.current += 1;
-    };
-  }, []);
 
   useEffect(() => {
     if (flagsReady) return;
@@ -112,10 +101,6 @@ export default function ServersScreen({
   }, [flagsReady]);
 
   const showServers = useCallback((vpnServers: VpnServer[]) => {
-    if (!mountedRef.current) return;
-    // A successful cache/subscription update supersedes a previous transient
-    // request error, including an authoritative empty server list.
-    setError(null);
     const items: ServerItem[] = vpnServers.map((s) => ({
       ...s,
       ping: 0,
@@ -127,14 +112,10 @@ export default function ServersScreen({
       })),
     );
     const gen = ++pingGenRef.current;
-    if (items.length === 0) {
-      setPingLoading(false);
-      return;
-    }
     setPingLoading(true);
     void measureVpnServerPings(items, { force: true })
       .then((pings) => {
-        if (!mountedRef.current || pingGenRef.current !== gen) return;
+        if (pingGenRef.current !== gen) return;
         setServers((current) =>
           current.map((server) => ({
             ...server,
@@ -143,7 +124,7 @@ export default function ServersScreen({
         );
       })
       .catch(() => {
-        if (!mountedRef.current || pingGenRef.current !== gen) return;
+        if (pingGenRef.current !== gen) return;
         setServers((current) =>
           current.map((server) => ({
             ...server,
@@ -152,7 +133,7 @@ export default function ServersScreen({
         );
       })
       .finally(() => {
-        if (mountedRef.current && pingGenRef.current === gen) {
+        if (pingGenRef.current === gen) {
           setPingLoading(false);
         }
       });
@@ -160,7 +141,7 @@ export default function ServersScreen({
 
   const selectAutomatic = useCallback(() => {
     void selectBestVpnServer(servers).then((best) => {
-      if (mountedRef.current && best) {
+      if (best) {
         onSelectAutomatic(best);
       }
     });
@@ -169,10 +150,7 @@ export default function ServersScreen({
   const automaticEnabled = servers.some(isAvailableVpnServer);
 
   const load = useCallback(async (opts: { force?: boolean } = {}) => {
-    const generation = ++loadGenRef.current;
-    const isCurrent = () => mountedRef.current && generation === loadGenRef.current;
     if (previewServers) {
-      if (!isCurrent()) return;
       showServers(previewServers);
       setServerLoading(false);
       setError(null);
@@ -183,7 +161,6 @@ export default function ServersScreen({
     if (cachedServers.length > 0) {
       showServers(cachedServers);
     }
-    if (!isCurrent()) return;
     setServerLoading(true);
     setError(null);
     try {
@@ -192,18 +169,16 @@ export default function ServersScreen({
       // window so re-entering doesn't hammer the panel.
       if (opts.force) {
         await syncSubscription({ force: true }).catch(() => {});
-        if (!isCurrent()) return;
       }
       const vpnServers = await fetchVpnServers();
-      if (!isCurrent()) return;
       showServers(vpnServers);
     } catch (e) {
-      if (isCurrent() && cachedServers.length === 0) {
+      if (cachedServers.length === 0) {
         setError(loadErrorText(e));
         setServers([]);
       }
     } finally {
-      if (isCurrent()) setServerLoading(false);
+      setServerLoading(false);
     }
   }, [previewServers, showServers]);
 
@@ -215,9 +190,9 @@ export default function ServersScreen({
     if (previewServers) return;
     return subscribeVpnServers(() => {
       const cachedServers = getCachedVpnServers();
-      // Empty is authoritative too (revocation/plan block), and must replace
-      // a stale list already rendered by this screen.
-      showServers(cachedServers);
+      if (cachedServers.length > 0) {
+        showServers(cachedServers);
+      }
     });
   }, [previewServers, showServers]);
 

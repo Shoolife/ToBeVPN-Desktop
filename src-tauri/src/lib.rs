@@ -5,7 +5,7 @@ mod vpn;
 
 use keyring::{Entry, Error as KeyringError};
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -22,8 +22,6 @@ use gtk::prelude::*;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-#[cfg(target_os = "windows")]
-use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 
 use vpn::config::ServerConfig;
 use vpn::manager::VpnManager;
@@ -44,73 +42,11 @@ struct VpnPipelineLock {
 
 const SECURE_SESSION_SERVICE: &str = "network.tobevpn.desktop";
 const SECURE_SESSION_ACCOUNT: &str = "device-session-v1";
-const SECURE_SESSION_TOMBSTONE: &str = "tobevpn-revoked-v1";
 const MAX_DESKTOP_STATS_BYTES: usize = 512 * 1024;
-const MAX_SECURE_SESSION_BYTES: usize = 64 * 1024;
-const MAX_PING_BYPASS_HOSTS: usize = 512;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(target_os = "linux")]
 const LEGACY_WEBKIT_WAL_COMPACT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
-
-#[cfg(target_os = "windows")]
-pub(crate) fn windows_system_directory() -> Result<PathBuf, String> {
-    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
-
-    let mut buffer = vec![0u16; 32_768];
-    let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
-    if length == 0 || length >= buffer.len() {
-        return Err("Could not resolve the Windows system directory".into());
-    }
-    Ok(PathBuf::from(OsString::from_wide(&buffer[..length])))
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn windows_system_binary(relative_path: &str) -> Result<PathBuf, String> {
-    let path = windows_system_directory()?.join(relative_path);
-    if !path.is_file() {
-        return Err(format!(
-            "Windows system binary is missing: {}",
-            path.display()
-        ));
-    }
-    Ok(path)
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn configure_windows_powershell_environment(
-    command: &mut std::process::Command,
-) -> Result<(), String> {
-    let system_dir = windows_system_directory()?;
-    let windows_dir = system_dir
-        .parent()
-        .ok_or_else(|| "Windows system directory has no parent".to_string())?;
-    let powershell_dir = system_dir.join("WindowsPowerShell").join("v1.0");
-    let module_path = powershell_dir.join("Modules");
-    let wbem_dir = system_dir.join("Wbem");
-    let trusted_path = std::env::join_paths([
-        system_dir.as_path(),
-        wbem_dir.as_path(),
-        powershell_dir.as_path(),
-    ])
-    .map_err(|_| "Could not construct the trusted Windows command path".to_string())?;
-
-    // The elevated app inherits environment variables from the unelevated
-    // launcher. In particular, a user-writable PSModulePath lets PowerShell
-    // auto-load a counterfeit NetSecurity/NetTCPIP module as Administrator.
-    command
-        .env_clear()
-        .env("SystemRoot", windows_dir)
-        .env("WINDIR", windows_dir)
-        .env("ComSpec", system_dir.join("cmd.exe"))
-        .env("PATH", trusted_path)
-        .env("PSModulePath", module_path)
-        .env("TEMP", windows_dir.join("Temp"))
-        .env("TMP", windows_dir.join("Temp"))
-        .env("POWERSHELL_TELEMETRY_OPTOUT", "1")
-        .current_dir(&system_dir);
-    Ok(())
-}
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -137,6 +73,7 @@ fn show_main_window(app: &tauri::AppHandle) {
             restore_window_chrome(&window);
             let _ = window.set_focus();
             refresh_window_chrome_after_show(window);
+            return;
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -302,6 +239,15 @@ fn refresh_window_chrome_after_show(window: tauri::WebviewWindow) {
     let _ = window;
 }
 
+/// Returns the system hostname (e.g. "ivan-pc").
+#[tauri::command]
+fn get_hostname() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_default()
+}
+
 /// Stable per-machine ID. Linux: /etc/machine-id, macOS: IOPlatformUUID,
 /// Windows: HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid.
 /// Survives app reinstall, does NOT survive OS reinstall.
@@ -374,19 +320,7 @@ fn clean_device_model_part(value: &str) -> Option<String> {
     if generic.contains(&normalized.as_str()) {
         None
     } else {
-        let bounded = cleaned
-            .chars()
-            .map(|character| {
-                if character.is_control() {
-                    ' '
-                } else {
-                    character
-                }
-            })
-            .take(256)
-            .collect::<String>();
-        let bounded = bounded.split_whitespace().collect::<Vec<_>>().join(" ");
-        (!bounded.is_empty()).then_some(bounded)
+        Some(cleaned.to_string())
     }
 }
 
@@ -452,48 +386,23 @@ fn detect_hardware_model() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn detect_hardware_model() -> Option<String> {
-    let powershell = windows_system_binary("WindowsPowerShell\\v1.0\\powershell.exe").ok()?;
-    let mut command = std::process::Command::new(powershell);
-    configure_windows_powershell_environment(&mut command).ok()?;
-    let mut child = command
+    let mut command = std::process::Command::new("powershell.exe");
+    let output = command
         .args([
-            "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            "$c=Get-CimInstance Win32_ComputerSystem; $v=(($c.Manufacturer,$c.Model) -join ' '); if ($v.Length -gt 512) { $v=$v.Substring(0,512) }; $v",
+            "$c=Get-CimInstance Win32_ComputerSystem; (($c.Manufacturer,$c.Model) -join ' ')",
         ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
+        .output()
         .ok()?;
-    let deadline = Instant::now() + Duration::from_millis(1_500);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    if !status.success() {
+    if !output.status.success() {
         return None;
     }
-    let stdout = child.stdout.take()?;
-    let mut bytes = Vec::new();
-    stdout.take(4_097).read_to_end(&mut bytes).ok()?;
-    if bytes.len() > 4_096 {
-        return None;
-    }
-    clean_device_model_part(&String::from_utf8_lossy(&bytes))
+    clean_device_model_part(&String::from_utf8_lossy(&output.stdout))
 }
 
 #[cfg(target_os = "macos")]
@@ -522,8 +431,7 @@ fn secure_session_entry() -> Result<Entry, String> {
 fn load_secure_session() -> Result<Option<String>, String> {
     let entry = secure_session_entry()?;
     match entry.get_password() {
-        Ok(value) if value.len() <= MAX_SECURE_SESSION_BYTES => Ok(Some(value)),
-        Ok(_) => Err("Secure session payload is unexpectedly large".into()),
+        Ok(value) => Ok(Some(value)),
         Err(KeyringError::NoEntry) => Ok(None),
         Err(e) => Err(format!("Could not load secure session: {e}")),
     }
@@ -531,9 +439,6 @@ fn load_secure_session() -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn save_secure_session(value: String) -> Result<(), String> {
-    if value.len() > MAX_SECURE_SESSION_BYTES {
-        return Err("Secure session payload is unexpectedly large".into());
-    }
     let entry = secure_session_entry()?;
     entry
         .set_password(&value)
@@ -543,168 +448,53 @@ fn save_secure_session(value: String) -> Result<(), String> {
 #[tauri::command]
 fn clear_secure_session() -> Result<(), String> {
     let entry = secure_session_entry()?;
-    // Overwrite before delete. Some keyring backends can successfully update
-    // an item while deletion later fails (locked collection, backend race).
-    // In that case the surviving value is still deliberately unparsable and
-    // cannot resurrect a logged-out device session on the next launch.
-    match entry.set_password(SECURE_SESSION_TOMBSTONE) {
-        Ok(()) => {
-            match entry.delete_credential() {
-                Ok(_) | Err(KeyringError::NoEntry) => {}
-                Err(error) => eprintln!(
-                    "[SESSION] keyring tombstone retained because deletion failed: {error}"
-                ),
-            }
-            Ok(())
-        }
-        Err(overwrite_error) => match entry.delete_credential() {
-            Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(delete_error) => Err(format!(
-                "Could not revoke secure session (overwrite: {overwrite_error}; delete: {delete_error})"
-            )),
-        },
+    match entry.delete_credential() {
+        Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(e) => Err(format!("Could not clear secure session: {e}")),
     }
 }
 
-fn desktop_stats_path() -> Result<PathBuf, String> {
+fn desktop_stats_path() -> PathBuf {
     dirs::data_local_dir()
-        .ok_or_else(|| "Could not resolve the per-user local data directory".to_string())
-        .map(|directory| directory.join("ToBeVPN").join("stats.json"))
-}
-
-fn validate_desktop_stats_payload(payload: &str) -> Result<(), String> {
-    if payload.len() > MAX_DESKTOP_STATS_BYTES {
-        return Err("Desktop stats payload is unexpectedly large".into());
-    }
-    let parsed: serde_json::Value = serde_json::from_str(payload)
-        .map_err(|error| format!("Desktop stats JSON is invalid: {error}"))?;
-    if !parsed
-        .as_object()
-        .and_then(|object| object.get("buckets"))
-        .is_some_and(serde_json::Value::is_array)
-    {
-        return Err("Desktop stats payload has an invalid shape".into());
-    }
-    Ok(())
-}
-
-fn read_desktop_stats_file(path: &std::path::Path) -> Result<Option<String>, String> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("Could not inspect {}: {error}", path.display())),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format!(
-            "Desktop stats path {} is not a regular file",
-            path.display()
-        ));
-    }
-    if metadata.len() > MAX_DESKTOP_STATS_BYTES as u64 {
-        return Err(format!(
-            "Desktop stats file {} is too large",
-            path.display()
-        ));
-    }
-    let file = fs::File::open(path)
-        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take((MAX_DESKTOP_STATS_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-    if bytes.len() > MAX_DESKTOP_STATS_BYTES {
-        return Err(format!(
-            "Desktop stats file {} is too large",
-            path.display()
-        ));
-    }
-    let payload = String::from_utf8(bytes)
-        .map_err(|_| format!("Desktop stats file {} is not UTF-8", path.display()))?;
-    validate_desktop_stats_payload(&payload)?;
-    Ok(Some(payload))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ToBeVPN")
+        .join("stats.json")
 }
 
 #[tauri::command]
 fn load_desktop_stats() -> Result<Option<String>, String> {
-    let path = desktop_stats_path()?;
-    match read_desktop_stats_file(&path) {
-        Ok(Some(value)) => return Ok(Some(value)),
-        Ok(None) => {}
-        Err(error) => eprintln!("[STATS] primary stats file rejected: {error}"),
-    }
-    let backup = path.with_extension("json.bak");
-    match read_desktop_stats_file(&backup) {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            // Both copies are unusable. Start from an empty in-memory store;
-            // the next valid save repairs the primary without trusting either.
-            eprintln!("[STATS] backup stats file rejected: {error}");
-            Ok(None)
-        }
+    match fs::read_to_string(desktop_stats_path()) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Could not load desktop stats: {error}")),
     }
 }
 
 #[tauri::command]
 fn save_desktop_stats(payload: String) -> Result<(), String> {
-    validate_desktop_stats_payload(&payload)?;
+    if payload.len() > MAX_DESKTOP_STATS_BYTES {
+        return Err("Desktop stats payload is unexpectedly large".into());
+    }
 
-    let path = desktop_stats_path()?;
+    let path = desktop_stats_path();
     let parent = path
         .parent()
         .ok_or_else(|| "Desktop stats path has no parent directory".to_string())?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("Could not create desktop stats directory: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("Could not secure desktop stats directory: {error}"))?;
-    }
 
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".stats-")
-        .suffix(".tmp")
-        .tempfile_in(parent)
-        .map_err(|error| format!("Could not create desktop stats temp file: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Could not secure desktop stats temp file: {error}"))?;
-    }
-    temporary
-        .as_file_mut()
-        .write_all(payload.as_bytes())
-        .and_then(|_| temporary.as_file().sync_all())
+    let temporary_path = path.with_extension("json.tmp");
+    fs::write(&temporary_path, payload)
         .map_err(|error| format!("Could not write desktop stats: {error}"))?;
 
-    let backup_path = path.with_extension("json.bak");
-    if fs::symlink_metadata(&path).is_ok() {
-        if read_desktop_stats_file(&path).ok().flatten().is_some() {
-            if fs::symlink_metadata(&backup_path).is_ok() {
-                fs::remove_file(&backup_path)
-                    .map_err(|error| format!("Could not replace desktop stats backup: {error}"))?;
-            }
-            fs::rename(&path, &backup_path)
-                .map_err(|error| format!("Could not stage previous desktop stats: {error}"))?;
-        } else {
-            fs::remove_file(&path)
-                .map_err(|error| format!("Could not remove corrupt desktop stats: {error}"))?;
-        }
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("Could not replace desktop stats: {error}"))?;
     }
-    if let Err(error) = temporary.persist(&path) {
-        if fs::symlink_metadata(&backup_path).is_ok() && fs::symlink_metadata(&path).is_err() {
-            let _ = fs::rename(&backup_path, &path);
-        }
-        return Err(format!("Could not commit desktop stats: {error}"));
-    }
-    #[cfg(unix)]
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("Could not sync desktop stats directory: {error}"))?;
-    Ok(())
+
+    fs::rename(&temporary_path, &path)
+        .map_err(|error| format!("Could not commit desktop stats: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -712,10 +502,8 @@ fn compact_legacy_webkit_localstorage() {
     use rusqlite::{Connection, OpenFlags};
     use std::time::Duration;
 
-    let Some(data_local_dir) = dirs::data_local_dir() else {
-        return;
-    };
-    let database_path = data_local_dir
+    let database_path = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
         .join("com.tobevpn.desktop")
         .join("localstorage")
         .join("tauri_localhost_0.localstorage");
@@ -786,19 +574,34 @@ async fn install_latest_linux_update(_version: String) -> Result<(), String> {
 /// Measure TCP connect latency to `host:port`.
 #[tauri::command]
 async fn tcp_ping(host: String, port: u16, timeout_ms: u64) -> i64 {
-    let ip = match host.trim().parse::<std::net::Ipv4Addr>() {
-        Ok(ip) if vpn::config::is_allowed_server_ipv4(ip) => ip,
-        _ => return -1,
-    };
-    if port == 0 {
-        return -1;
-    }
-    let deadline = Duration::from_millis(timeout_ms.clamp(100, 5_000));
+    let addr = format!("{}:{}", host, port);
+    let deadline = Duration::from_millis(timeout_ms);
     let start = Instant::now();
-    match timeout(deadline, TcpStream::connect((ip, port))).await {
+    match timeout(deadline, TcpStream::connect(&addr)).await {
         Ok(Ok(_)) => start.elapsed().as_millis() as i64,
         _ => -1,
     }
+}
+
+/// Resolve a hostname to its first IP (IPv4 preferred). Returns empty string on failure.
+#[tauri::command]
+async fn resolve_host(host: String) -> String {
+    tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        let addr = format!("{}:0", host);
+        let mut addrs: Vec<_> = addr
+            .to_socket_addrs()
+            .ok()
+            .map(|it| it.collect())
+            .unwrap_or_default();
+        addrs.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        addrs
+            .first()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Add direct routes for server ping targets while a tunnel is active and
@@ -812,17 +615,8 @@ async fn prepare_ping_bypass(
     hosts: Vec<String>,
     state: tauri::State<'_, AppVpn>,
 ) -> Result<Vec<PingHostMapping>, String> {
-    if hosts.len() > MAX_PING_BYPASS_HOSTS {
-        return Err("Too many ping destinations".into());
-    }
-    if hosts.iter().any(|host| {
-        let host = host.trim();
-        host.is_empty() || host.len() > 253 || host.chars().any(char::is_control)
-    }) {
-        return Err("One or more ping destinations are invalid".into());
-    }
-    let manager = state.0.lock().await.clone();
-    match manager.as_ref() {
+    let guard = state.0.lock().await;
+    match guard.as_ref() {
         Some(mgr) => mgr.prepare_ping_bypass(hosts).await,
         None => Ok(Vec::new()),
     }
@@ -835,7 +629,6 @@ async fn start_vpn(
     state: tauri::State<'_, AppVpn>,
     pipeline: tauri::State<'_, VpnPipelineLock>,
 ) -> Result<(), String> {
-    server.validate()?;
     // Signal cancellation before waiting on the gate. Otherwise a rapid
     // server switch or Stop press can wait behind an obsolete start that
     // still raises system routes and briefly becomes active.
@@ -846,8 +639,8 @@ async fn start_vpn(
     // processes that the second start can't detect via `prev_state`.
     let _gate = pipeline.gate.lock().await;
     attempt.ensure_active()?;
-    let manager = state.0.lock().await.clone();
-    match manager.as_ref() {
+    let guard = state.0.lock().await;
+    match guard.as_ref() {
         Some(mgr) => mgr.start(server, &attempt).await,
         None => Err("VPN manager not initialized".into()),
     }
@@ -863,8 +656,8 @@ async fn stop_vpn(
     // the serialized native pipeline.
     ConnectAttempt::cancel_current(&pipeline.generation);
     let _gate = pipeline.gate.lock().await;
-    let manager = state.0.lock().await.clone();
-    match manager.as_ref() {
+    let guard = state.0.lock().await;
+    match guard.as_ref() {
         Some(mgr) => mgr.stop().await,
         None => Err("VPN manager not initialized".into()),
     }
@@ -873,8 +666,8 @@ async fn stop_vpn(
 /// Get the current VPN connection state.
 #[tauri::command]
 async fn get_vpn_state(state: tauri::State<'_, AppVpn>) -> Result<VpnState, String> {
-    let manager = state.0.lock().await.clone();
-    match manager.as_ref() {
+    let guard = state.0.lock().await;
+    match guard.as_ref() {
         Some(mgr) => Ok(mgr.get_state().await),
         None => Ok(VpnState::Disconnected),
     }
@@ -883,8 +676,8 @@ async fn get_vpn_state(state: tauri::State<'_, AppVpn>) -> Result<VpnState, Stri
 /// Query current traffic stats (uplink/downlink bytes since last query).
 #[tauri::command]
 async fn get_traffic_stats(state: tauri::State<'_, AppVpn>) -> Result<TrafficStats, String> {
-    let manager = state.0.lock().await.clone();
-    match manager.as_ref() {
+    let guard = state.0.lock().await;
+    match guard.as_ref() {
         Some(mgr) => mgr.query_stats().await.ok_or("Stats unavailable".into()),
         None => Err("VPN manager not initialized".into()),
     }
@@ -893,8 +686,8 @@ async fn get_traffic_stats(state: tauri::State<'_, AppVpn>) -> Result<TrafficSta
 /// Read xray-core version from the bundled sidecar binary.
 #[tauri::command]
 async fn get_xray_version(state: tauri::State<'_, AppVpn>) -> Result<String, String> {
-    let manager = state.0.lock().await.clone();
-    Ok(match manager.as_ref() {
+    let guard = state.0.lock().await;
+    Ok(match guard.as_ref() {
         Some(mgr) => mgr.xray_version().await,
         None => "unknown".into(),
     })
@@ -933,6 +726,7 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -982,9 +776,8 @@ pub fn run() {
             manager.set_app_handle(app.handle().clone());
             let shared = Arc::new(Mutex::new(Some(manager)));
             app.manage(AppVpn(shared.clone()));
-            let pipeline_gate = Arc::new(Mutex::new(()));
             app.manage(VpnPipelineLock {
-                gate: pipeline_gate.clone(),
+                gate: Arc::new(Mutex::new(())),
                 generation: Arc::new(AtomicU64::new(0)),
             });
 
@@ -1101,11 +894,6 @@ pub fn run() {
             // until they're removed. Run the cleanup off the setup thread so the
             // window opens immediately even if pkexec takes a moment.
             tauri::async_runtime::spawn(async move {
-                // Startup cleanup and user-triggered start/stop must never
-                // overlap. On Windows cleanup may terminate exact stale
-                // sidecars; without this gate a very fast Connect click could
-                // make it kill the newly spawned session instead.
-                let _pipeline_guard = pipeline_gate.lock().await;
                 let guard = shared.lock().await;
                 if let Some(mgr) = guard.as_ref() {
                     mgr.cleanup_stale_state().await;
@@ -1115,6 +903,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_hostname,
             get_hwid,
             get_os_version,
             get_os_name,
@@ -1130,6 +919,7 @@ pub fn run() {
             save_desktop_stats,
             install_latest_linux_update,
             tcp_ping,
+            resolve_host,
             prepare_ping_bypass,
             start_vpn,
             stop_vpn,
@@ -1140,52 +930,22 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // ExitRequested fires while the async runtime is still alive. Keep
-            // the process (and tray recovery controls) running if privileged
-            // route/DNS cleanup fails; otherwise a failed pkexec/UAC operation
-            // could leave the host offline after the UI has disappeared.
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                let cleanup_error = if let (Some(state), Some(pipeline)) = (
-                    app_handle.try_state::<AppVpn>(),
-                    app_handle.try_state::<VpnPipelineLock>(),
-                ) {
+            // Only run on ExitRequested — fires once before shutdown while async
+            // runtime is still alive. Avoids double-prompt for the pkexec password.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app_handle.try_state::<AppVpn>() {
                     let manager = state.0.clone();
-                    let gate = pipeline.gate.clone();
                     tauri::async_runtime::block_on(async move {
-                        let _pipeline_guard = gate.lock().await;
                         let guard = manager.lock().await;
                         if let Some(mgr) = guard.as_ref() {
                             if !matches!(mgr.get_state().await, VpnState::Disconnected) {
                                 eprintln!("[EXIT] VPN was active — running cleanup");
-                                return mgr.stop().await.err();
+                                let _ = mgr.stop().await;
+                                eprintln!("[EXIT] Cleanup complete");
                             }
                         }
-                        None
-                    })
-                } else {
-                    None
-                };
-
-                if let Some(error) = cleanup_error {
-                    eprintln!("[EXIT] Cleanup failed; keeping application alive: {error}");
-                    api.prevent_exit();
-                    show_main_window(app_handle);
-                } else {
-                    eprintln!("[EXIT] Cleanup complete");
+                    });
                 }
             }
         });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_desktop_stats_payload;
-
-    #[test]
-    fn desktop_stats_payload_requires_expected_shape() {
-        assert!(validate_desktop_stats_payload(r#"{"buckets":[]}"#).is_ok());
-        assert!(validate_desktop_stats_payload("[]").is_err());
-        assert!(validate_desktop_stats_payload(r#"{"buckets":{}}"#).is_err());
-        assert!(validate_desktop_stats_payload("not-json").is_err());
-    }
 }

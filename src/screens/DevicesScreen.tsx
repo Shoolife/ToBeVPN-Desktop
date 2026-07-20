@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { t } from "../i18n";
 import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../session/auth";
 import { formatEpochSecondsDateDots } from "../session/dateFormat";
@@ -93,22 +93,14 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
   const [currentAliases, setCurrentAliases] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const loadGenerationRef = useRef(0);
-  const unlinkGenerationRef = useRef(0);
-  const unlinkingRef = useRef(false);
-  const mountedRef = useRef(true);
 
   const load = async () => {
-    const generation = ++loadGenerationRef.current;
     setLoading(true);
-    setError(null);
     try {
       const [data, aliases] = await Promise.all([
         fetchDevices(),
         getCurrentDeviceAliases(),
       ]);
-      if (generation !== loadGenerationRef.current) return;
       setCurrentAliases(aliases);
       if (data) {
         setDevices(data.devices);
@@ -116,47 +108,25 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
         setCurrentCount(data.current_count ?? null);
       }
     } catch {
-      if (generation === loadGenerationRef.current) {
-        setError(t("devices_load_error"));
-      }
+      // keep previous state
     } finally {
-      if (generation === loadGenerationRef.current) setLoading(false);
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    mountedRef.current = true;
-    void load();
-    return () => {
-      mountedRef.current = false;
-      loadGenerationRef.current++;
-      unlinkGenerationRef.current++;
-      unlinkingRef.current = false;
-    };
+    load();
   }, []);
 
   const handleUnlink = async (deviceId: string) => {
-    if (unlinkingRef.current) return;
-    unlinkingRef.current = true;
-    const generation = ++unlinkGenerationRef.current;
     setUnlinkingId(deviceId);
-    setError(null);
     try {
       await unlinkOtherDevice(deviceId);
-      if (!mountedRef.current || generation !== unlinkGenerationRef.current) return;
       setDevices((prev) => prev.filter((d) => d.device_id !== deviceId));
-      setCurrentCount((count) =>
-        count === null ? null : Math.max(0, count - 1),
-      );
     } catch {
-      if (mountedRef.current && generation === unlinkGenerationRef.current) {
-        setError(t("devices_unlink_error"));
-      }
+      // ignore
     } finally {
-      if (generation === unlinkGenerationRef.current) {
-        unlinkingRef.current = false;
-        if (mountedRef.current) setUnlinkingId(null);
-      }
+      setUnlinkingId(null);
     }
   };
 
@@ -193,11 +163,6 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
       </div>
 
       <div className="devices-content">
-        {error && (
-          <button type="button" className="devices-error" onClick={() => void load()}>
-            {error}
-          </button>
-        )}
         {/* Counter */}
         <div className="devices-counter">
           <span className="devices-counter__count">
@@ -251,7 +216,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
               <button
                 className="devices-card__disconnect"
                 onClick={() => handleUnlink(d.device_id)}
-                disabled={unlinkingId !== null}
+                disabled={unlinkingId === d.device_id}
               >
                 {t("devices_disconnect")}
               </button>

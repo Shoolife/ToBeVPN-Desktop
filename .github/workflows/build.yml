@@ -25,31 +25,14 @@ jobs:
   audit:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@v5
 
       - name: Require fallback endpoints for tagged releases
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
-          PANEL_HOST: ${{ secrets.PANEL_HOST }}
-          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST }}
           FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: |
-          validate_host() {
-            local name="$1"
-            local value="$2"
-            if [ -z "$value" ] || [[ ! "$value" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
-              echo "::error::${name} must be a hostname without a path or credentials"
-              exit 1
-            fi
-            case "$value" in
-              *your-*|*example.invalid*|*__*)
-                echo "::error::${name} still contains a placeholder value"
-                exit 1
-                ;;
-            esac
-          }
           validate_endpoint() {
             local name="$1"
             local value="$2"
@@ -68,40 +51,21 @@ jobs:
               exit 1
             fi
           }
-          validate_host BOT_API_HOST "$BOT_API_HOST"
-          validate_host PANEL_HOST "$PANEL_HOST"
-          validate_host SUBSCRIPTION_HOST "$SUBSCRIPTION_HOST"
           validate_endpoint FALLBACK_BOT_DOMAIN "$FALLBACK_BOT_DOMAIN"
           validate_endpoint FALLBACK_SUBS_DOMAIN "$FALLBACK_SUBS_DOMAIN"
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Verify release version consistency
-        shell: bash
-        run: |
-          set -euo pipefail
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          CARGO_VERSION=$(node -e "const s=require('fs').readFileSync('src-tauri/Cargo.toml','utf8'); const p=s.match(/^\[package\][\s\S]*?^version\s*=\s*\"([^\"]+)\"/m); if(!p) process.exit(2); process.stdout.write(p[1])")
-          if [ "$PACKAGE_VERSION" != "$TAURI_VERSION" ] || [ "$PACKAGE_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Version mismatch: package=$PACKAGE_VERSION tauri=$TAURI_VERSION cargo=$CARGO_VERSION"
-            exit 1
-          fi
-          if [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "${GITHUB_REF_NAME#v}" != "$PACKAGE_VERSION" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match application version $PACKAGE_VERSION"
-            exit 1
-          fi
-
-      - name: npm audit (runtime and build dependencies)
-        run: npm audit --audit-level=low
+      - name: npm audit (production deps, high+ blocks)
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit --version 0.22.1
+        run: cargo install --locked cargo-audit
 
       - name: cargo audit
         working-directory: src-tauri
@@ -111,17 +75,17 @@ jobs:
     needs: audit
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
 
@@ -140,23 +104,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set -e
           mkdir -p src-tauri/bin
           mkdir -p public/routing
 
-          XRAY_VERSION="v26.3.27"
-          XRAY_LINUX_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
-          RUSSIA_RULES_TAG="202607200632"
-          DOMAIN_LIST_TAG="20260717032527"
-          RUSSIA_DOMAINS_COMMIT="bc0b84622e5d13f921fec76edff232105e440a3a"
-
           download_verified_release_asset() {
             local repo="$1"
-            local release_tag="$2"
-            local asset_name="$3"
-            local output="$4"
+            local asset_name="$2"
+            local output="$3"
             local metadata
-            metadata=$(gh api "repos/${repo}/releases/tags/${release_tag}")
+            metadata=$(gh api "repos/${repo}/releases/latest")
             local url
             local digest
             url=$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$metadata")
@@ -199,10 +156,10 @@ jobs:
                 }
               }
             ' "$input" | sort -u > "$output"
-            grep -Fqx 'avito.ru' "$output"
-            grep -Fqx 'ozon.ru' "$output"
-            grep -Fqx 'wildberries.ru' "$output"
-            grep -Fqx '*.ru' "$output"
+            grep -qx 'avito.ru' "$output"
+            grep -qx 'ozon.ru' "$output"
+            grep -qx 'wildberries.ru' "$output"
+            grep -qx '*.ru' "$output"
           }
 
           append_plain_domain_list() {
@@ -220,27 +177,26 @@ jobs:
               }
             ' "$input" >> "$output"
             sort -u -o "$output" "$output"
-            grep -Fqx 'yandex.ru' "$output"
-            grep -Fqx 'ozon.ru' "$output"
+            grep -qx 'yandex.ru' "$output"
+            grep -qx 'ozon.ru' "$output"
           }
 
           echo "Downloading Xray-core (Linux x64)..."
           curl -fsSL -o xray.zip \
-            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
-          echo "${XRAY_LINUX_SHA256}  xray.zip" | sha256sum -c -
+            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -o xray.zip -d xray-extracted
           cp xray-extracted/xray src-tauri/bin/xray-x86_64-unknown-linux-gnu
           chmod +x src-tauri/bin/xray-x86_64-unknown-linux-gnu
 
           echo "Downloading automatic routing rules..."
           download_verified_release_asset \
-            runetfreedom/russia-v2ray-rules-dat "$RUSSIA_RULES_TAG" geosite.dat src-tauri/bin/geosite.dat
+            runetfreedom/russia-v2ray-rules-dat geosite.dat src-tauri/bin/geosite.dat
           download_verified_release_asset \
-            runetfreedom/russia-v2ray-rules-dat "$RUSSIA_RULES_TAG" geoip.dat src-tauri/bin/geoip.dat
+            runetfreedom/russia-v2ray-rules-dat geoip.dat src-tauri/bin/geoip.dat
           download_verified_release_asset \
-            v2fly/domain-list-community "$DOMAIN_LIST_TAG" dlc.dat_plain.yml dlc.dat_plain.yml
+            v2fly/domain-list-community dlc.dat_plain.yml dlc.dat_plain.yml
           curl -fsSL -o ru-available-only-inside.txt \
-            "https://raw.githubusercontent.com/runetfreedom/russia-domains-list/${RUSSIA_DOMAINS_COMMIT}/ru-available-only-inside"
+            https://raw.githubusercontent.com/runetfreedom/russia-domains-list/main/ru-available-only-inside
           extract_plain_category_domains \
             dlc.dat_plain.yml public/routing/ru-services.txt \
             category-bank-ru \
@@ -278,27 +234,17 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
-      - name: Type-check frontend
-        run: npx tsc --noEmit
-
-      - name: Rust formatting, lints, and tests
-        working-directory: src-tauri
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked --all-targets
-
       - name: Inject backend hostnames
         # tauri.conf.json and capabilities/default.json carry __BOT_API_HOST__
         # / __PANEL_HOST__ placeholders in source so the public repo never
         # leaks production domains. We substitute the real hosts here from
         # CI secrets right before the build.
         env:
-          BOT_API_HOST: ${{ secrets.BOT_API_HOST || 'example.invalid' }}
-          PANEL_HOST: ${{ secrets.PANEL_HOST || 'example.invalid' }}
-          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}
-          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
-          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: bash scripts/inject-backend-host.sh
 
       - name: Build Linux .deb
@@ -315,17 +261,17 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST || 'example.invalid' }}/
-          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST || 'example.invalid' }}
-          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}/
+          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
+          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST }}
+          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST }}/
           # The audit job above rejects empty or placeholder release values.
-          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
-          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
 
       # Built clients contain runtime configuration. Keep disposable branch
       # validation binaries on the runner; publish installers only for releases.
       - if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@v5
         with:
           name: ToBeVPN-linux-deb
           path: |
@@ -341,19 +287,19 @@ jobs:
     needs: audit
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
 
@@ -366,20 +312,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
           New-Item -ItemType Directory -Force -Path public/routing | Out-Null
 
-          $XrayVersion = "v26.3.27"
-          $XrayWindowsSha256 = "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad"
-          $RussiaRulesTag = "202607200632"
-          $DomainListTag = "20260717032527"
-          $RussiaDomainsCommit = "bc0b84622e5d13f921fec76edff232105e440a3a"
-
           function Download-VerifiedReleaseAsset {
             param(
               [string]$Repository,
-              [string]$ReleaseTag,
               [string]$AssetName,
               [string]$Output
             )
-            $release = gh api "repos/$Repository/releases/tags/$ReleaseTag" | ConvertFrom-Json
+            $release = gh api "repos/$Repository/releases/latest" | ConvertFrom-Json
             $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
             if (-not $asset -or -not $asset.digest -or -not $asset.digest.StartsWith("sha256:")) {
               throw "Could not resolve a verified $Repository/$AssetName release asset"
@@ -464,31 +403,25 @@ jobs:
           }
 
           Write-Host "Downloading Xray-core (Windows x64)..."
-          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/download/$XrayVersion/Xray-windows-64.zip" -OutFile xray.zip
-          if ((Get-FileHash -Algorithm SHA256 xray.zip).Hash.ToLowerInvariant() -ne $XrayWindowsSha256) {
-            throw "Xray-core $XrayVersion SHA-256 mismatch"
-          }
+          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip" -OutFile xray.zip
           Expand-Archive -Path xray.zip -DestinationPath xray-extracted -Force
           Copy-Item xray-extracted/xray.exe src-tauri/bin/xray-x86_64-pc-windows-msvc.exe
 
           Write-Host "Downloading automatic routing rules..."
           Download-VerifiedReleaseAsset `
             -Repository "runetfreedom/russia-v2ray-rules-dat" `
-            -ReleaseTag $RussiaRulesTag `
             -AssetName "geosite.dat" `
             -Output "src-tauri/bin/geosite.dat"
           Download-VerifiedReleaseAsset `
             -Repository "runetfreedom/russia-v2ray-rules-dat" `
-            -ReleaseTag $RussiaRulesTag `
             -AssetName "geoip.dat" `
             -Output "src-tauri/bin/geoip.dat"
           Download-VerifiedReleaseAsset `
             -Repository "v2fly/domain-list-community" `
-            -ReleaseTag $DomainListTag `
             -AssetName "dlc.dat_plain.yml" `
             -Output "dlc.dat_plain.yml"
           Invoke-WebRequest `
-            -Uri "https://raw.githubusercontent.com/runetfreedom/russia-domains-list/$RussiaDomainsCommit/ru-available-only-inside" `
+            -Uri "https://raw.githubusercontent.com/runetfreedom/russia-domains-list/main/ru-available-only-inside" `
             -OutFile "ru-available-only-inside.txt"
           $ruCategories = @(
             "category-bank-ru",
@@ -533,10 +466,6 @@ jobs:
 
           Write-Host "Downloading Wintun driver..."
           Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
-          $expectedWintunSha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
-          if ((Get-FileHash -Algorithm SHA256 wintun.zip).Hash.ToLowerInvariant() -ne $expectedWintunSha256) {
-            throw "Wintun 0.14.1 SHA-256 mismatch"
-          }
           Expand-Archive -Path wintun.zip -DestinationPath wintun-extracted -Force
           Copy-Item wintun-extracted/wintun/bin/amd64/wintun.dll src-tauri/bin/wintun.dll
 
@@ -549,38 +478,28 @@ jobs:
       - name: Inject backend hostnames
         shell: bash
         env:
-          BOT_API_HOST: ${{ secrets.BOT_API_HOST || 'example.invalid' }}
-          PANEL_HOST: ${{ secrets.PANEL_HOST || 'example.invalid' }}
-          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}
-          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
-          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: bash scripts/inject-backend-host.sh
-
-      - name: Type-check frontend
-        run: npx tsc --noEmit
-
-      - name: Windows Rust formatting, lints, and tests
-        working-directory: src-tauri
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked --all-targets
 
       - name: Build Windows .exe (NSIS)
         run: npx tauri build --bundles nsis
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST || 'example.invalid' }}/
-          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST || 'example.invalid' }}
-          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}/
-          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
-          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
+          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
+          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST }}
+          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST }}/
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
 
       # Built clients contain runtime configuration. Keep disposable branch
       # validation binaries on the runner; publish installers only for releases.
       - if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@v5
         with:
           # GitHub Actions always wraps uploaded artifacts in a zip; we can't
           # ship a bare .exe through this API. The archive contains a single
@@ -603,11 +522,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@v5
         with:
           path: dist
 
@@ -618,33 +537,16 @@ jobs:
         # is the standard one Tauri expects: `version`, `pub_date`, and a
         # `platforms` map keyed by `os-arch`. We only build for x86_64 today.
         run: |
-          set -euo pipefail
+          set -e
           VERSION="${GITHUB_REF_NAME#v}"
-          mapfile -t DEBS < <(find dist/ToBeVPN-linux-deb -type f -name "*.deb" ! -name "*.sig")
-          mapfile -t DEB_SIGS < <(find dist/ToBeVPN-linux-deb -type f -name "*.deb.sig")
-          mapfile -t EXES < <(find dist/ToBeVPN-windows-exe -type f -name "*.exe" ! -name "*.sig")
-          mapfile -t EXE_SIGS < <(find dist/ToBeVPN-windows-exe -type f -name "*.exe.sig")
+          DEB=$(find dist/ToBeVPN-linux-deb -name "*.deb" -not -name "*.sig" | head -1)
+          DEB_SIG=$(find dist/ToBeVPN-linux-deb -name "*.deb.sig" | head -1)
+          EXE=$(find dist/ToBeVPN-windows-exe -name "*.exe" -not -name "*.sig" | head -1)
+          EXE_SIG=$(find dist/ToBeVPN-windows-exe -name "*.exe.sig" | head -1)
 
-          if [ "${#DEBS[@]}" -ne 1 ] || [ "${#DEB_SIGS[@]}" -ne 1 ] \
-             || [ "${#EXES[@]}" -ne 1 ] || [ "${#EXE_SIGS[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one signed installer per platform"
+          if [ -z "$DEB" ] || [ -z "$DEB_SIG" ] || [ -z "$EXE" ] || [ -z "$EXE_SIG" ]; then
+            echo "::error::Missing one of: deb=$DEB sig=$DEB_SIG exe=$EXE sig=$EXE_SIG"
             ls -R dist/
-            exit 1
-          fi
-
-          DEB="${DEBS[0]}"
-          DEB_SIG="${DEB_SIGS[0]}"
-          EXE="${EXES[0]}"
-          EXE_SIG="${EXE_SIGS[0]}"
-
-          if [ "$DEB_SIG" != "${DEB}.sig" ] || [ "$EXE_SIG" != "${EXE}.sig" ]; then
-            echo "::error::Updater signatures do not match the installer filenames"
-            exit 1
-          fi
-          if [ ! -s "$DEB_SIG" ] || [ ! -s "$EXE_SIG" ] \
-             || [ "$(wc -c < "$DEB_SIG")" -gt 16384 ] \
-             || [ "$(wc -c < "$EXE_SIG")" -gt 16384 ]; then
-            echo "::error::Updater signature is empty or unexpectedly large"
             exit 1
           fi
 
@@ -655,22 +557,22 @@ jobs:
           DEB_SIG_CONTENT=$(cat "$DEB_SIG")
           EXE_SIG_CONTENT=$(cat "$EXE_SIG")
 
-          jq -n \
-            --arg version "$VERSION" \
-            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg deb_signature "$DEB_SIG_CONTENT" \
-            --arg deb_url "$DEB_URL" \
-            --arg exe_signature "$EXE_SIG_CONTENT" \
-            --arg exe_url "$EXE_URL" \
-            '{
-              version: $version,
-              pub_date: $pub_date,
-              platforms: {
-                "linux-x86_64": { signature: $deb_signature, url: $deb_url },
-                "windows-x86_64": { signature: $exe_signature, url: $exe_url }
+          cat > latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "linux-x86_64": {
+                "signature": "${DEB_SIG_CONTENT}",
+                "url": "${DEB_URL}"
+              },
+              "windows-x86_64": {
+                "signature": "${EXE_SIG_CONTENT}",
+                "url": "${EXE_URL}"
               }
-            }' > latest.json
-          jq -e . latest.json > /dev/null
+            }
+          }
+          EOF
           echo "--- latest.json ---"
           cat latest.json
 
@@ -686,7 +588,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           files: |

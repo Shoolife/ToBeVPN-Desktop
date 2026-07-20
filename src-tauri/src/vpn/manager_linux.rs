@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
-use std::io::Read as _;
 use std::net::IpAddr;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::PathBuf;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
@@ -16,10 +15,11 @@ use super::{ConnectAttempt, CONNECT_CANCELLED};
 
 // ── TUN / routing constants (Linux) ───────────────────────────────
 const TUN_NAME: &str = "tobe0";
-const TUN_TABLE: &str = "18676";
-const RULE_PRIORITY: &str = "18676";
-const TRANSITION_TABLE: &str = "18675";
-const TRANSITION_RULE_PRIORITY: &str = "18675";
+const TUN_ADDR: &str = "198.18.0.1/15";
+const TUN_ADDR6: &str = "fd66:6f62:6576:706e::1/64";
+const TUN_PUBLIC_V6_PREFIX: &str = "2000::/3";
+const TUN_TABLE: &str = "100";
+const FWMARK: &str = "0x1";
 
 // Hard ceiling on every pkexec invocation. Without this a wedged polkit agent
 // or a user dismissing the prompt by ignoring it can pin the UI in
@@ -29,45 +29,20 @@ const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
 const BYPASS_DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const ROUTE_DETECT_TIMEOUT: Duration = Duration::from_secs(3);
 const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
-const XRAY_CONFIG_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
-// Path of the package-installed polkit helper. The matching policy requires
-// administrator authentication; mutable routing state stays root-only.
+// Path of the installed polkit helper. When present, pkexec invocations match
+// the app.tobevpn.network policy and run without repeated password prompts.
 const POLKIT_HELPER: &str = "/usr/local/bin/tobevpn-helper.sh";
 const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.network.policy";
+const UPDATE_HELPER: &str = "/usr/local/bin/tobevpn-update-helper.sh";
+const UPDATE_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.update.policy";
 
-// Embedded resources are used only to verify that the package-installed
-// privilege boundary matches this binary. The app never executes a mutable
-// user-owned script through pkexec.
+// Embedded resources — installed lazily on first VPN connect via a single pkexec
+// prompt. After that, the helpers handle start/stop and signed updates.
 const HELPER_SH: &str = include_str!("../../../scripts/tobevpn-helper.sh");
 const POLICY_XML: &str = include_str!("../../../scripts/app.tobevpn.network.policy");
-
-async fn terminate_child_bounded(child: &mut Child, label: &str) -> Result<(), String> {
-    let kill_error = child
-        .start_kill()
-        .err()
-        .filter(|error| error.kind() != std::io::ErrorKind::InvalidInput);
-    match timeout(CHILD_STOP_TIMEOUT, child.wait()).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(wait_error)) => match kill_error {
-            Some(kill_error) => Err(format!(
-                "failed to stop {label}: {kill_error}; failed to reap it: {wait_error}"
-            )),
-            None => Err(format!("failed to reap {label}: {wait_error}")),
-        },
-        Err(_) => match kill_error {
-            Some(kill_error) => Err(format!(
-                "failed to stop {label}: {kill_error}; process did not exit within {}s",
-                CHILD_STOP_TIMEOUT.as_secs()
-            )),
-            None => Err(format!(
-                "{label} did not exit within {}s",
-                CHILD_STOP_TIMEOUT.as_secs()
-            )),
-        },
-    }
-}
+const UPDATE_HELPER_SH: &str = include_str!("../../../scripts/tobevpn-update-helper.sh");
+const UPDATE_POLICY_XML: &str = include_str!("../../../scripts/app.tobevpn.update.policy");
 
 // ── Secure-temp helpers ───────────────────────────────────────────
 //
@@ -92,6 +67,39 @@ fn cache_dir() -> PathBuf {
         }
     }
     dir
+}
+
+/// Write `contents` to `path` with mode 0600, replacing any existing file
+/// atomically. Uses O_CREAT|O_TRUNC|O_NOFOLLOW so a malicious symlink in our
+/// own cache dir can't redirect the write — the dir is 0700 already, but
+/// belt-and-braces.
+fn write_secure(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // O_NOFOLLOW (libc::O_NOFOLLOW = 0x20000 on Linux) — refuse if the path
+    // is a symlink. We still set permissions explicitly afterwards in case
+    // umask munged the mode bit on the open() call.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(contents)?;
+    f.sync_all()?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// Single-quote a path for safe inclusion in a generated shell script. We
+/// only need this for paths under ~/.cache/tobevpn that we control, but be
+/// defensive — single quotes inside paths are escaped via the standard
+/// '\'' trick.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Run a Command with a hard timeout and the GUI/dbus env passed through so
@@ -120,28 +128,29 @@ async fn run_with_timeout_and_env(
     let deadline = sleep(timeout_dur);
     tokio::pin!(deadline);
 
-    tokio::select! {
-        result = &mut output => {
-            result.map_err(|e| format!("spawn failed: {e}"))
-        }
-        _ = &mut deadline => {
-            Err(format!(
-                "command timed out after {}s (polkit agent unresponsive?)",
-                timeout_dur.as_secs()
-            ))
-        }
-        _ = async {
-            if let Some(attempt) = attempt {
-                attempt.cancelled().await;
+    loop {
+        tokio::select! {
+            result = &mut output => {
+                return result.map_err(|e| format!("spawn failed: {e}"));
             }
-        }, if attempt.is_some() => {
-            Err(CONNECT_CANCELLED.into())
+            _ = &mut deadline => {
+                return Err(format!(
+                    "command timed out after {}s (polkit agent unresponsive?)",
+                    timeout_dur.as_secs()
+                ));
+            }
+            _ = async {
+                if let Some(attempt) = attempt {
+                    attempt.cancelled().await;
+                }
+            }, if attempt.is_some() => {
+                return Err(CONNECT_CANCELLED.into());
+            }
         }
     }
 }
 
 // ── VPN Manager ───────────────────────────────────────────────────
-#[derive(Clone)]
 pub struct VpnManager {
     state: Arc<Mutex<VpnState>>,
     xray_process: Arc<Mutex<Option<Child>>>,
@@ -189,9 +198,7 @@ impl VpnManager {
     /// All probes are non-privileged. The actual cleanup runs through the
     /// polkit helper (passwordless) when leftover state is detected.
     pub async fn cleanup_stale_state(&self) {
-        let stale_network_state = Self::has_stale_artefacts();
-        let stale_xray_pids = self.stale_xray_pids();
-        if !stale_network_state && stale_xray_pids.is_empty() {
+        if !Self::has_stale_artefacts() {
             return;
         }
         eprintln!("[VPN] Detected stale VPN state from previous run — cleaning up");
@@ -199,105 +206,9 @@ impl VpnManager {
         // Reset internal state so the cleanup proceeds even though we never
         // started anything in this process.
         self.set_state(VpnState::Disconnecting).await;
-        let mut errors = Vec::new();
-        if let Err(error) = self.terminate_stale_xray_pids(&stale_xray_pids).await {
-            errors.push(error);
-        }
-        if stale_network_state {
-            if let Err(error) = self.force_stop().await {
-                errors.push(error);
-            }
-        }
-        if errors.is_empty() {
-            self.set_state(VpnState::Disconnected).await;
-            eprintln!("[VPN] Stale state cleanup complete");
-        } else {
-            let message = errors.join("; ");
-            eprintln!("[VPN] Stale state cleanup failed: {message}");
-            self.set_state(VpnState::Error { message }).await;
-        }
-    }
-
-    fn stale_xray_pids(&self) -> Vec<u32> {
-        let mut executable_paths = BTreeSet::new();
-        for path in [
-            self.bin_dir.join("xray"),
-            self.bin_dir.join("xray-x86_64-unknown-linux-gnu"),
-        ] {
-            executable_paths.insert(path.clone());
-            if let Ok(canonical) = path.canonicalize() {
-                executable_paths.insert(canonical);
-            }
-        }
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-            .filter(|pid| *pid != std::process::id())
-            .filter(|pid| linux_process_is_managed_xray(*pid, &executable_paths))
-            .collect()
-    }
-
-    async fn terminate_stale_xray_pids(&self, pids: &[u32]) -> Result<(), String> {
-        if pids.is_empty() {
-            return Ok(());
-        }
-        let executable_paths: BTreeSet<PathBuf> = [
-            self.bin_dir.join("xray"),
-            self.bin_dir.join("xray-x86_64-unknown-linux-gnu"),
-        ]
-        .into_iter()
-        .flat_map(|path| {
-            let canonical = path.canonicalize().ok();
-            std::iter::once(path).chain(canonical)
-        })
-        .collect();
-        let mut errors = Vec::new();
-        for pid in pids {
-            if !linux_process_is_managed_xray(*pid, &executable_paths) {
-                continue;
-            }
-            let result = unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    errors.push(format!("could not terminate stale xray pid {pid}: {error}"));
-                }
-                continue;
-            }
-            for _ in 0..20 {
-                sleep(Duration::from_millis(50)).await;
-                if !linux_process_is_managed_xray(*pid, &executable_paths) {
-                    break;
-                }
-            }
-            if !linux_process_is_managed_xray(*pid, &executable_paths) {
-                continue;
-            }
-            if unsafe { libc::kill(*pid as i32, libc::SIGKILL) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    errors.push(format!("could not kill stale xray pid {pid}: {error}"));
-                }
-                continue;
-            }
-            for _ in 0..20 {
-                sleep(Duration::from_millis(50)).await;
-                if !linux_process_is_managed_xray(*pid, &executable_paths) {
-                    break;
-                }
-            }
-            if linux_process_is_managed_xray(*pid, &executable_paths) {
-                errors.push(format!("stale xray pid {pid} remained after SIGKILL"));
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
+        self.force_stop().await;
+        self.set_state(VpnState::Disconnected).await;
+        eprintln!("[VPN] Stale state cleanup complete");
     }
 
     pub async fn prepare_ping_bypass(
@@ -325,24 +236,36 @@ impl VpnManager {
         }
         eprintln!("[VPN] Preparing {} direct ping routes", unique_ips.len());
 
-        Self::ensure_helper_ready()?;
-        let mut cmd = Command::new("pkexec");
-        cmd.arg(POLKIT_HELPER).arg("bypass");
-        for ip in &unique_ips {
-            cmd.arg(ip);
+        if Path::new(POLKIT_HELPER).exists() {
+            let mut cmd = Command::new("pkexec");
+            cmd.arg(POLKIT_HELPER).arg("bypass");
+            for ip in &unique_ips {
+                cmd.arg(ip);
+            }
+            let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, None).await?;
+            if output.status.success() {
+                return Ok(mapping);
+            }
+            return Err(format!(
+                "direct ping route setup failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
-        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, None).await?;
-        if output.status.success() {
-            return Ok(mapping);
-        }
-        Err(format!(
-            "direct ping route setup failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+
+        Self::prepare_ping_bypass_inline(&unique_ips).await?;
+        Ok(mapping)
     }
 
     /// Probe for leftover VPN artefacts using non-privileged commands.
     fn has_stale_artefacts() -> bool {
+        // The helper writes the tun2socks PID file under /tmp because it runs
+        // as root and needs a path both the helper (root) and our app (user)
+        // can read across reboots; that path is fine because the *contents*
+        // there are advisory only, never used as input to a privileged
+        // operation. We just probe its existence.
+        if Path::new("/tmp/tobevpn_tun2socks.pid").exists() {
+            return true;
+        }
         if let Ok(out) = std::process::Command::new("ip")
             .args(["link", "show", TUN_NAME])
             .output()
@@ -356,35 +279,8 @@ impl VpnManager {
             .output()
         {
             let s = String::from_utf8_lossy(&out.stdout);
-            let exact_rule = format!("{}:", RULE_PRIORITY);
-            let transition_rule = format!("{}:", TRANSITION_RULE_PRIORITY);
-            if s.lines().any(|line| {
-                (line.trim_start().starts_with(&exact_rule)
-                    && line.contains("fwmark 0x1")
-                    && line.contains(&format!("lookup {}", TUN_TABLE)))
-                    || (line.trim_start().starts_with(&transition_rule)
-                        && line.contains("fwmark 0x1")
-                        && line.contains(&format!("lookup {}", TRANSITION_TABLE)))
-            }) {
+            if s.contains(&format!("lookup {}", TUN_TABLE)) {
                 return true;
-            }
-        }
-        for table in [TUN_TABLE, TRANSITION_TABLE] {
-            if let Ok(out) = std::process::Command::new("ip")
-                .args(["route", "show", "table", table])
-                .output()
-            {
-                if out.status.success() && !out.stdout.is_empty() {
-                    return true;
-                }
-            }
-            if let Ok(out) = std::process::Command::new("ip")
-                .args(["-6", "route", "show", "table", table])
-                .output()
-            {
-                if out.status.success() && !out.stdout.is_empty() {
-                    return true;
-                }
             }
         }
         false
@@ -459,12 +355,6 @@ impl VpnManager {
                 return Err(e);
             }
         };
-        let resolved_server_ip = server_ip
-            .parse::<std::net::Ipv4Addr>()
-            .map_err(|_| "VPN server did not resolve to IPv4".to_string())?;
-        if !config::is_allowed_server_ipv4(resolved_server_ip) {
-            return Err("VPN server resolved to a non-public IPv4 address".into());
-        }
         eprintln!("[VPN] Server address resolved");
         let mut control_bypass_ips = match bypass_res {
             Ok(ips) => ips,
@@ -487,83 +377,21 @@ impl VpnManager {
         }
 
         // Only tear down the currently usable transport after every address
-        // needed to build the replacement route has been prepared. A
-        // dedicated transition table remains fail-closed while the old TUN is
-        // removed and the replacement is still starting.
-        let recovering_guarded_error =
-            matches!(&prev_state, VpnState::Error { .. }) && Self::has_stale_artefacts();
-        let replaces_existing = matches!(&prev_state, VpnState::Connected | VpnState::Connecting)
-            || recovering_guarded_error;
+        // needed to build the replacement route has been prepared.
         match prev_state {
             VpnState::Connected => {
-                eprintln!("[VPN] Previous session active — guarding live switch");
-                if let Err(error) = self
-                    .install_switch_guard(&server_ip, &control_bypass_ips, attempt)
-                    .await
-                {
-                    let cancelled = attempt.is_cancelled();
-                    let message = self.cleanup_failed_start(error, cancelled).await;
-                    return if cancelled {
-                        Err(CONNECT_CANCELLED.into())
-                    } else {
-                        Err(message)
-                    };
-                }
-                self.set_state(VpnState::Connecting).await;
-                {
-                    let mut generation = self.session_gen.lock().await;
-                    *generation = generation.wrapping_add(1);
-                }
-                if let Err(error) = self.force_stop_preserving_transition_guard().await {
-                    let message = self.cleanup_failed_start(error, false).await;
-                    return Err(message);
-                }
+                eprintln!("[VPN] Previous session active — stopping before reconnect");
+                self.force_stop().await;
             }
             VpnState::Connecting => {
                 eprintln!("[VPN] Previous attempt stuck in Connecting — running cleanup");
-                self.set_state(VpnState::Connecting).await;
-                if let Err(error) = self.force_stop().await {
-                    self.set_state(VpnState::Error {
-                        message: error.clone(),
-                    })
-                    .await;
-                    return Err(error);
-                }
-            }
-            VpnState::Error { .. } if recovering_guarded_error => {
-                eprintln!("[VPN] Recovering from guarded tunnel failure");
-                if let Err(error) = self
-                    .install_switch_guard(&server_ip, &control_bypass_ips, attempt)
-                    .await
-                {
-                    let cancelled = attempt.is_cancelled();
-                    let message = self.cleanup_failed_start(error, cancelled).await;
-                    return if cancelled {
-                        Err(CONNECT_CANCELLED.into())
-                    } else {
-                        Err(message)
-                    };
-                }
-                self.set_state(VpnState::Connecting).await;
-                {
-                    let mut generation = self.session_gen.lock().await;
-                    *generation = generation.wrapping_add(1);
-                }
-                if let Err(error) = self.force_stop_preserving_transition_guard().await {
-                    let message = self.cleanup_failed_start(error, false).await;
-                    return Err(message);
-                }
+                self.force_stop().await;
             }
             _ => {}
         }
 
         if attempt.is_cancelled() {
-            if replaces_existing {
-                self.cleanup_failed_start(CONNECT_CANCELLED.into(), true)
-                    .await;
-            } else {
-                self.set_state(VpnState::Disconnected).await;
-            }
+            self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
         }
         self.set_state(VpnState::Connecting).await;
@@ -580,43 +408,18 @@ impl VpnManager {
             server.direct_interface = interface;
         }
 
-        // Fixed loopback ports are shared machine resources. If another
-        // process already owns either one, a simple TCP readiness probe could
-        // mistake that process for Xray and route the whole machine into it.
-        let mut port_error = None;
-        for (port, label) in [(SOCKS_PORT, "SOCKS"), (STATS_API_PORT, "stats API")] {
-            if let Err(error) = attempt.ensure_active() {
-                port_error = Some(error);
-                break;
-            }
-            match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
-                Ok(listener) => drop(listener),
-                Err(error) => {
-                    port_error = Some(format!(
-                        "Xray {label} port {port} is already in use: {error}"
-                    ));
-                    break;
-                }
-            }
-        }
-        if let Some(error) = port_error {
-            let cancelled = attempt.is_cancelled();
-            let message = self.cleanup_failed_start(error, cancelled).await;
-            return if cancelled {
-                Err(CONNECT_CANCELLED.into())
-            } else {
-                Err(message)
-            };
-        }
-
-        // 1. Build the Xray config in memory. It contains the user's UUID and
-        // Reality keys, so pass it over an anonymous pipe instead of leaving a
-        // credential-bearing xray.json on disk.
+        // 1. Write xray config to per-user cache dir (mode 0600).
+        // Contains the user's UUID and reality keys — under no circumstances
+        // should it land in /tmp where any local user could read it and clone
+        // the subscription.
         let config_json = config::build_xray_config(&server);
-        let _ = std::fs::remove_file(cache_dir().join("xray.json"));
+        let config_path = cache_dir().join("xray.json");
+        eprintln!("[VPN] Writing xray config ({} bytes)", config_json.len());
+        write_secure(&config_path, config_json.as_bytes())
+            .map_err(|e| format!("Failed to write xray config: {e}"))?;
+        eprintln!("[VPN] Config written OK (mode 0600)");
         if attempt.is_cancelled() {
-            self.cleanup_failed_start(CONNECT_CANCELLED.into(), true)
-                .await;
+            self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
         }
 
@@ -632,7 +435,10 @@ impl VpnManager {
         if server.requires_geosite_assets() && !asset_dir.join("geosite.dat").is_file() {
             let message = format!("Routing database is missing from {}", asset_dir.display());
             eprintln!("[VPN] ERROR: {message}");
-            let message = self.cleanup_failed_start(message, false).await;
+            self.set_state(VpnState::Error {
+                message: message.clone(),
+            })
+            .await;
             return Err(message);
         }
 
@@ -644,47 +450,19 @@ impl VpnManager {
             xray_bin.exists()
         );
 
-        let mut xray_child = match Command::new(&xray_bin)
+        let mut xray_child = Command::new(&xray_bin)
             .arg("run")
             .arg("-config")
-            .arg("stdin:")
+            .arg(&config_path)
             .env("XRAY_LOCATION_ASSET", asset_dir)
-            // Xray writes operational logs to stderr. Leaving stdout piped
-            // without a reader eventually fills the OS pipe and deadlocks it.
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-        {
-            Ok(child) => child,
-            Err(e) => {
+            .map_err(|e| {
                 eprintln!("[VPN] ERROR: Failed to spawn xray: {e}");
-                let message = format!("Failed to start xray: {e}");
-                let message = self.cleanup_failed_start(message, false).await;
-                return Err(message);
-            }
-        };
-
-        let config_write: Result<(), String> = match xray_child.stdin.take() {
-            Some(mut stdin) => match timeout(
-                XRAY_CONFIG_WRITE_TIMEOUT,
-                stdin.write_all(config_json.as_bytes()),
-            )
-            .await
-            {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(_) => Err("timed out while writing Xray configuration".into()),
-            },
-            None => Err("Xray stdin was not created".into()),
-        };
-        if let Err(error) = config_write {
-            let _ = terminate_child_bounded(&mut xray_child, "xray").await;
-            let message = format!("Failed to send Xray configuration: {error}");
-            let message = self.cleanup_failed_start(message, false).await;
-            return Err(message);
-        }
+                format!("Failed to start xray: {e}")
+            })?;
 
         let xray_pid = xray_child.id();
         eprintln!("[VPN] xray spawned OK, PID: {:?}", xray_pid);
@@ -702,8 +480,8 @@ impl VpnManager {
 
         *self.xray_process.lock().await = Some(xray_child);
         if attempt.is_cancelled() {
-            self.cleanup_failed_start(CONNECT_CANCELLED.into(), true)
-                .await;
+            self.force_stop().await;
+            self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
         }
 
@@ -711,28 +489,15 @@ impl VpnManager {
         eprintln!("[VPN] Waiting for SOCKS port {} ...", SOCKS_PORT);
         if let Err(e) = wait_for_port(SOCKS_PORT, Duration::from_secs(10), attempt).await {
             eprintln!("[VPN] ERROR: SOCKS port not ready: {e}");
-            let cancelled = attempt.is_cancelled();
-            let message = self.cleanup_failed_start(e, cancelled).await;
-            return if cancelled {
-                Err(CONNECT_CANCELLED.into())
+            self.force_stop().await;
+            if attempt.is_cancelled() {
+                self.set_state(VpnState::Disconnected).await;
             } else {
-                Err(message)
-            };
+                self.set_state(VpnState::Error { message: e.clone() }).await;
+            }
+            return Err(e);
         }
         eprintln!("[VPN] SOCKS port {} is open", SOCKS_PORT);
-        if let Err(e) = wait_for_port(STATS_API_PORT, Duration::from_secs(5), attempt).await {
-            eprintln!("[VPN] ERROR: stats API port not ready: {e}");
-            let cancelled = attempt.is_cancelled();
-            let message = self.cleanup_failed_start(e, cancelled).await;
-            return if cancelled {
-                Err(CONNECT_CANCELLED.into())
-            } else {
-                Err(message)
-            };
-        }
-        // Give a process that lost a bind race enough time to publish its exit
-        // status before the authoritative child check below.
-        sleep(Duration::from_millis(150)).await;
 
         // Verify xray is still alive
         {
@@ -743,12 +508,12 @@ impl VpnManager {
                         eprintln!("[VPN] ERROR: xray already exited with {status}");
                         *proc = None;
                         drop(proc);
-                        let msg = self
-                            .cleanup_failed_start(
-                                format!("xray exited immediately with {status}"),
-                                false,
-                            )
-                            .await;
+                        self.force_stop().await;
+                        let msg = format!("xray exited immediately with {status}");
+                        self.set_state(VpnState::Error {
+                            message: msg.clone(),
+                        })
+                        .await;
                         return Err(msg);
                     }
                     Ok(None) => {
@@ -756,10 +521,14 @@ impl VpnManager {
                     }
                     Err(e) => {
                         eprintln!("[VPN] ERROR: xray process check failed: {e}");
+                        *proc = None;
                         drop(proc);
-                        let msg = self
-                            .cleanup_failed_start(format!("xray process check failed: {e}"), false)
-                            .await;
+                        self.force_stop().await;
+                        let msg = format!("xray process check failed: {e}");
+                        self.set_state(VpnState::Error {
+                            message: msg.clone(),
+                        })
+                        .await;
                         return Err(msg);
                     }
                 }
@@ -770,21 +539,19 @@ impl VpnManager {
         eprintln!("[VPN] Starting TUN setup (pkexec) ...");
         if let Err(e) = self.start_tun(&server, &control_bypass_ips, attempt).await {
             eprintln!("[VPN] ERROR: TUN setup failed: {e}");
-            let cancelled = attempt.is_cancelled();
-            let message = self.cleanup_failed_start(e, cancelled).await;
-            return if cancelled {
-                Err(CONNECT_CANCELLED.into())
+            self.force_stop().await;
+            if attempt.is_cancelled() {
+                self.set_state(VpnState::Disconnected).await;
             } else {
-                Err(message)
-            };
+                self.set_state(VpnState::Error { message: e.clone() }).await;
+            }
+            return Err(e);
         }
         eprintln!("[VPN] TUN setup OK");
 
         if attempt.is_cancelled() {
-            match self.force_stop().await {
-                Ok(()) => self.set_state(VpnState::Disconnected).await,
-                Err(message) => self.set_state(VpnState::Error { message }).await,
-            }
+            self.force_stop().await;
+            self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
         }
         self.set_state(VpnState::Connected).await;
@@ -816,11 +583,6 @@ impl VpnManager {
         let state = self.state.clone();
         let session_gen = self.session_gen.clone();
         let app = self.app_handle.clone();
-        let tun2socks_paths: BTreeSet<PathBuf> = {
-            let path = self.resolve_bin("tun2socks");
-            let canonical = path.canonicalize().ok();
-            std::iter::once(path).chain(canonical).collect()
-        };
         let manager_clone = VpnManager {
             state: self.state.clone(),
             xray_process: self.xray_process.clone(),
@@ -853,7 +615,7 @@ impl VpnManager {
                     let t2s_dead = {
                         let pid = *tun2socks_pid.lock().await;
                         match pid {
-                            Some(pid) if tun2socks_process_alive(pid, &tun2socks_paths) => None,
+                            Some(pid) if tun2socks_process_alive(pid) => None,
                             Some(pid) => Some(format!("tun2socks exited: pid {pid}")),
                             None => Some("tun2socks pid missing".to_string()),
                         }
@@ -861,27 +623,11 @@ impl VpnManager {
                     xray_dead.or(t2s_dead)
                 };
                 if let Some(msg) = dead {
-                    eprintln!(
-                        "[VPN-WATCHDOG] {msg} — stopping proxy and preserving fail-closed routing"
-                    );
-                    // The managed table contains a high-metric blackhole that
-                    // takes over when the TUN disappears. Removing the policy
-                    // rule here would turn an unexpected process death into a
-                    // transparent fallback to the physical default route.
-                    // Keep the root-owned network guard until the user retries,
-                    // explicitly stops, logs out, or exits the application.
-                    let cleanup_error = manager_clone
-                        .stop_proxy_preserving_network_guard()
-                        .await
-                        .err();
-                    let message = cleanup_error
-                        .map(|cleanup| {
-                            format!(
-                            "VPN process stopped unexpectedly: {msg}; cleanup failed: {cleanup}"
-                        )
-                        })
-                        .unwrap_or_else(|| format!("VPN process stopped unexpectedly: {msg}"));
-                    *state.lock().await = VpnState::Error { message };
+                    eprintln!("[VPN-WATCHDOG] {msg} — running force_stop");
+                    manager_clone.force_stop().await;
+                    *state.lock().await = VpnState::Error {
+                        message: format!("VPN process stopped unexpectedly: {msg}"),
+                    };
                     if let Some(h) = &app {
                         use tauri::Emitter;
                         let _ = h.emit("vpn-died", &msg);
@@ -903,20 +649,10 @@ impl VpnManager {
             *g = g.wrapping_add(1);
         }
         self.set_state(VpnState::Disconnecting).await;
-        match self.force_stop().await {
-            Ok(()) => {
-                self.set_state(VpnState::Disconnected).await;
-                eprintln!("[VPN] State -> Disconnected");
-                Ok(())
-            }
-            Err(message) => {
-                self.set_state(VpnState::Error {
-                    message: message.clone(),
-                })
-                .await;
-                Err(message)
-            }
-        }
+        self.force_stop().await;
+        self.set_state(VpnState::Disconnected).await;
+        eprintln!("[VPN] State -> Disconnected");
+        Ok(())
     }
 
     /// Query traffic stats from xray stats API.
@@ -924,18 +660,18 @@ impl VpnManager {
         let xray_bin = self.resolve_bin("xray");
         let server_addr = format!("127.0.0.1:{}", STATS_API_PORT);
 
-        let (up, down) = tokio::join!(
-            query_stat_value(
-                &xray_bin,
-                &server_addr,
-                "outbound>>>proxy>>>traffic>>>uplink",
-            ),
-            query_stat_value(
-                &xray_bin,
-                &server_addr,
-                "outbound>>>proxy>>>traffic>>>downlink",
-            )
-        );
+        let up = query_stat_value(
+            &xray_bin,
+            &server_addr,
+            "outbound>>>proxy>>>traffic>>>uplink",
+        )
+        .await;
+        let down = query_stat_value(
+            &xray_bin,
+            &server_addr,
+            "outbound>>>proxy>>>traffic>>>downlink",
+        )
+        .await;
 
         Some(TrafficStats {
             uplink: up,
@@ -964,27 +700,6 @@ impl VpnManager {
 
     async fn set_state(&self, state: VpnState) {
         *self.state.lock().await = state;
-    }
-
-    async fn cleanup_failed_start(&self, primary: String, _cancelled: bool) -> String {
-        let cleanup_result = self.force_stop().await;
-        let cleanup_succeeded = cleanup_result.is_ok();
-        let message = match cleanup_result {
-            Ok(()) => primary,
-            Err(cleanup) => format!("{primary}; cleanup failed: {cleanup}"),
-        };
-        // Native state describes the resources that remain, not why Start
-        // failed. A fully committed cleanup is Disconnected even for a normal
-        // (non-cancellation) startup error; the frontend carries the error.
-        if cleanup_succeeded {
-            self.set_state(VpnState::Disconnected).await;
-        } else {
-            self.set_state(VpnState::Error {
-                message: message.clone(),
-            })
-            .await;
-        }
-        message
     }
 
     fn resolve_bin(&self, name: &str) -> PathBuf {
@@ -1045,9 +760,6 @@ impl VpnManager {
                 continue;
             }
             if let Ok(ip) = trimmed.parse::<std::net::Ipv4Addr>() {
-                if !config::is_allowed_server_ipv4(ip) {
-                    return Err("Direct-access destination resolved to a non-public IPv4".into());
-                }
                 ips.insert(ip.to_string());
                 continue;
             }
@@ -1062,19 +774,7 @@ impl VpnManager {
                 _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
             };
             match result {
-                Ok(Ok(found)) => {
-                    for value in found {
-                        let ip = value.parse::<std::net::Ipv4Addr>().map_err(|_| {
-                            "Direct-access destination returned an invalid IPv4".to_string()
-                        })?;
-                        if !config::is_allowed_server_ipv4(ip) {
-                            return Err(
-                                "Direct-access destination resolved to a non-public IPv4".into()
-                            );
-                        }
-                        ips.insert(ip.to_string());
-                    }
-                }
+                Ok(Ok(found)) => ips.extend(found),
                 Ok(Err(_)) | Err(_) => {
                     eprintln!("[VPN] Direct-access destination DNS lookup failed")
                 }
@@ -1085,7 +785,7 @@ impl VpnManager {
 
     /// Resolve each host to its first IPv4 address, preserving the input
     /// host string. Hosts that fail to resolve or that are IPv6-only are
-    /// omitted — callers must not fall back to another DNS lookup.
+    /// omitted — the caller falls back to the original hostname for ping.
     async fn resolve_hosts_to_ipv4_pairs(hosts: &[String]) -> Vec<PingHostMapping> {
         let mut out = Vec::new();
         let mut seen_hosts = BTreeSet::new();
@@ -1098,10 +798,7 @@ impl VpnManager {
             if !seen_hosts.insert(trimmed.to_string()) {
                 continue;
             }
-            if trimmed
-                .parse::<std::net::Ipv4Addr>()
-                .is_ok_and(config::is_allowed_server_ipv4)
-            {
+            if trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
                 out.push(PingHostMapping {
                     host: trimmed.to_string(),
                     ip: trimmed.to_string(),
@@ -1113,13 +810,7 @@ impl VpnManager {
                 let ip = Self::lookup_ipv4s(host.clone(), 443, BYPASS_DNS_RESOLVE_TIMEOUT)
                     .await
                     .ok()
-                    .and_then(|ips| {
-                        ips.into_iter().find(|value| {
-                            value
-                                .parse::<std::net::Ipv4Addr>()
-                                .is_ok_and(config::is_allowed_server_ipv4)
-                        })
-                    });
+                    .and_then(|ips| ips.into_iter().next());
                 ip.map(|ip| PingHostMapping { host, ip })
             }));
         }
@@ -1132,28 +823,60 @@ impl VpnManager {
         out
     }
 
-    /// Start tun2socks and configure routing exclusively through the
-    /// package-installed, root-owned helper. Executing a user-writable shell
-    /// script via `pkexec bash` would turn any same-user race into root code
-    /// execution, so there is intentionally no inline fallback.
-    async fn start_tun(
-        &self,
-        server: &ServerConfig,
-        control_bypass_ips: &[String],
-        attempt: &ConnectAttempt,
-    ) -> Result<(), String> {
-        attempt.ensure_active()?;
-        Self::ensure_helper_ready()?;
-        let tun2socks_bin = self.resolve_bin("tun2socks");
-        self.start_tun_via_helper(&tun2socks_bin, &server.address, control_bypass_ips, attempt)
-            .await
+    async fn prepare_ping_bypass_inline(ips: &[String]) -> Result<(), String> {
+        let route_ip_args = ips
+            .iter()
+            .map(|ip| shell_escape(ip))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let script = format!(
+            r#"#!/bin/bash
+set -e
+
+if [ ! -f /tmp/tobevpn_orig_route ]; then
+    echo "OK"
+    exit 0
+fi
+
+read -r DEFAULT_GW DEFAULT_DEV < /tmp/tobevpn_orig_route
+if [ -z "$DEFAULT_DEV" ]; then
+    echo "ERROR: original route is missing interface" >&2
+    exit 1
+fi
+
+for BYPASS_IP in {route_ip_args}; do
+    if [ "$DEFAULT_GW" = "on-link" ] || [ -z "$DEFAULT_GW" ]; then
+        ip route replace "${{BYPASS_IP}}/32" dev "$DEFAULT_DEV" scope link table {table}
+    else
+        ip route replace "${{BYPASS_IP}}/32" via "$DEFAULT_GW" dev "$DEFAULT_DEV" table {table}
+    fi
+done
+echo "OK"
+"#,
+            table = TUN_TABLE,
+            route_ip_args = route_ip_args,
+        );
+        let staged = cache_dir().join("ping-bypass.sh");
+        write_secure(&staged, script.as_bytes()).map_err(|e| format!("write ping bypass: {e}"))?;
+
+        let mut cmd = Command::new("pkexec");
+        cmd.arg("bash").arg(&staged);
+        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, None).await;
+        let _ = std::fs::remove_file(&staged);
+
+        let output = output?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "direct ping route setup failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
     }
 
-    // Kept out of every build to make old source diffs understandable while
-    // the secure helper migration lands. This block can be deleted once the
-    // migration has shipped; it is not type-checked or executable.
-    #[cfg(any())]
-    async fn start_tun_legacy_inline(
+    /// Start tun2socks and configure routing.
+    async fn start_tun(
         &self,
         server: &ServerConfig,
         control_bypass_ips: &[String],
@@ -1433,7 +1156,6 @@ echo "[TUN-SCRIPT] Done!"
     /// where another local user can swap the staged file's contents and end
     /// up with their own script installed at /usr/local/bin/tobevpn-helper.sh
     /// — passwordlessly callable as root forever after.
-    #[cfg(any())]
     async fn ensure_helper_installed(attempt: &ConnectAttempt) -> Result<bool, String> {
         // The .deb postinst (and the NSIS installer on Windows) drops both
         // files in their final locations as part of installing the app, so
@@ -1536,52 +1258,6 @@ echo "INSTALLED"
         Ok(true)
     }
 
-    fn verify_installed_privilege_file(path: &str) -> Result<std::fs::Metadata, String> {
-        let metadata = std::fs::symlink_metadata(path)
-            .map_err(|_| format!("{path} is missing; reinstall the ToBeVPN .deb package"))?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Err(format!("{path} is not a regular package file"));
-        }
-        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-            return Err(format!(
-                "{path} must be root-owned and not writable by group/others"
-            ));
-        }
-        Ok(metadata)
-    }
-
-    fn verify_installed_privilege_file_exact(path: &str, expected: &[u8]) -> Result<(), String> {
-        let metadata = Self::verify_installed_privilege_file(path)?;
-        if metadata.len() != expected.len() as u64 {
-            return Err(format!(
-                "{path} does not match this application version; reinstall the ToBeVPN .deb package"
-            ));
-        }
-        let actual = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        if actual != expected {
-            return Err(format!(
-                "{path} does not match this application version; reinstall the ToBeVPN .deb package"
-            ));
-        }
-        Ok(())
-    }
-
-    fn ensure_helper_ready() -> Result<(), String> {
-        Self::verify_installed_privilege_file_exact(POLKIT_HELPER, HELPER_SH.as_bytes())?;
-        Self::verify_installed_privilege_file_exact(POLKIT_POLICY, POLICY_XML.as_bytes())
-    }
-
-    fn ensure_helper_trusted_for_cleanup() -> Result<(), String> {
-        // apt/dpkg can replace package files while an older GUI process is
-        // still running. Starting with a mismatched helper is refused above,
-        // but fixed-argument `stop` must remain recoverable across versions.
-        // Root ownership and immutable-to-users path files preserve the
-        // privilege boundary; future helpers keep `stop` backward compatible.
-        Self::verify_installed_privilege_file(POLKIT_HELPER)?;
-        Self::verify_installed_privilege_file(POLKIT_POLICY)?;
-        Ok(())
-    }
-
     /// Run the polkit-installed helper to bring up routing.
     async fn start_tun_via_helper(
         &self,
@@ -1625,111 +1301,8 @@ echo "INSTALLED"
         Err("TUN helper did not return tun2socks PID".into())
     }
 
-    /// Install a second, independently-owned policy table before a live
-    /// switch. The old session can then be dismantled without ever exposing a
-    /// normal physical default route to unmarked application traffic.
-    async fn install_switch_guard(
-        &self,
-        server_ip: &str,
-        control_bypass_ips: &[String],
-        attempt: &ConnectAttempt,
-    ) -> Result<(), String> {
-        attempt.ensure_active()?;
-        Self::ensure_helper_ready()?;
-        let mut cmd = Command::new("pkexec");
-        cmd.arg(POLKIT_HELPER).arg("guard-switch").arg(server_ip);
-        for ip in control_bypass_ips {
-            cmd.arg(ip);
-        }
-        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, Some(attempt)).await?;
-        attempt.ensure_active()?;
-        if !output.status.success() {
-            return Err(format!(
-                "live-switch guard setup failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        if String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|line| line.trim() == "GUARDED")
-        {
-            Ok(())
-        } else {
-            Err("network helper did not confirm the live-switch guard".into())
-        }
-    }
-
-    /// Force-stop everything and report any privileged cleanup failure. The
-    /// caller must not advertise Disconnected until this returns `Ok`.
-    async fn force_stop_preserving_transition_guard(&self) -> Result<(), String> {
-        self.force_stop_inner(true).await
-    }
-
-    async fn stop_proxy_preserving_network_guard(&self) -> Result<(), String> {
-        *self.stats_running.lock().await = false;
-        let Some(mut child) = self.xray_process.lock().await.take() else {
-            return Ok(());
-        };
-        terminate_child_bounded(&mut child, "xray after tunnel failure").await
-    }
-
-    async fn force_stop(&self) -> Result<(), String> {
-        self.force_stop_inner(false).await
-    }
-
-    async fn force_stop_inner(&self, preserve_transition_guard: bool) -> Result<(), String> {
-        eprintln!("[VPN] force_stop called");
-        *self.stats_running.lock().await = false;
-
-        let tun2socks_pid = self.tun2socks_pid.lock().await.take();
-        let mut errors = Vec::new();
-        let has_network_state = tun2socks_pid.is_some() || Self::has_stale_artefacts();
-
-        if has_network_state {
-            match Self::ensure_helper_trusted_for_cleanup() {
-                Ok(()) => {
-                    let mut cmd = Command::new("pkexec");
-                    cmd.arg(POLKIT_HELPER).arg(if preserve_transition_guard {
-                        "stop-preserve-guard"
-                    } else {
-                        "stop"
-                    });
-                    match run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, None).await {
-                        Ok(out) if out.status.success() => {
-                            eprintln!("[VPN] privileged network cleanup completed")
-                        }
-                        Ok(out) => errors.push(format!(
-                            "network cleanup failed ({}): {}",
-                            out.status,
-                            String::from_utf8_lossy(&out.stderr).trim()
-                        )),
-                        Err(e) => errors.push(format!("network cleanup failed: {e}")),
-                    }
-                }
-                Err(error) => errors.push(format!("network cleanup refused: {error}")),
-            }
-        }
-
-        if let Some(mut child) = self.xray_process.lock().await.take() {
-            if let Err(error) = terminate_child_bounded(&mut child, "xray").await {
-                errors.push(error);
-            }
-        }
-
-        let dir = cache_dir();
-        let _ = std::fs::remove_file(dir.join("xray.json"));
-
-        if errors.is_empty() {
-            eprintln!("[VPN] force_stop done");
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
-    }
-
-    #[cfg(any())]
-    async fn force_stop_legacy_inline(&self) {
+    /// Force-stop everything: kill processes, restore routing.
+    async fn force_stop(&self) {
         eprintln!("[VPN] force_stop called");
         *self.stats_running.lock().await = false;
 
@@ -1860,106 +1433,22 @@ echo "STOPPED"
     }
 }
 
-fn linux_process_is_managed_xray(pid: u32, executable_paths: &BTreeSet<PathBuf>) -> bool {
-    if pid <= 1 {
-        return false;
-    }
+fn tun2socks_process_alive(pid: u32) -> bool {
     let proc_dir = PathBuf::from(format!("/proc/{pid}"));
-    let Ok(metadata) = std::fs::metadata(&proc_dir) else {
-        return false;
-    };
-    if metadata.uid() != unsafe { libc::geteuid() } {
+    if !proc_dir.exists() {
         return false;
     }
 
-    let Ok(executable) = std::fs::read_link(proc_dir.join("exe")) else {
-        return false;
-    };
-    let executable_text = executable.to_string_lossy();
-    let executable_without_deleted_suffix = executable_text
-        .strip_suffix(" (deleted)")
-        .unwrap_or(&executable_text);
-    if !executable_paths
-        .iter()
-        .any(|path| path.as_os_str() == executable_without_deleted_suffix)
-    {
-        return false;
+    match std::fs::read(proc_dir.join("cmdline")) {
+        Ok(bytes) if !bytes.is_empty() => {
+            let cmdline = String::from_utf8_lossy(&bytes).replace('\0', " ");
+            cmdline.contains("tun2socks") && cmdline.contains(TUN_NAME)
+        }
+        // Some hardened systems mount /proc with hidepid. If the process dir
+        // exists but cmdline is unreadable, treat it as alive to avoid a false
+        // disconnect loop; the HTTP tunnel health check still catches stalls.
+        Ok(_) | Err(_) => true,
     }
-
-    let Ok(file) = std::fs::File::open(proc_dir.join("cmdline")) else {
-        return false;
-    };
-    let mut bytes = Vec::new();
-    if file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 64 * 1024 {
-        return false;
-    }
-    let argv: Vec<&[u8]> = bytes
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .take(64)
-        .collect();
-    argv.get(1).is_some_and(|arg| *arg == b"run")
-        && argv
-            .windows(2)
-            .any(|pair| pair[0] == b"-config" && pair[1] == b"stdin:")
-}
-
-fn tun2socks_process_alive(pid: u32, executable_paths: &BTreeSet<PathBuf>) -> bool {
-    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
-    let Ok(process_metadata) = std::fs::metadata(&proc_dir) else {
-        return false;
-    };
-    if process_metadata.uid() != 0 {
-        return false;
-    }
-
-    let Ok(executable) = std::fs::read_link(proc_dir.join("exe")) else {
-        return false;
-    };
-    let executable_text = executable.to_string_lossy();
-    let executable_without_deleted_suffix = executable_text
-        .strip_suffix(" (deleted)")
-        .unwrap_or(&executable_text);
-    if !executable_paths
-        .iter()
-        .any(|path| path.as_os_str() == executable_without_deleted_suffix)
-    {
-        return false;
-    }
-    let Ok(binary_metadata) = std::fs::metadata(proc_dir.join("exe")) else {
-        return false;
-    };
-    if binary_metadata.uid() != 0 || binary_metadata.mode() & 0o022 != 0 {
-        return false;
-    }
-
-    let Ok(file) = std::fs::File::open(proc_dir.join("cmdline")) else {
-        // The PID came from a root-only helper, but hidepid can still make its
-        // argv unreadable to the desktop user. Avoid tearing down a healthy
-        // tunnel solely because of that hardening policy.
-        return true;
-    };
-    let mut bytes = Vec::new();
-    if file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_err()
-        || bytes.is_empty()
-        || bytes.len() > 64 * 1024
-    {
-        return false;
-    }
-    let argv: Vec<&[u8]> = bytes
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .take(64)
-        .collect();
-    let expected_proxy = format!("socks5://127.0.0.1:{SOCKS_PORT}");
-    argv.windows(2)
-        .any(|pair| pair[0] == b"--device" && pair[1] == TUN_NAME.as_bytes())
-        && argv
-            .windows(2)
-            .any(|pair| pair[0] == b"--proxy" && pair[1] == expected_proxy.as_bytes())
-        && argv
-            .windows(2)
-            .any(|pair| pair[0] == b"--fwmark" && pair[1] == b"0x1")
 }
 
 /// Wait until a TCP port becomes reachable.
@@ -2037,8 +1526,8 @@ fn parse_stat_value(text: &str) -> Option<u64> {
             .trim_matches(',')
             .trim()
             .trim_matches('"');
-        if let Ok(value) = cleaned.parse::<u64>() {
-            return Some(value);
+        if let Ok(v) = cleaned.parse::<i64>() {
+            return Some(v.unsigned_abs());
         }
     }
     None
@@ -2051,20 +1540,5 @@ fn parse_xray_version(text: &str) -> String {
         (Some("Xray"), Some(version)) => format!("Xray-core v{}", version),
         _ if !first_line.is_empty() => first_line.to_string(),
         _ => "unknown".into(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_stat_value;
-
-    #[test]
-    fn parses_full_unsigned_xray_counter_range() {
-        assert_eq!(
-            parse_stat_value("value: 18446744073709551615"),
-            Some(u64::MAX)
-        );
-        assert_eq!(parse_stat_value("\"value\": \"42\","), Some(42));
-        assert_eq!(parse_stat_value("value: -1"), None);
     }
 }
