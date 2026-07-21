@@ -23,6 +23,11 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
     },
     {
       icon: "notes",
+      titleKey: "whats_new_linux_stability_title",
+      descriptionKey: "whats_new_linux_stability_description",
+    },
+    {
+      icon: "notes",
       titleKey: "whats_new_server_availability_title",
       descriptionKey: "whats_new_server_availability_description",
     },

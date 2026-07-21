@@ -847,11 +847,6 @@ impl VpnManager {
         let state = self.state.clone();
         let session_gen = self.session_gen.clone();
         let app = self.app_handle.clone();
-        let tun2socks_paths: BTreeSet<PathBuf> = {
-            let path = self.resolve_bin("tun2socks");
-            let canonical = path.canonicalize().ok();
-            std::iter::once(path).chain(canonical).collect()
-        };
         let manager_clone = VpnManager {
             state: self.state.clone(),
             xray_process: self.xray_process.clone(),
@@ -884,7 +879,7 @@ impl VpnManager {
                     let t2s_dead = {
                         let pid = *tun2socks_pid.lock().await;
                         match pid {
-                            Some(pid) if tun2socks_process_alive(pid, &tun2socks_paths) => None,
+                            Some(pid) if tun2socks_process_alive(pid) => None,
                             Some(pid) => Some(format!("tun2socks exited: pid {pid}")),
                             None => Some("tun2socks pid missing".to_string()),
                         }
@@ -1954,7 +1949,7 @@ fn linux_process_is_managed_xray(pid: u32, executable_paths: &BTreeSet<PathBuf>)
             .any(|pair| pair[0] == b"-config" && pair[1] == b"stdin:")
 }
 
-fn tun2socks_process_alive(pid: u32, executable_paths: &BTreeSet<PathBuf>) -> bool {
+fn tun2socks_process_alive(pid: u32) -> bool {
     let proc_dir = PathBuf::from(format!("/proc/{pid}"));
     let Ok(process_metadata) = std::fs::metadata(&proc_dir) else {
         return false;
@@ -1963,26 +1958,14 @@ fn tun2socks_process_alive(pid: u32, executable_paths: &BTreeSet<PathBuf>) -> bo
         return false;
     }
 
-    let Ok(executable) = std::fs::read_link(proc_dir.join("exe")) else {
-        return false;
-    };
-    let executable_text = executable.to_string_lossy();
-    let executable_without_deleted_suffix = executable_text
-        .strip_suffix(" (deleted)")
-        .unwrap_or(&executable_text);
-    if !executable_paths
-        .iter()
-        .any(|path| path.as_os_str() == executable_without_deleted_suffix)
-    {
-        return false;
-    }
-    let Ok(binary_metadata) = std::fs::metadata(proc_dir.join("exe")) else {
-        return false;
-    };
-    if binary_metadata.uid() != 0 || binary_metadata.mode() & 0o022 != 0 {
-        return false;
-    }
-
+    // Can't check /proc/<pid>/exe the way stale_xray_pids() does for xray:
+    // tun2socks runs as root via pkexec while this watchdog runs as the
+    // desktop user, and reading another uid's exe symlink needs ptrace
+    // access this process doesn't have — readlink() fails with EACCES even
+    // while tun2socks is alive and healthy, which used to make every
+    // watchdog poll misreport a live tunnel as dead. uid==0 above plus the
+    // exact --device/--proxy/--fwmark cmdline match below (both readable
+    // cross-uid) are what actually identify the process here.
     let Ok(file) = std::fs::File::open(proc_dir.join("cmdline")) else {
         // The PID came from a root-only helper, but hidepid can still make its
         // argv unreadable to the desktop user. Avoid tearing down a healthy

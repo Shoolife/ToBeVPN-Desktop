@@ -659,7 +659,7 @@ case "${1:-}" in
     chmod 0600 "$LOG_FILE"
     setsid "$TUN2SOCKS_BIN" --device "$TUN_NAME" \
         --proxy "socks5://127.0.0.1:${SOCKS_PORT}" \
-        --fwmark "$FWMARK" --loglevel error >"$LOG_FILE" 2>&1 9>&- &
+        --fwmark "$FWMARK" --loglevel error >"$LOG_FILE" 2>&1 8>&- 9>&- &
     T2S_PID=$!
     printf '%s\n' "$T2S_PID" >"$PID_FILE"
     disown "$T2S_PID" 2>/dev/null || true
