@@ -26,6 +26,8 @@ const BLOCK_HEADER = "is-hack";
 const BLOCK_VALUE = "yes";
 const SUBSCRIPTION_USERINFO_HEADER = "subscription-userinfo";
 const VERSION_PATTERN = /^\d+(?:\.\d+)*$/;
+const MAX_PROFILE_LINKS = 512;
+const MAX_PROFILE_LINK_LENGTH = 16 * 1024;
 
 declare const __APP_VERSION__: string;
 
@@ -208,7 +210,7 @@ async function primaryThenFallback(
     );
   }
 
-  if (primaryUnavailableUntil > Date.now()) {
+  if (primaryUnavailableUntil > performance.now()) {
     try {
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) {
@@ -252,7 +254,7 @@ async function primaryThenFallback(
     winner = await firstSuccessful([primaryPromise, fallbackPromise]);
   } catch (error) {
     if (rejectedPrimaryResult) {
-      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
       return rejectedPrimaryResult;
     }
     throw error;
@@ -260,7 +262,7 @@ async function primaryThenFallback(
   if (winner.source === "primary") {
     primaryUnavailableUntil = 0;
   } else {
-    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
   }
   return readResult(winner.response, minimumVersionHeader);
 }
@@ -278,7 +280,7 @@ async function primaryThenFallbackProfile(
     );
   }
 
-  if (primaryUnavailableUntil > Date.now()) {
+  if (primaryUnavailableUntil > performance.now()) {
     try {
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) {
@@ -322,7 +324,7 @@ async function primaryThenFallbackProfile(
     winner = await firstSuccessful([primaryPromise, fallbackPromise]);
   } catch (error) {
     if (rejectedPrimaryResult) {
-      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
       return rejectedPrimaryResult;
     }
     throw error;
@@ -330,7 +332,7 @@ async function primaryThenFallbackProfile(
   if (winner.source === "primary") {
     primaryUnavailableUntil = 0;
   } else {
-    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
   }
   return readProfileResult(winner.response, minimumVersionHeader);
 }
@@ -416,8 +418,9 @@ function isVersionBelowMinimum(rawMinimum: string | null): boolean {
 }
 
 function parseVersion(raw: string | null): number[] | null {
+  if (!raw || raw.length > 64) return null;
   const normalized = raw
-    ?.trim()
+    .trim()
     .replace(/^[vV]/, "")
     .split(/[-+]/, 1)[0];
   if (!normalized || !VERSION_PATTERN.test(normalized)) return null;
@@ -448,7 +451,10 @@ function readSubscriptionUserInfo(raw: string | null): {
   const total = parseIntegerHeader(parts.get("total"));
   const used = [upload, download]
     .filter((value): value is number => value !== null)
-    .reduce((sum, value) => sum + value, 0);
+    .reduce(
+      (sum, value) => Math.min(Number.MAX_SAFE_INTEGER, sum + value),
+      0,
+    );
   return {
     usedBytes: upload === null && download === null ? null : used,
     totalBytes: total,
@@ -456,9 +462,9 @@ function readSubscriptionUserInfo(raw: string | null): {
 }
 
 function parseIntegerHeader(raw: string | undefined): number | null {
-  if (!raw) return null;
+  if (!raw || !/^\d{1,20}$/.test(raw)) return null;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function parseProfileLinks(body: string): string[] {
@@ -469,7 +475,9 @@ function parseProfileLinks(body: string): string[] {
 }
 
 function extractVlessLinks(text: string): string[] {
-  return Array.from(new Set(text.match(/vless:\/\/[^\s<>"']+/g) ?? []));
+  return Array.from(new Set(text.match(/vless:\/\/[^\s<>"']+/g) ?? []))
+    .filter((link) => link.length <= MAX_PROFILE_LINK_LENGTH)
+    .slice(0, MAX_PROFILE_LINKS);
 }
 
 function decodeBase64Profile(raw: string): string | null {
@@ -478,15 +486,18 @@ function decodeBase64Profile(raw: string): string | null {
   const normalized = compact.replace(/-/g, "+").replace(/_/g, "/");
   const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), "=");
   try {
-    return atob(padded);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   } catch {
     return null;
   }
 }
 
 function readIntervalMs(raw: string | null): number | null {
-  if (!raw) return null;
-  const parsed = parseFloat(raw.trim());
+  const normalized = raw?.trim() ?? "";
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return null;
+  const parsed = Number(normalized);
   if (!isFinite(parsed) || parsed <= 0) return null;
   const hours = Math.min(Math.max(parsed, MIN_INTERVAL_HOURS), MAX_INTERVAL_HOURS);
   return hours * 60 * 60 * 1000;
@@ -508,5 +519,12 @@ function buildFallbackUrlFromKey(subscriptionKey: string | null | undefined): st
   if (!SUBS_FALLBACK_URL) return null;
   const key = subscriptionKey?.trim();
   if (!key) return null;
-  return `${SUBS_FALLBACK_URL}${encodeURIComponent(key)}`;
+  try {
+    const url = new URL(SUBS_FALLBACK_URL);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    url.searchParams.set("sub", key);
+    return url.toString();
+  } catch {
+    return null;
+  }
 }

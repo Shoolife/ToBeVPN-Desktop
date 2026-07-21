@@ -49,6 +49,7 @@ const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_CHECK_TIMEOUT_MS = 8_000;
 const UPDATE_DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_UPDATE_NOTES_LENGTH = 32 * 1024;
 
 interface CachedCheck {
   ts: number;
@@ -79,6 +80,8 @@ interface Snapshot {
 let snapshot: Snapshot = { state: { kind: "idle" }, manualCheckInFlight: false };
 let cachedUpdate: Update | null = null;
 let initialCheckPromise: Promise<InitialUpdateCheckResult> | null = null;
+let operationGeneration = 0;
+let autoUpdateEnabledMemory: boolean | null = null;
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -115,14 +118,17 @@ export function useManualCheckInFlight(): boolean {
 
 /** Automatic installation is opt-out: existing users receive it by default. */
 export function getAutoUpdateEnabled(): boolean {
+  if (autoUpdateEnabledMemory !== null) return autoUpdateEnabledMemory;
   try {
-    return localStorage.getItem(AUTO_UPDATE_KEY) !== "0";
+    autoUpdateEnabledMemory = localStorage.getItem(AUTO_UPDATE_KEY) !== "0";
   } catch {
-    return true;
+    autoUpdateEnabledMemory = true;
   }
+  return autoUpdateEnabledMemory;
 }
 
 export function saveAutoUpdateEnabled(enabled: boolean): boolean {
+  autoUpdateEnabledMemory = enabled;
   try {
     localStorage.setItem(AUTO_UPDATE_KEY, enabled ? "1" : "0");
   } catch {
@@ -136,13 +142,19 @@ function readCache(): CachedCheck | null {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as CachedCheck;
-    if (Date.now() - parsed.ts > CACHE_TTL_MS) return null;
-    if (parsed.info) {
+    const parsed = JSON.parse(raw) as Partial<CachedCheck>;
+    const ts = Number(parsed.ts);
+    if (
+      !Number.isSafeInteger(ts) ||
+      ts <= 0 ||
+      ts > Date.now() + 60_000 ||
+      Date.now() - ts > CACHE_TTL_MS ||
+      (parsed.info !== null && parsed.info !== undefined)
+    ) {
       clearCache();
       return null;
     }
-    return parsed;
+    return { ts, info: null };
   } catch {
     return null;
   }
@@ -168,12 +180,48 @@ function readDismiss(): DismissRecord | null {
   try {
     const raw = localStorage.getItem(DISMISS_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as DismissRecord;
-    if (Date.now() - parsed.ts > DISMISS_TTL_MS) return null;
-    return parsed;
+    const parsed = JSON.parse(raw) as Partial<DismissRecord>;
+    const version = sanitizeVersion(parsed.version);
+    const ts = Number(parsed.ts);
+    if (
+      !version ||
+      !Number.isSafeInteger(ts) ||
+      ts <= 0 ||
+      ts > Date.now() + 60_000 ||
+      Date.now() - ts > DISMISS_TTL_MS
+    ) {
+      clearDismiss();
+      return null;
+    }
+    return { version, ts };
   } catch {
+    clearDismiss();
     return null;
   }
+}
+
+function sanitizeVersion(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed &&
+    trimmed.length <= 64 &&
+    /^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(trimmed)
+    ? trimmed
+    : null;
+}
+
+function updateInfo(update: Update): DesktopUpdateInfo | null {
+  const version = sanitizeVersion(update.version);
+  if (!version) return null;
+  const notes = typeof update.body === "string"
+    ? update.body
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+        .slice(0, MAX_UPDATE_NOTES_LENGTH)
+    : "";
+  const pubDate = typeof update.date === "string" && update.date.length <= 128
+    ? update.date
+    : undefined;
+  return { version, notes, pubDate };
 }
 
 function writeDismiss(version: string) {
@@ -204,11 +252,11 @@ async function probeNetwork(): Promise<ProbeResult> {
       return { kind: "current" };
     }
     cachedUpdate = update;
-    const info: DesktopUpdateInfo = {
-      version: update.version,
-      notes: update.body ?? "",
-      pubDate: update.date ?? undefined,
-    };
+    const info = updateInfo(update);
+    if (!info) {
+      cachedUpdate = null;
+      return { kind: "failed" };
+    }
     clearCache();
     return { kind: "available", info };
   } catch (e) {
@@ -291,10 +339,17 @@ export async function forceCheckUpdate(): Promise<void> {
   ) {
     return;
   }
+  const generation = ++operationGeneration;
   setSnapshot({ manualCheckInFlight: true });
   try {
     clearDismiss();
     const result = await probeNetwork();
+    const stateKind = getSnapshot().state.kind;
+    if (
+      generation !== operationGeneration ||
+      stateKind === "downloading" ||
+      stateKind === "ready"
+    ) return;
     if (result.kind === "available") {
       setState({ kind: "available", info: result.info });
     } else if (result.kind === "current") {
@@ -327,6 +382,7 @@ export function retryUpdate(): void {
 export async function startUpdateDownload(): Promise<void> {
   const current = snapshot.state;
   if (current.kind !== "available") return;
+  const generation = ++operationGeneration;
   const info = current.info;
   setState({
     kind: "downloading",
@@ -342,10 +398,12 @@ export async function startUpdateDownload(): Promise<void> {
     });
     try {
       await invoke("install_latest_linux_update", { version: info.version });
+      if (generation !== operationGeneration) return;
       clearDismiss();
       setState({ kind: "ready", info });
       await relaunch();
     } catch (e) {
+      if (generation !== operationGeneration) return;
       console.warn("[updateStore] Linux update install failed:", e);
       setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
     }
@@ -366,6 +424,18 @@ export async function startUpdateDownload(): Promise<void> {
     setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
     return;
   }
+  const checkedInfo = updateInfo(update);
+  if (!checkedInfo) {
+    setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
+    return;
+  }
+  if (checkedInfo.version !== info.version) {
+    // Require confirmation again if the latest release changed between the
+    // check the user saw and the installer re-check.
+    cachedUpdate = update;
+    setState({ kind: "available", info: checkedInfo });
+    return;
+  }
 
   let downloaded = 0;
   let total = 0;
@@ -379,7 +449,10 @@ export async function startUpdateDownload(): Promise<void> {
   let downloadFinished = false;
   const flushProgress = () => {
     rafScheduled = false;
-    if (snapshot.state.kind === "downloading") {
+    if (
+      generation === operationGeneration &&
+      snapshot.state.kind === "downloading"
+    ) {
       setState({
         kind: "downloading",
         info,
@@ -399,7 +472,10 @@ export async function startUpdateDownload(): Promise<void> {
       switch (event.event) {
         case "Started":
           total = event.data.contentLength ?? 0;
-          if (snapshot.state.kind === "downloading") {
+          if (
+            generation === operationGeneration &&
+            snapshot.state.kind === "downloading"
+          ) {
             setState({
               kind: "downloading",
               info,
@@ -414,7 +490,10 @@ export async function startUpdateDownload(): Promise<void> {
         case "Finished":
           downloadFinished = true;
           downloaded = total > 0 ? total : downloaded;
-          if (snapshot.state.kind === "downloading") {
+          if (
+            generation === operationGeneration &&
+            snapshot.state.kind === "downloading"
+          ) {
             setState({
               kind: "downloading",
               info,
@@ -429,10 +508,12 @@ export async function startUpdateDownload(): Promise<void> {
           break;
       }
     }, { timeout: UPDATE_DOWNLOAD_TIMEOUT_MS });
+    if (generation !== operationGeneration) return;
     clearDismiss();
     setState({ kind: "ready", info });
     await relaunch();
   } catch (e) {
+    if (generation !== operationGeneration) return;
     console.warn("[updateStore] update download/install failed:", e);
     setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
   }

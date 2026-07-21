@@ -333,7 +333,12 @@ export default function SettingsScreen({
   }, []);
 
   useEffect(() => {
-    if (!session.isLinked) return;
+    setAvatarUrl(null);
+    setProfile({ name: null, username: null });
+    if (!session.isLinked || session.telegramId === null) {
+      setAvatarLoading(false);
+      return;
+    }
     let cancelled = false;
     setAvatarLoading(true);
     getUserAvatarUrl().then((url) => {
@@ -348,7 +353,7 @@ export default function SettingsScreen({
     return () => {
       cancelled = true;
     };
-  }, [session.isLinked]);
+  }, [session.deviceId, session.isLinked, session.shortUuid, session.telegramId]);
 
   useEffect(() => {
     const refreshRoutingMode = () => setRoutingMode(loadRoutingSettings().mode);

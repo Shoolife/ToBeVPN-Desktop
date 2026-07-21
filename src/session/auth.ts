@@ -30,9 +30,12 @@ import type {
 } from "../api/types";
 import {
   clearDeviceSession,
+  clearIdentity,
   applySessionSecrets,
   getSession,
+  getSessionGeneration,
   getSessionSecrets,
+  invalidateSessionWork,
   markLinkedIdentity,
   subscribeSession,
   updateSession,
@@ -79,7 +82,8 @@ const BLOCKED_SUBSCRIPTION_KEY = "tobevpn_blocked_subscription_v1";
 // previous build's persisted block before its first subscription refresh.
 const UPDATE_REQUIRED_KEY = `tobevpn_minimum_version_required_${__APP_VERSION__}`;
 const SUBSCRIPTION_ACCESS_EVENT = "tobevpn:subscription-access-changed";
-const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
+const LEGACY_PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v1";
+const PENDING_PURCHASE_KEY = "tobevpn_pending_purchase_v2";
 const PENDING_AUTH_TOKEN_KEY = "tobevpn_pending_auth_token_v1";
 const VPN_SERVERS_EVENT = "tobevpn:vpn-servers-changed";
 // 12h matches the default surfaced in the panel's "subscription
@@ -92,12 +96,16 @@ const PURCHASE_REFRESH_TOTAL_WINDOW_MS = 10 * 60 * 1000;
 const PURCHASE_REFRESH_INTERVAL_MS = 3_000;
 const PURCHASE_REFRESH_SLOW_INTERVAL_MS = 30_000;
 const PURCHASE_PENDING_MAX_AGE_MS = 30 * 60 * 1000;
+const PERSISTED_TIMESTAMP_FUTURE_TOLERANCE_MS = 60_000;
 const SERVER_METADATA_TIMEOUT_MS = 250;
 
 // Single in-flight syncSubscription. Concurrent callers (vpnState.connectVpn,
 // HomeScreen useEffect, manual refresh) all await the same promise.
 let syncInFlight: Promise<void> | null = null;
+let syncInFlightGeneration: number | null = null;
 let pendingPurchaseRefresh: Promise<void> | null = null;
+let pendingPurchaseRefreshGeneration: number | null = null;
+let pendingPurchaseMemory: PendingPurchaseState | null = null;
 let vpnServersMemoryCache: {
   shortUuid: string;
   servers: VpnServer[];
@@ -106,8 +114,38 @@ let vpnServersCacheGeneration = 0;
 
 interface PendingPurchaseState {
   startedAt: number;
+  deviceId: string;
+  telegramId: number;
   baselinePlan: UserPlan | null;
   baselineExpiresAt: number | null;
+}
+
+interface SessionWorkIdentity {
+  generation: number;
+  deviceId: string;
+  telegramId: number | null;
+}
+
+function captureSessionWorkIdentity(): SessionWorkIdentity {
+  const session = getSession();
+  return {
+    generation: getSessionGeneration(),
+    deviceId: session.deviceId,
+    telegramId: session.telegramId,
+  };
+}
+
+function isSessionWorkIdentityCurrent(expected: SessionWorkIdentity): boolean {
+  const session = getSession();
+  return (
+    getSessionGeneration() === expected.generation &&
+    session.deviceId === expected.deviceId &&
+    session.telegramId === expected.telegramId
+  );
+}
+
+function sessionWorkSuperseded(): Error {
+  return new Error("Device session changed while the operation was in flight");
 }
 
 function readSubInterval(): number {
@@ -253,13 +291,46 @@ function sleepMs(ms: number): Promise<void> {
 }
 
 function readPendingPurchaseState(): PendingPurchaseState | null {
+  const current = getSession();
+  const belongsToCurrentSession = (state: PendingPurchaseState | null) =>
+    Boolean(
+      state &&
+      current.isLinked &&
+      current.telegramId !== null &&
+      state.deviceId === current.deviceId &&
+      state.telegramId === current.telegramId,
+    );
   try {
+    // v1 had no account identity and could refresh a purchase after another
+    // account linked this installation. It is deliberately not migrated.
+    localStorage.removeItem(LEGACY_PENDING_PURCHASE_KEY);
     const raw = localStorage.getItem(PENDING_PURCHASE_KEY);
-    if (!raw) return null;
+    if (!raw) {
+      return belongsToCurrentSession(pendingPurchaseMemory)
+        ? pendingPurchaseMemory
+        : null;
+    }
     const parsed = JSON.parse(raw) as Partial<PendingPurchaseState>;
-    if (typeof parsed.startedAt !== "number") return null;
-    return {
-      startedAt: parsed.startedAt,
+    const now = Date.now();
+    if (
+      !Number.isSafeInteger(parsed.startedAt) ||
+      (parsed.startedAt ?? 0) < 946_684_800_000 ||
+      (parsed.startedAt ?? 0) > now + PERSISTED_TIMESTAMP_FUTURE_TOLERANCE_MS ||
+      typeof parsed.deviceId !== "string" ||
+      parsed.deviceId.length === 0 ||
+      parsed.deviceId.length > 512 ||
+      /[\u0000-\u001f\u007f]/.test(parsed.deviceId) ||
+      !Number.isSafeInteger(parsed.telegramId) ||
+      (parsed.telegramId ?? 0) <= 0
+    ) {
+      localStorage.removeItem(PENDING_PURCHASE_KEY);
+      pendingPurchaseMemory = null;
+      return null;
+    }
+    const state: PendingPurchaseState = {
+      startedAt: parsed.startedAt as number,
+      deviceId: parsed.deviceId,
+      telegramId: parsed.telegramId as number,
       baselinePlan:
         parsed.baselinePlan === "PAID" ||
         parsed.baselinePlan === "ADMIN" ||
@@ -268,10 +339,23 @@ function readPendingPurchaseState(): PendingPurchaseState | null {
           ? parsed.baselinePlan
           : null,
       baselineExpiresAt:
-        typeof parsed.baselineExpiresAt === "number" ? parsed.baselineExpiresAt : null,
+        typeof parsed.baselineExpiresAt === "number" &&
+        Number.isSafeInteger(parsed.baselineExpiresAt) &&
+        parsed.baselineExpiresAt > 0
+          ? parsed.baselineExpiresAt
+          : null,
     };
+    if (!belongsToCurrentSession(state)) {
+      localStorage.removeItem(PENDING_PURCHASE_KEY);
+      pendingPurchaseMemory = null;
+      return null;
+    }
+    pendingPurchaseMemory = state;
+    return state;
   } catch {
-    return null;
+    return belongsToCurrentSession(pendingPurchaseMemory)
+      ? pendingPurchaseMemory
+      : null;
   }
 }
 
@@ -279,21 +363,34 @@ export function markPendingPurchaseStarted(input: {
   baselinePlan?: UserPlan | null;
   baselineExpiresAt?: number | null;
 } = {}): void {
+  const session = getSession();
+  if (!session.isLinked || session.telegramId === null) return;
   const state: PendingPurchaseState = {
     startedAt: Date.now(),
+    deviceId: session.deviceId,
+    telegramId: session.telegramId,
     baselinePlan: input.baselinePlan ?? null,
-    baselineExpiresAt: input.baselineExpiresAt ?? null,
+    baselineExpiresAt:
+      typeof input.baselineExpiresAt === "number" &&
+      Number.isSafeInteger(input.baselineExpiresAt) &&
+      input.baselineExpiresAt > 0
+        ? input.baselineExpiresAt
+        : null,
   };
+  pendingPurchaseMemory = state;
   try {
     localStorage.setItem(PENDING_PURCHASE_KEY, JSON.stringify(state));
+    localStorage.removeItem(LEGACY_PENDING_PURCHASE_KEY);
   } catch {
-    // If persistence fails, the in-session refresh still starts below.
+    // The memory value still starts the in-session refresh below.
   }
 }
 
 export function clearPendingPurchase(): void {
+  pendingPurchaseMemory = null;
   try {
     localStorage.removeItem(PENDING_PURCHASE_KEY);
+    localStorage.removeItem(LEGACY_PENDING_PURCHASE_KEY);
   } catch {
     // ignore
   }
@@ -536,7 +633,9 @@ function resolvePlanFromCurrentPlan(cachedPlan: UserPlan, currentPlanInfo: Curre
 
 export async function initializeAuthSession(): Promise<void> {
   const currentSession = getSession();
+  const initializationGeneration = getSessionGeneration();
   const secureSession = await loadSecureSession();
+  if (getSessionGeneration() !== initializationGeneration) return;
 
   if (secureSession) {
     applySessionSecrets(secureSession);
@@ -544,6 +643,7 @@ export async function initializeAuthSession(): Promise<void> {
     const legacySecrets = getSessionSecrets(currentSession);
     if (legacySecrets) {
       await saveSecureSession(legacySecrets);
+      if (getSessionGeneration() !== initializationGeneration) return;
       applySessionSecrets(legacySecrets);
     }
   }
@@ -611,6 +711,21 @@ export interface DevicePairingCode {
   expiresIn: number;
 }
 
+function requireBoundedToken(value: unknown, label: string, maxLength = 512): string {
+  if (typeof value !== "string") throw new Error(`Invalid ${label}`);
+  const trimmed = value.trim();
+  if (
+    !trimmed ||
+    trimmed.length > maxLength ||
+    /[\u0000-\u001f\u007f]/.test(trimmed)
+  ) throw new Error(`Invalid ${label}`);
+  return trimmed;
+}
+
+function isValidTelegramId(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
 export async function createPairingCode(): Promise<PairingCode> {
   await ensureDeviceSession();
   const session = getSession();
@@ -619,7 +734,7 @@ export async function createPairingCode(): Promise<PairingCode> {
   });
   if (!res.success || !res.data) throw new Error(res.message ?? "Empty auth response");
 
-  const authToken = res.data.auth_token;
+  const authToken = requireBoundedToken(res.data.auth_token, "authentication token");
   writePendingAuthToken(authToken);
   const qrUrl = getPairingOpenTargets(authToken).browserUrl;
   return { authToken, qrUrl };
@@ -629,8 +744,14 @@ export async function createDevicePairingCode(): Promise<DevicePairingCode> {
   await ensureDeviceSession();
   const res = await createTvPairing({});
   if (!res.success || !res.data) throw new Error(res.message ?? "Empty pairing response");
+  const code = requireBoundedToken(res.data.code, "pairing code", 128);
+  if (
+    !Number.isSafeInteger(res.data.expires_in) ||
+    res.data.expires_in <= 0 ||
+    res.data.expires_in > 604_800
+  ) throw new Error("Invalid pairing expiration");
   return {
-    code: res.data.code,
+    code,
     expiresIn: res.data.expires_in,
   };
 }
@@ -639,7 +760,9 @@ export function getPairingOpenTargets(authToken: string): {
   desktopUrl: string;
   browserUrl: string;
 } {
-  const encodedToken = encodeURIComponent(authToken);
+  const encodedToken = encodeURIComponent(
+    requireBoundedToken(authToken, "authentication token"),
+  );
   return {
     desktopUrl: `tg://resolve?domain=${TELEGRAM_BOT_NAME}&start=${encodedToken}`,
     browserUrl: `https://t.me/${TELEGRAM_BOT_NAME}?start=${encodedToken}`,
@@ -657,7 +780,7 @@ export type DevicePairingPollResult =
   | { status: "completed"; payload: NonNullable<TvPairStatusDto> };
 
 export async function pollPairing(authToken: string): Promise<PairingPollResult> {
-  const res = await checkAuthStatus(authToken);
+  const res = await checkAuthStatus(requireBoundedToken(authToken, "authentication token"));
   if (!res.success || !res.data) {
     const message = res.message ?? "Auth token not found";
     if (/not found|expired/i.test(message)) return { status: "expired" };
@@ -665,14 +788,17 @@ export async function pollPairing(authToken: string): Promise<PairingPollResult>
   }
   const data = res.data;
   if (data.status === "completed") {
-    if (!data.telegram_id) throw new Error("Pairing completed without telegram_id");
+    if (!isValidTelegramId(data.telegram_id)) {
+      throw new Error("Pairing completed without a valid telegram_id");
+    }
     return { status: "completed", payload: data };
   }
+  if (data.status !== "pending") throw new Error("Unknown pairing status");
   return { status: "pending" };
 }
 
 export async function pollDevicePairing(code: string): Promise<DevicePairingPollResult> {
-  const res = await checkTvPairingStatus(code);
+  const res = await checkTvPairingStatus(requireBoundedToken(code, "pairing code", 128));
   if (!res.success || !res.data) {
     const message = res.message ?? "Pairing code not found";
     if (/not found|expired/i.test(message)) return { status: "expired" };
@@ -680,11 +806,14 @@ export async function pollDevicePairing(code: string): Promise<DevicePairingPoll
   }
   const data = res.data;
   if (data.status === "completed") {
-    if (!data.telegram_id) throw new Error("Pairing completed without telegram_id");
+    if (!isValidTelegramId(data.telegram_id)) {
+      throw new Error("Pairing completed without a valid telegram_id");
+    }
     return { status: "completed", payload: data };
   }
   if (data.status === "expired") return { status: "expired" };
   if (data.status === "rejected") throw new Error(res.message ?? "Pairing was rejected");
+  if (data.status !== "pending") throw new Error("Unknown pairing status");
   return { status: "pending" };
 }
 
@@ -697,13 +826,33 @@ export async function authenticateWithTelegramId(
   preferredShortUuid?: string | null,
   preferredPanelUserUuid?: string | null,
 ): Promise<void> {
+  if (!isValidTelegramId(telegramId)) {
+    throw new Error("Invalid Telegram identity");
+  }
+  invalidateSessionWork();
   markLinkedIdentity({
     telegramId,
     shortUuid: preferredShortUuid,
     panelUserUuid: preferredPanelUserUuid,
   });
 
-  await bootstrapDeviceSession().catch(() => {});
+  const pairingGeneration = getSessionGeneration();
+  try {
+    await bootstrapDeviceSession();
+  } catch (error) {
+    const currentSession = getSession();
+    if (
+      getSessionGeneration() === pairingGeneration &&
+      currentSession.isLinked &&
+      currentSession.telegramId === telegramId
+    ) {
+      clearIdentity();
+    }
+    throw error;
+  }
+  if (getSessionGeneration() !== pairingGeneration) {
+    throw new Error("Device pairing was superseded");
+  }
 
   // Force the sync — we just authenticated and the user expects to
   // immediately see the right plan (PAID / FREE_TRIAL), not whatever
@@ -723,25 +872,41 @@ export async function authenticateWithTelegramId(
  */
 export async function syncSubscription(opts: { force?: boolean } = {}): Promise<void> {
   const { force = false } = opts;
-  if (syncInFlight) return syncInFlight;
+  const generation = getSessionGeneration();
+  if (syncInFlight && syncInFlightGeneration === generation) return syncInFlight;
   if (!force) {
     const last = readSubLastSyncAt();
-    if (last > 0 && Date.now() - last < readSubInterval()) return;
+    const age = Date.now() - last;
+    if (last > 0 && age >= 0 && age < readSubInterval()) return;
   }
-  syncInFlight = runSyncSubscription().finally(() => {
-    syncInFlight = null;
+  const promise = runSyncSubscription(generation).finally(() => {
+    if (syncInFlight === promise) {
+      syncInFlight = null;
+      syncInFlightGeneration = null;
+    }
   });
-  return syncInFlight;
+  syncInFlight = promise;
+  syncInFlightGeneration = generation;
+  return promise;
 }
 
 export function startPendingPurchaseRefreshIfNeeded(): void {
-  if (pendingPurchaseRefresh) return;
+  const generation = getSessionGeneration();
+  if (
+    pendingPurchaseRefresh &&
+    pendingPurchaseRefreshGeneration === generation
+  ) return;
   const pending = readPendingPurchaseState();
   if (!pending) return;
 
-  pendingPurchaseRefresh = runPendingPurchaseRefresh(pending).finally(() => {
-    pendingPurchaseRefresh = null;
+  const promise = runPendingPurchaseRefresh(pending, generation).finally(() => {
+    if (pendingPurchaseRefresh === promise) {
+      pendingPurchaseRefresh = null;
+      pendingPurchaseRefreshGeneration = null;
+    }
   });
+  pendingPurchaseRefresh = promise;
+  pendingPurchaseRefreshGeneration = generation;
 }
 
 /**
@@ -750,12 +915,25 @@ export function startPendingPurchaseRefreshIfNeeded(): void {
  * pinger can reconstruct the direct URL from the subscription key.
  */
 export async function pingHwidOnly(): Promise<boolean> {
-  const shortUuid = getSession().shortUuid;
+  const session = getSession();
+  const shortUuid = session.shortUuid;
+  const expectedGeneration = getSessionGeneration();
+  const expectedDeviceId = session.deviceId;
+  const isCurrent = () => {
+    const current = getSession();
+    return (
+      getSessionGeneration() === expectedGeneration &&
+      current.deviceId === expectedDeviceId &&
+      current.shortUuid === shortUuid
+    );
+  };
   const wasBlocked = isSubscriptionUsageBlocked(shortUuid);
   if (!shortUuid) return wasBlocked;
   const url = await readSubscriptionUrl(shortUuid);
+  if (!isCurrent()) return true;
   try {
     const result = await pingSubscriptionUrl(url, shortUuid);
+    if (!isCurrent()) return true;
     if (!result) return wasBlocked;
     setSubscriptionUsageBlocked(shortUuid, result.isUsageBlocked);
     setUpdateRequired(result.isUpdateRequired);
@@ -771,11 +949,15 @@ function refreshSubscriptionUrlFromBot(shortUuid: string): void {
   if (subscriptionUrlRefreshes.has(shortUuid)) return;
   const session = getSession();
   if (!session.isLinked || session.shortUuid !== shortUuid) return;
+  const expectedGeneration = getSessionGeneration();
+  const expectedDeviceId = session.deviceId;
 
   const refresh = fetchCurrentSubscriptionPlan()
     .then((currentPlanInfo) => {
       const currentSession = getSession();
       if (
+        getSessionGeneration() === expectedGeneration &&
+        currentSession.deviceId === expectedDeviceId &&
         currentSession.isLinked &&
         currentSession.shortUuid === shortUuid &&
         currentPlanInfo?.subscriptionUrl
@@ -805,8 +987,12 @@ async function readSubscriptionUrl(shortUuid: string): Promise<string | null> {
   return cached;
 }
 
-async function runSyncSubscription(): Promise<void> {
+async function runSyncSubscription(expectedGeneration: number): Promise<void> {
   let session = getSession();
+  const expectedDeviceId = session.deviceId;
+  const isCurrent = () =>
+    getSessionGeneration() === expectedGeneration &&
+    getSession().deviceId === expectedDeviceId;
 
   const telegramId = session.telegramId;
 
@@ -814,23 +1000,25 @@ async function runSyncSubscription(): Promise<void> {
   let currentPlanInfo: CurrentSubscriptionPlanInfo | null = null;
   if (session.isLinked && telegramId !== null) {
     try {
-    const { response: panelUsers } = await getUserByTelegramId(telegramId);
-    panelUser = selectBestPanelUser(
-      panelUsers,
-      session.panelUserUuid,
-      session.shortUuid,
-    );
-    if (panelUser) {
-      session = updateSession({
-        shortUuid: panelUser.short_uuid,
-        panelUserUuid: panelUser.uuid,
-        email: panelUser.email ?? session.email,
-      });
-    }
+      const { response: panelUsers } = await getUserByTelegramId(telegramId);
+      if (!isCurrent()) return;
+      panelUser = selectBestPanelUser(
+        panelUsers,
+        session.panelUserUuid,
+        session.shortUuid,
+      );
+      if (panelUser) {
+        session = updateSession({
+          shortUuid: panelUser.short_uuid,
+          panelUserUuid: panelUser.uuid,
+          email: panelUser.email ?? session.email,
+        });
+      }
     } catch {
       // Fall through — keep using the cached shortUuid.
     }
     currentPlanInfo = await fetchCurrentSubscriptionPlan();
+    if (!isCurrent()) return;
   }
 
   const shortUuid = session.shortUuid;
@@ -845,10 +1033,12 @@ async function runSyncSubscription(): Promise<void> {
   let profileResult: SubscriptionProfileResult | null = null;
   try {
     profileResult = await fetchSubscriptionProfile(subscriptionUrl, shortUuid);
+    if (!isCurrent()) return;
   } catch {
     profileResult = null;
   }
 
+  if (!isCurrent()) return;
   if (profileResult) {
     setSubscriptionUsageBlocked(shortUuid, profileResult.isUsageBlocked);
     setUpdateRequired(profileResult.isUpdateRequired);
@@ -930,17 +1120,26 @@ async function runSyncSubscription(): Promise<void> {
   }
 }
 
-async function runPendingPurchaseRefresh(initial: PendingPurchaseState): Promise<void> {
-  const maxDeadline = initial.startedAt + PURCHASE_PENDING_MAX_AGE_MS;
-  const now = Date.now();
-  if (now > maxDeadline) {
+async function runPendingPurchaseRefresh(
+  initial: PendingPurchaseState,
+  expectedGeneration: number,
+): Promise<void> {
+  const isCurrent = () => getSessionGeneration() === expectedGeneration;
+  const wallAge = Math.max(0, Date.now() - initial.startedAt);
+  const remainingLifetime = PURCHASE_PENDING_MAX_AGE_MS - wallAge;
+  if (remainingLifetime <= 0) {
     expirePendingPurchase();
     return;
   }
 
-  const activeDeadline = Math.min(now + PURCHASE_REFRESH_ACTIVE_WINDOW_MS, maxDeadline);
-  while (Date.now() <= activeDeadline) {
+  // Poll durations are process-local so a backwards wall-clock adjustment
+  // cannot keep an old purchase refresh alive indefinitely.
+  const startedAt = performance.now();
+  const activeDuration = Math.min(PURCHASE_REFRESH_ACTIVE_WINDOW_MS, remainingLifetime);
+  while (performance.now() - startedAt <= activeDuration) {
+    if (!isCurrent()) return;
     await refreshSubscriptionAfterPurchase();
+    if (!isCurrent()) return;
     if (paymentLooksApplied(initial, getSession())) {
       clearPendingPurchase();
       return;
@@ -948,17 +1147,22 @@ async function runPendingPurchaseRefresh(initial: PendingPurchaseState): Promise
     await sleepMs(PURCHASE_REFRESH_INTERVAL_MS);
   }
 
-  const totalDeadline = Math.min(now + PURCHASE_REFRESH_TOTAL_WINDOW_MS, maxDeadline);
-  while (Date.now() <= totalDeadline) {
+  const totalDuration = Math.min(PURCHASE_REFRESH_TOTAL_WINDOW_MS, remainingLifetime);
+  while (performance.now() - startedAt <= totalDuration) {
     await sleepMs(PURCHASE_REFRESH_SLOW_INTERVAL_MS);
+    if (!isCurrent()) return;
     await refreshSubscriptionAfterPurchase();
+    if (!isCurrent()) return;
     if (paymentLooksApplied(initial, getSession())) {
       clearPendingPurchase();
       return;
     }
   }
 
-  if (Date.now() > maxDeadline) {
+  if (
+    performance.now() - startedAt >= remainingLifetime ||
+    Date.now() - initial.startedAt >= PURCHASE_PENDING_MAX_AGE_MS
+  ) {
     expirePendingPurchase();
   }
 }
@@ -1025,8 +1229,10 @@ function isRemoteDeviceUnlinkedError(error: unknown): boolean {
 async function checkCurrentDeviceLinkStatus(): Promise<DeviceLinkStatus> {
   const { isLinked } = getSession();
   if (!isLinked) return "missing";
+  const expectedGeneration = getSessionGeneration();
   try {
     const res = await getCurrentPlan();
+    if (getSessionGeneration() !== expectedGeneration) return "unknown";
     if (res.success) {
       await applyCurrentPlanHeartbeat(res.data).catch(() => {});
     }
@@ -1042,7 +1248,18 @@ async function applyCurrentPlanHeartbeat(
   const planInfo = currentPlanInfoFromDto(data);
   if (!planInfo) return;
 
+  const expectedGeneration = getSessionGeneration();
   const sessionBefore = getSession();
+  const expectedDeviceId = sessionBefore.deviceId;
+  const expectedTelegramId = sessionBefore.telegramId;
+  const isCurrent = () => {
+    const current = getSession();
+    return (
+      getSessionGeneration() === expectedGeneration &&
+      current.deviceId === expectedDeviceId &&
+      current.telegramId === expectedTelegramId
+    );
+  };
   const oldShortUuid = sessionBefore.shortUuid;
   const cachedUrl = oldShortUuid ? readCachedSubscriptionUrl(oldShortUuid) : null;
   const nextUrl = planInfo.subscriptionUrl;
@@ -1052,9 +1269,12 @@ async function applyCurrentPlanHeartbeat(
   if (subscriptionUrlChanged) {
     if (reconnectServer) {
       await disconnectVpn().catch(() => {});
+      if (!isCurrent()) return;
     }
     await bootstrapDeviceSession().catch(() => {});
+    if (!isCurrent()) return;
   }
+  if (!isCurrent()) return;
   const refreshedSession = getSession();
   updateSession({
     userPlan: resolvePlanFromCurrentPlan(refreshedSession.userPlan, planInfo),
@@ -1079,7 +1299,9 @@ async function applyCurrentPlanHeartbeat(
   }
   clearSubSyncTimestamp();
   await syncSubscription({ force: true }).catch(() => {});
+  if (!isCurrent()) return;
   await fetchVpnServers({ skipAccessPing: true }).catch(() => []);
+  if (!isCurrent()) return;
   if (reconnectServer && getSession().userPlan !== "EXPIRED") {
     await reconnectVpnWithFreshSubscription(reconnectServer);
   }
@@ -1122,17 +1344,28 @@ export function startDeviceLinkPolling() {
 
     // Tear down the tunnel before clearing identity — otherwise the OS-level
     // VPN keeps routing traffic after the user is bounced to the QR screen.
+    invalidateSessionWork();
+    const cleanupIdentity = captureSessionWorkIdentity();
     try {
       await disconnectVpn();
     } catch {
       // ignore — proceed to wipe local state regardless
     }
+    if (
+      generation !== linkPollGeneration ||
+      !isSessionWorkIdentityCurrent(cleanupIdentity)
+    ) return;
     clearVpnServersMemoryCache(session.shortUuid);
     if (session.shortUuid) {
       writeCachedSubscriptionUrl(session.shortUuid, null);
     }
     clearSubSyncTimestamp();
+    clearPendingPurchase();
     await clearSecureSession();
+    if (
+      generation !== linkPollGeneration ||
+      !isSessionWorkIdentityCurrent(cleanupIdentity)
+    ) return;
     clearDeviceSession();
     stopDeviceLinkPolling();
   };
@@ -1150,6 +1383,10 @@ export function stopDeviceLinkPolling() {
 
 export async function logout(): Promise<void> {
   const { isLinked, shortUuid } = getSession();
+  // Stop every request started by the old account from applying a late
+  // response while logout waits for VPN and network cleanup.
+  invalidateSessionWork();
+  const logoutIdentity = captureSessionWorkIdentity();
   // Always tear down the tunnel first — clearing identity alone would leave
   // a live VPN session orphaned in the background.
   try {
@@ -1157,22 +1394,28 @@ export async function logout(): Promise<void> {
   } catch {
     // ignore — proceed even if backend already stopped
   }
+  if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
   if (isLinked) {
     try {
       await unlinkCurrentDevice();
     } catch {
       // ignore — clear local state regardless
     }
+    if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
   }
   try {
     await logoutDevice();
   } catch {
     // ignore — local session is cleared regardless
   }
+  if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
   await clearSecureSession();
+  if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
   clearPendingPurchase();
   clearPendingAuthToken();
   clearVpnServersMemoryCache(shortUuid);
+  if (shortUuid) writeCachedSubscriptionUrl(shortUuid, null);
+  clearSubSyncTimestamp();
   clearDeviceSession();
 }
 
@@ -1187,20 +1430,87 @@ export async function fetchDevices(): Promise<LinkedDevicesDto | null> {
   if (!isLinked) return null;
   await pingHwidOnly().catch(() => false);
   const res = await apiGetDevices();
-  if (!res.success || !res.data) return null;
-  return res.data;
+  if (!res.success || !res.data) {
+    throw new Error(res.message ?? "Could not load linked devices");
+  }
+  return sanitizeLinkedDevices(res.data);
+}
+
+function sanitizeLinkedDevices(value: unknown): LinkedDevicesDto {
+  const source = value !== null && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  if (!Array.isArray(source.devices)) {
+    throw new Error("Invalid linked devices response");
+  }
+  const boundedString = (input: unknown, max = 256): string | null => {
+    if (typeof input !== "string") return null;
+    const trimmed = input.trim();
+    return trimmed &&
+      trimmed.length <= max &&
+      !/[\u0000-\u001f\u007f]/.test(trimmed)
+      ? trimmed
+      : null;
+  };
+  const boundedEpoch = (input: unknown): number | null =>
+    Number.isSafeInteger(input) &&
+    Number(input) > 0 &&
+    Number(input) <= 4_102_444_800
+      ? Number(input)
+      : null;
+  const devices = new Map<string, LinkedDevicesDto["devices"][number]>();
+  for (const raw of source.devices.slice(0, 128)) {
+    if (raw === null || typeof raw !== "object") continue;
+    const item = raw as Record<string, unknown>;
+    const deviceId = boundedString(item.device_id, 128);
+    if (!deviceId || devices.has(deviceId)) continue;
+    devices.set(deviceId, {
+      device_id: deviceId,
+      hwid: boundedString(item.hwid, 256),
+      device_name: boundedString(item.device_name),
+      device_type: boundedString(item.device_type, 64),
+      platform: boundedString(item.platform, 64),
+      device_model: boundedString(item.device_model),
+      user_agent: boundedString(item.user_agent, 512),
+      linked_at: boundedEpoch(item.linked_at),
+      last_seen_at: boundedEpoch(item.last_seen_at),
+    });
+  }
+  const maxDevices = Number.isSafeInteger(source.max_devices) && Number(source.max_devices) >= 0
+    ? Math.min(Number(source.max_devices), 10_000)
+    : 0;
+  const currentCount =
+    Number.isSafeInteger(source.current_count) && Number(source.current_count) >= 0
+      ? Math.min(Number(source.current_count), 10_000)
+      : devices.size;
+  return {
+    devices: [...devices.values()],
+    max_devices: maxDevices,
+    current_count: currentCount,
+  };
 }
 
 export async function unlinkOtherDevice(deviceId: string): Promise<void> {
   const { isLinked } = getSession();
   if (!isLinked) throw new Error("Not authenticated");
+  const operationIdentity = captureSessionWorkIdentity();
+  const normalizedDeviceId = requireBoundedToken(deviceId, "device identity", 128);
+  const aliases = (await getCurrentDeviceAliases())
+    .map((value) => value.toLocaleLowerCase("en-US"));
+  if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
+  if (aliases.includes(normalizedDeviceId.toLocaleLowerCase("en-US"))) {
+    throw new Error("The current device cannot be unlinked from this screen");
+  }
   const reconnectServer = getActiveVpnReconnectServer();
-  const res = await unlinkDevice({ device_id: deviceId });
+  const res = await unlinkDevice({ device_id: normalizedDeviceId });
   if (!res.success) throw new Error(res.message ?? "Could not unlink device");
+  if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
   if (reconnectServer) {
     await disconnectVpn().catch(() => {});
+    if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
   }
   await refreshAfterDeviceUnlink(res.data);
+  if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
   if (reconnectServer && getSession().userPlan !== "EXPIRED") {
     await reconnectVpnWithFreshSubscription(reconnectServer);
   }
@@ -1261,7 +1571,109 @@ export async function fetchPurchasePlans(): Promise<PurchasePlansDto | null> {
   if (await pingHwidOnly().catch(() => getSubscriptionUsageBlocked())) return null;
   const res = await apiGetPurchasePlans();
   if (!res.success || !res.data) return null;
-  return res.data;
+  return sanitizePurchasePlansData(res.data, getSession().telegramId);
+}
+
+export function sanitizePurchasePlansData(
+  value: unknown,
+  expectedTelegramId: number | null = null,
+): PurchasePlansDto | null {
+  if (value === null || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  const telegramId = Number(source.telegram_id);
+  if (
+    !Number.isSafeInteger(telegramId) ||
+    telegramId <= 0 ||
+    (expectedTelegramId !== null && telegramId !== expectedTelegramId) ||
+    !Array.isArray(source.plans)
+  ) return null;
+
+  const text = (input: unknown, max: number, required = false): string | null => {
+    if (typeof input !== "string") return required ? null : "";
+    const trimmed = input.trim();
+    if ((required && !trimmed) || trimmed.length > max || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+      return null;
+    }
+    return trimmed;
+  };
+  const integer = (input: unknown, min: number, max: number): number | null => {
+    const number = Number(input);
+    return Number.isSafeInteger(number) && number >= min && number <= max ? number : null;
+  };
+  const httpsUrl = (input: unknown): string | null => {
+    const raw = text(input, 2_048);
+    if (!raw) return null;
+    try {
+      const url = new URL(raw);
+      return url.protocol === "https:" && !url.username && !url.password ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const plans: PurchasePlansDto["plans"] = [];
+  for (const rawPlan of source.plans.slice(0, 50)) {
+    if (rawPlan === null || typeof rawPlan !== "object") continue;
+    const plan = rawPlan as Record<string, unknown>;
+    const id = integer(plan.id, 1, Number.MAX_SAFE_INTEGER);
+    const name = text(plan.name, 128, true);
+    if (!id || !name || !Array.isArray(plan.durations)) continue;
+    const durations: PurchasePlansDto["plans"][number]["durations"] = [];
+    for (const rawDuration of plan.durations.slice(0, 32)) {
+      if (rawDuration === null || typeof rawDuration !== "object") continue;
+      const duration = rawDuration as Record<string, unknown>;
+      const durationId = integer(duration.id, 1, Number.MAX_SAFE_INTEGER);
+      const days = integer(duration.days, 1, 3_650);
+      if (!durationId || !days) continue;
+      const prices: PurchasePlansDto["plans"][number]["durations"][number]["prices"] = [];
+      if (Array.isArray(duration.prices)) {
+        for (const rawPrice of duration.prices.slice(0, 16)) {
+          if (rawPrice === null || typeof rawPrice !== "object") continue;
+          const price = rawPrice as Record<string, unknown>;
+          const currency = text(price.currency, 16, true);
+          const amount = text(price.amount, 64, true);
+          if (!currency || !amount || !/^\d{1,12}(?:\.\d{1,6})?$/.test(amount)) continue;
+          prices.push({ currency, amount });
+        }
+      }
+      durations.push({
+        id: durationId,
+        days,
+        order_index: integer(duration.order_index, -100_000, 100_000) ?? 0,
+        bot_start_param: text(duration.bot_start_param, 256) || null,
+        bot_payment_url: httpsUrl(duration.bot_payment_url),
+        prices,
+        payment_methods: [],
+      });
+    }
+    if (durations.length === 0) continue;
+    plans.push({
+      id,
+      public_code: text(plan.public_code, 128) || String(id),
+      name,
+      description: text(plan.description, 1_024) || null,
+      type: text(plan.type, 64) || "PAID",
+      availability: text(plan.availability, 64) || "PUBLIC",
+      purchase_type: text(plan.purchase_type, 64) || "NEW",
+      traffic_limit: integer(plan.traffic_limit, 0, 1_000_000) ?? 0,
+      traffic_limit_strategy: text(plan.traffic_limit_strategy, 64) || null,
+      device_limit: integer(plan.device_limit, 0, 10_000) ?? 0,
+      tag: text(plan.tag, 128) || null,
+      order_index: integer(plan.order_index, -100_000, 100_000) ?? 0,
+      internal_squad_uuids: [],
+      external_squad_uuid: null,
+      durations,
+    });
+  }
+
+  const discount = Number(source.effective_discount_percent);
+  return {
+    telegram_id: telegramId,
+    effective_discount_percent: Number.isFinite(discount)
+      ? Math.min(100, Math.max(0, discount))
+      : 0,
+    plans,
+  };
 }
 
 // --- VLESS URL parsing (mirrors TV's VlessUrlParser.kt) ---
@@ -1385,10 +1797,12 @@ function writeVpnServersMemoryCache(shortUuid: string, servers: VpnServer[]): nu
 }
 
 function clearVpnServersMemoryCache(shortUuid: string | null): void {
-  if (!shortUuid || vpnServersMemoryCache?.shortUuid === shortUuid) {
-    vpnServersCacheGeneration += 1;
-    vpnServersMemoryCache = null;
-  }
+  if (shortUuid && vpnServersMemoryCache && vpnServersMemoryCache.shortUuid !== shortUuid) return;
+  vpnServersCacheGeneration += 1;
+  vpnServersMemoryCache = null;
+  // An authoritative empty result matters even if this process has not yet
+  // populated its memory cache: App may still hold a persisted selection.
+  window.dispatchEvent(new Event(VPN_SERVERS_EVENT));
 }
 
 function parseVpnServersFromLinks(links: string[]): VpnServer[] {
@@ -1538,16 +1952,25 @@ export function subscribeVpnServers(listener: () => void): () => void {
 
 async function enrichVpnServersWithNodes(servers: VpnServer[]): Promise<VpnServer[]> {
   const nodes = (await apiGetNodes()).response;
-  const countryByAddress = new Map(nodes.map((n) => [n.address, n.country_code]));
-  const disabledAddresses = new Set(
-    nodes.filter((n) => n.is_disabled || !n.is_connected).map((n) => n.address),
+  const endpointKey = (address: string, port: number) =>
+    `${address.toLocaleLowerCase("en-US")}:${port}`;
+  const countryByEndpoint = new Map(
+    nodes.map((node) => [endpointKey(node.address, node.port), node.country_code]),
+  );
+  const disabledEndpoints = new Set(
+    nodes
+      .filter((node) => node.is_disabled || !node.is_connected)
+      .map((node) => endpointKey(node.address, node.port)),
   );
 
-  return servers.map((server) => ({
-    ...server,
-    country: countryByAddress.get(server.address) ?? server.country,
-    isOnline: server.isOnline && !disabledAddresses.has(server.address),
-  }));
+  return servers.map((server) => {
+    const key = endpointKey(server.address, server.port);
+    return {
+      ...server,
+      country: countryByEndpoint.get(key) ?? server.country,
+      isOnline: server.isOnline && !disabledEndpoints.has(key),
+    };
+  });
 }
 
 /**
@@ -1557,7 +1980,19 @@ async function enrichVpnServersWithNodes(servers: VpnServer[]): Promise<VpnServe
 export async function fetchVpnServers(
   opts: { skipAccessPing?: boolean } = {},
 ): Promise<VpnServer[]> {
-  const { shortUuid } = getSession();
+  const session = getSession();
+  const { shortUuid } = session;
+  const expectedGeneration = getSessionGeneration();
+  const expectedDeviceId = session.deviceId;
+  const isCurrent = () => {
+    const current = getSession();
+    return (
+      getSessionGeneration() === expectedGeneration &&
+      current.deviceId === expectedDeviceId &&
+      current.shortUuid === shortUuid
+    );
+  };
+  const currentCache = () => getCachedVpnServers();
   const debug = import.meta.env.DEV;
   if (!shortUuid) return [];
   if (isBrowserPreviewRuntime()) return getCachedVpnServers();
@@ -1569,13 +2004,16 @@ export async function fetchVpnServers(
   const blocked = opts.skipAccessPing
     ? getSubscriptionUsageBlocked()
     : await pingHwidOnly().catch(() => getSubscriptionUsageBlocked());
+  if (!isCurrent()) return currentCache();
   if (blocked) {
     clearVpnServersMemoryCache(shortUuid);
     return [];
   }
 
   const subscriptionUrl = await readSubscriptionUrl(shortUuid);
+  if (!isCurrent()) return currentCache();
   const profile = await fetchSubscriptionProfile(subscriptionUrl, shortUuid);
+  if (!isCurrent()) return currentCache();
   if (profile) {
     setSubscriptionUsageBlocked(shortUuid, profile.isUsageBlocked);
     setUpdateRequired(profile.isUpdateRequired);
@@ -1599,8 +2037,14 @@ export async function fetchVpnServers(
 
   const links = profile.links;
   if (links.length === 0) {
-    clearVpnServersMemoryCache(shortUuid);
-    return [];
+    // A proxy/server error can also have an empty body. Only a successful
+    // empty subscription is authoritative; otherwise retain the last known
+    // server list for this same account.
+    if (profile.isSuccessful) {
+      clearVpnServersMemoryCache(shortUuid);
+      return [];
+    }
+    return getCachedVpnServers();
   }
 
   const servers = prepareVpnServersForCache(
@@ -1630,8 +2074,9 @@ export async function fetchVpnServers(
     metadataTask,
     SERVER_METADATA_TIMEOUT_MS,
   );
+  if (!isCurrent()) return currentCache();
   if (enriched) {
-    if (vpnServersCacheGeneration === generation) {
+    if (isCurrent() && vpnServersCacheGeneration === generation) {
       writeVpnServersMemoryCache(shortUuid, enriched);
     }
     return cloneVpnServers(enriched);

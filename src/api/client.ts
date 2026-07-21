@@ -5,6 +5,7 @@ import { getDeviceFingerprint } from "../session/fingerprint";
 import {
   clearSessionTokens,
   getSession,
+  getSessionGeneration,
   hasValidAccessToken,
   hasValidRefreshToken,
   updateSession,
@@ -96,6 +97,7 @@ function buildFallbackBotUrl(
       ? fallbackProxyUrl
       : `https://${fallbackProxyUrl}`;
     const url = new URL(normalizedFallback);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
     url.searchParams.set("u", target);
     return url.toString();
   } catch {
@@ -115,7 +117,7 @@ const FALLBACK_HEDGE_DELAY_MS = 400;
 const PRIMARY_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
 const FALLBACK_HTTP_STATUS = 403;
 
-let tokenOperation: Promise<string | null> | null = null;
+let tokenOperation: { generation: number; promise: Promise<string | null> } | null = null;
 let primaryUnavailableUntil = 0;
 
 function publicErrorMessage(raw: string): string {
@@ -123,6 +125,16 @@ function publicErrorMessage(raw: string): string {
     .replace(/https?:\/\/[^\s)]+/gi, "[configured endpoint]")
     .replace(/[\n\r\t]+/g, " ")
     .trim();
+  const session = getSession();
+  for (const credential of [session.accessToken, session.refreshToken]) {
+    if (credential && credential.length >= 8) {
+      message = message.split(credential).join("[credential]");
+    }
+  }
+  message = message.replace(
+    /\b[A-Za-z0-9_-]{24,}(?:\.[A-Za-z0-9_-]{8,}){0,2}\b/g,
+    "[credential]",
+  );
   for (const hostname of CONTROL_PLANE_BYPASS_HOSTS) {
     message = message.split(hostname).join("[configured host]");
   }
@@ -132,11 +144,13 @@ function publicErrorMessage(raw: string): string {
 function runTokenOperation(
   operation: () => Promise<string | null>,
 ): Promise<string | null> {
-  if (tokenOperation) return tokenOperation;
-  tokenOperation = operation().finally(() => {
-    tokenOperation = null;
+  const generation = getSessionGeneration();
+  if (tokenOperation?.generation === generation) return tokenOperation.promise;
+  const promise = operation().finally(() => {
+    if (tokenOperation?.promise === promise) tokenOperation = null;
   });
-  return tokenOperation;
+  tokenOperation = { generation, promise };
+  return promise;
 }
 
 function isInvalidSessionTokenError(error: unknown): boolean {
@@ -157,11 +171,12 @@ async function attemptFetch(
   userSignal: AbortSignal | null | undefined,
 ): Promise<Response> {
   const controller = new AbortController();
+  const abortFromUser = () => controller.abort();
   if (userSignal) {
     if (userSignal.aborted) {
       controller.abort();
     } else {
-      userSignal.addEventListener("abort", () => controller.abort(), { once: true });
+      userSignal.addEventListener("abort", abortFromUser, { once: true });
     }
   }
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -174,6 +189,7 @@ async function attemptFetch(
     throw new Error("Network request failed");
   } finally {
     clearTimeout(timeoutId);
+    userSignal?.removeEventListener("abort", abortFromUser);
   }
 }
 
@@ -271,11 +287,11 @@ async function hedgedGetFetch(
       primaryUnavailableUntil = 0;
     } else {
       primaryController.abort();
-      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
     }
     return winner.response;
   } catch {
-    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
     if (rejectedPrimaryResponse) return rejectedPrimaryResponse;
     throw new Error("Network request failed");
   }
@@ -330,12 +346,13 @@ async function performFetch(
     ? buildFallbackBotUrl(path, query, BOT_API_FALLBACK_URL)
     : null;
   const method = (init.method ?? "GET").toUpperCase();
+  const isSafeMethod = method === "GET" || method === "HEAD";
 
-  if (fallbackUrl && primaryUnavailableUntil > Date.now()) {
+  if (fallbackUrl && isSafeMethod && primaryUnavailableUntil > performance.now()) {
     return fallbackFirstFetch(primaryUrl, fallbackUrl, primaryInit, fallbackInit, userSignal);
   }
 
-  if (fallbackUrl && (method === "GET" || method === "HEAD")) {
+  if (fallbackUrl && isSafeMethod) {
     return hedgedGetFetch(primaryUrl, fallbackUrl, primaryInit, fallbackInit, userSignal);
   }
 
@@ -347,11 +364,13 @@ async function performFetch(
       userSignal,
     );
   } catch (primaryError) {
-    if (!BOT_API_FALLBACK_URL) throw primaryError;
+    // Retrying a state-changing request can duplicate an unlink, purchase,
+    // or registration when the primary committed it but its response was lost.
+    if (!BOT_API_FALLBACK_URL || !isSafeMethod) throw primaryError;
     if (userSignal?.aborted) throw primaryError;
     console.warn(`[bot-api] primary request to ${path} failed, retrying via fallback`);
     if (!fallbackUrl) throw primaryError;
-    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
     const response = await attemptFetch(
       fallbackUrl,
       fallbackInit,
@@ -458,7 +477,11 @@ async function resolveBootstrapDeviceId(): Promise<string> {
 }
 
 async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
+  const generation = getSessionGeneration();
   const deviceId = await resolveBootstrapDeviceId();
+  if (getSessionGeneration() !== generation) {
+    throw new Error("Device session changed while bootstrap was in flight");
+  }
   const requestBody: BootstrapRequestDto = {
     device_id: deviceId,
     platform: "desktop",
@@ -471,6 +494,9 @@ async function bootstrapDeviceSessionInternal(): Promise<SessionTokensDto> {
   if (!payload.success || !payload.data) {
     throw new Error(payload.message ?? "Bootstrap failed");
   }
+  if (getSessionGeneration() !== generation) {
+    throw new Error("Device session changed while bootstrap was in flight");
+  }
   updateSessionFromTokens(payload.data);
   await persistCurrentSessionSecrets();
   return payload.data;
@@ -481,6 +507,7 @@ export async function bootstrapDeviceSession(): Promise<void> {
 }
 
 async function refreshDeviceSessionInternal(refreshToken: string): Promise<SessionTokensDto> {
+  const generation = getSessionGeneration();
   const requestBody: RefreshRequestDto = {
     refresh_token: refreshToken,
   };
@@ -491,6 +518,9 @@ async function refreshDeviceSessionInternal(refreshToken: string): Promise<Sessi
   const payload = await expectJson<ApiResponse<SessionTokensDto>>(response);
   if (!payload.success || !payload.data) {
     throw new Error(payload.message ?? "Refresh failed");
+  }
+  if (getSessionGeneration() !== generation) {
+    throw new Error("Device session changed while refresh was in flight");
   }
   updateSessionFromTokens(payload.data);
   await persistCurrentSessionSecrets();
@@ -587,27 +617,39 @@ async function request<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   let accessToken: string | null = null;
+  const requestGeneration = authMode === "access" ? getSessionGeneration() : null;
+  const assertSessionIsCurrent = () => {
+    if (requestGeneration !== null && getSessionGeneration() !== requestGeneration) {
+      throw new Error("Device session changed while request was in flight");
+    }
+  };
 
   if (authMode === "access") {
     accessToken = await getAccessTokenForRequest();
+    assertSessionIsCurrent();
     if (accessToken) {
       headers.set(DIRECT_AUTH_HEADER, `Bearer ${accessToken}`);
     }
   }
 
   const response = await performFetch(path, { ...init, headers }, query);
+  assertSessionIsCurrent();
+  const method = (init.method ?? "GET").toUpperCase();
   if (
     isInvalidSessionStatus(response.status) &&
     authMode === "access" &&
     retryOnAuthFailure
   ) {
     const recoveredToken = await recoverAccessTokenAfter401(accessToken);
-    if (recoveredToken) {
+    assertSessionIsCurrent();
+    if (recoveredToken && (method === "GET" || method === "HEAD")) {
       return request(path, init, query, authMode, false);
     }
   }
 
-  return expectJson<T>(response);
+  const payload = await expectJson<T>(response);
+  assertSessionIsCurrent();
+  return payload;
 }
 
 // --- User avatar ---
@@ -618,17 +660,27 @@ async function request<T>(
 // fails. The endpoint is rate-limited, so callers should cache the result
 // for the app session instead of re-fetching on every screen open.
 export async function fetchUserAvatar(): Promise<Blob | null> {
+  const requestGeneration = getSessionGeneration();
+  const assertSessionIsCurrent = () => {
+    if (getSessionGeneration() !== requestGeneration) {
+      throw new Error("Device session changed while avatar was in flight");
+    }
+  };
   const headers = new Headers();
   const accessToken = await getAccessTokenForRequest();
+  assertSessionIsCurrent();
   if (accessToken) headers.set(DIRECT_AUTH_HEADER, `Bearer ${accessToken}`);
 
   let response = await performFetch("api/user/avatar", { method: "GET", headers });
+  assertSessionIsCurrent();
   if (isInvalidSessionStatus(response.status)) {
     const recovered = await recoverAccessTokenAfter401(accessToken);
+    assertSessionIsCurrent();
     if (recovered) {
       const retryHeaders = new Headers();
       retryHeaders.set(DIRECT_AUTH_HEADER, `Bearer ${recovered}`);
       response = await performFetch("api/user/avatar", { method: "GET", headers: retryHeaders });
+      assertSessionIsCurrent();
     }
   }
 
@@ -639,6 +691,7 @@ export async function fetchUserAvatar(): Promise<Blob | null> {
   // regardless of the server's declared type. A broken/HTML body still just
   // fails to decode and the UI falls back to the placeholder via onError.
   const bytes = await response.arrayBuffer();
+  assertSessionIsCurrent();
   if (bytes.byteLength === 0) return null;
   return new Blob([bytes], { type: "image/jpeg" });
 }

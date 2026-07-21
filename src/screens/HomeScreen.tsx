@@ -261,7 +261,7 @@ export default function HomeScreen({
     if (browserPreview) return;
     // Force-sync on mount so the block state lands before the user can act,
     // bypassing the 12h throttle of the unforced syncSubscription.
-    void syncSubscription({ force: true });
+    void syncSubscription({ force: true }).catch(() => {});
     void pingHwidOnly().catch(() => {});
     startPendingPurchaseRefreshIfNeeded();
 
@@ -340,19 +340,22 @@ export default function HomeScreen({
     if (!automaticServerSelection && !selectedServer) return null;
 
     await syncSubscription({ force: true }).catch(() => {});
-    const freshServers = (await fetchVpnServers().catch(() => []))
-      .filter(isAvailableVpnServer);
+    let freshServers: VpnServer[];
+    try {
+      freshServers = (await fetchVpnServers()).filter(isAvailableVpnServer);
+    } catch (error) {
+      // Stale selection is an offline fallback only. A successful empty
+      // response means access or that endpoint was removed.
+      if (canUseSelectedServerFallback(selectedServer)) {
+        console.warn("[VPN-UI] server refresh failed; using cached selection", error);
+        return selectedServer;
+      }
+      return null;
+    }
     const fresh = automaticServerSelection
       ? await selectBestVpnServer(freshServers, { forceProbe: true })
       : freshServers.find((server) => isSameServerSelection(selectedServer, server)) ?? null;
     if (!fresh) {
-      if (canUseSelectedServerFallback(selectedServer)) {
-        console.warn("[VPN-UI] using selected server fallback after fresh server lookup missed", {
-          freshServerCount: freshServers.length,
-          automaticServerSelection,
-        });
-        return selectedServer;
-      }
       return null;
     }
     if (!automaticServerSelection) {

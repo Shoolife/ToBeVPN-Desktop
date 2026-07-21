@@ -12,13 +12,45 @@
 // inlined into the JS bundle at build time and can be extracted by anyone
 // who unpacks the .deb/.exe.
 const isDev = import.meta.env.DEV;
+
+function normalizeConfiguredUrl(
+  raw: string,
+  label: string,
+  options: { allowHttpInDev?: boolean; trailingSlash?: boolean } = {},
+): string {
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    throw new Error(`${label} is not a valid URL`);
+  }
+  const httpAllowed = isDev && options.allowHttpInDev === true;
+  if (
+    (url.protocol !== "https:" && !(httpAllowed && url.protocol === "http:")) ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error(`${label} must be an HTTPS URL without embedded credentials`);
+  }
+  // Normalize the pathname without corrupting a configured query string.
+  if (options.trailingSlash) {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
+  } else if (url.pathname !== "/") {
+    url.pathname = url.pathname.replace(/\/+$/, "");
+  }
+  return url.toString();
+}
+
 const envUrl = (import.meta.env.VITE_BOT_API_URL ?? "").trim();
 if (!isDev && !envUrl) {
   throw new Error(
     "VITE_BOT_API_URL is not set. Configure it in .env (local dev) or in CI secrets.",
   );
 }
-const fullUrl = envUrl.endsWith("/") ? envUrl : envUrl + "/";
+const fullUrl = envUrl
+  ? normalizeConfiguredUrl(envUrl, "VITE_BOT_API_URL", { trailingSlash: true })
+  : "";
 export const BOT_API_BASE_URL = isDev ? "/" : fullUrl;
 
 // Optional bot-API fallback. Empty in dev (Vite proxies /api/*); only used
@@ -28,18 +60,24 @@ export const BOT_API_BASE_URL = isDev ? "/" : fullUrl;
 // host + path + query form, e.g. `<primary-host>/api/config`.
 const fallbackBot = (import.meta.env.VITE_FALLBACK_BOT_DOMAIN ?? "").trim();
 export const BOT_API_FALLBACK_URL: string | null =
-  !isDev && fallbackBot ? fallbackBot.replace(/\/+$/, "") : null;
+  !isDev && fallbackBot
+    ? normalizeConfiguredUrl(fallbackBot, "VITE_FALLBACK_BOT_DOMAIN")
+    : null;
 
 // Subscription URL fallback. The .env entry already ends with `?sub=` so
 // the caller just appends the short_uuid (taken from the panel's public
 // <panel-host>/<KEY> URL). Empty if the operator hasn't set it — in
 // which case we skip the retry path.
 const fallbackSubs = (import.meta.env.VITE_FALLBACK_SUBS_DOMAIN ?? "").trim();
-export const SUBS_FALLBACK_URL: string | null = fallbackSubs ? fallbackSubs : null;
+export const SUBS_FALLBACK_URL: string | null = fallbackSubs
+  ? normalizeConfiguredUrl(fallbackSubs, "VITE_FALLBACK_SUBS_DOMAIN")
+  : null;
 
 const panelUrl = (import.meta.env.VITE_PANEL_URL ?? "").trim();
 export const PANEL_BASE_URL: string | null =
-  panelUrl ? (panelUrl.startsWith("http") ? panelUrl : `https://${panelUrl}`) : null;
+  panelUrl
+    ? normalizeConfiguredUrl(panelUrl, "VITE_PANEL_URL", { allowHttpInDev: true })
+    : null;
 
 // Subscription panel host. Linked sessions receive full subscription URLs
 // against this host. Operator-configured at build time so it lands in both
@@ -47,7 +85,10 @@ export const PANEL_BASE_URL: string | null =
 const subscriptionUrl = (import.meta.env.VITE_SUBSCRIPTION_URL ?? "").trim();
 export const SUBSCRIPTION_BASE_URL: string | null =
   subscriptionUrl
-    ? (subscriptionUrl.startsWith("http") ? subscriptionUrl : `https://${subscriptionUrl}`)
+    ? normalizeConfiguredUrl(subscriptionUrl, "VITE_SUBSCRIPTION_URL", {
+        allowHttpInDev: true,
+        trailingSlash: true,
+      })
     : null;
 
 function readHostname(url: string | null): string | null {

@@ -85,7 +85,10 @@ function load(): Session {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Session>;
       const merged = migrateSession(parsed);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+      // Keep legacy credentials in memory long enough for initializeAuthSession
+      // to migrate them, but remove the plaintext copy before any async work.
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizeForStorage(merged)));
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
       return merged;
     }
   } catch {
@@ -101,6 +104,7 @@ function load(): Session {
 }
 
 let current: Session = load();
+let sessionGeneration = 0;
 const listeners = new Set<() => void>();
 
 function sanitizeForStorage(session: Session): Session {
@@ -129,6 +133,14 @@ export function getSession(): Session {
   return current;
 }
 
+export function getSessionGeneration(): number {
+  return sessionGeneration;
+}
+
+export function invalidateSessionWork(): void {
+  sessionGeneration += 1;
+}
+
 export function updateSession(patch: Partial<Session>): Session {
   current = { ...current, ...patch };
   persist();
@@ -139,6 +151,7 @@ export function updateSession(patch: Partial<Session>): Session {
 export function clearIdentity() {
   // Keep deviceId and device-session tokens so the same install can re-pair
   // without forcing a fresh bootstrap after a remote unlink.
+  invalidateSessionWork();
   updateSession({
     isLinked: false,
     telegramId: null,
@@ -155,6 +168,7 @@ export function clearIdentity() {
 }
 
 export function clearSessionTokens() {
+  invalidateSessionWork();
   updateSession({
     accessToken: null,
     refreshToken: null,
@@ -165,6 +179,7 @@ export function clearSessionTokens() {
 
 export function clearDeviceSession() {
   // Explicit logout: keep install-scoped deviceId, drop device-session tokens and linked identity.
+  invalidateSessionWork();
   updateSession({
     accessToken: null,
     refreshToken: null,
@@ -221,32 +236,66 @@ export function applySessionSecrets(secrets: SessionSecrets | null): Session {
 }
 
 export function updateSessionFromTokens(tokens: SessionTokensDto): Session {
+  if (
+    typeof tokens.access_token !== "string" ||
+    !tokens.access_token.trim() ||
+    tokens.access_token.length > 16 * 1024 ||
+    /[\u0000-\u001f\u007f]/.test(tokens.access_token) ||
+    typeof tokens.refresh_token !== "string" ||
+    !tokens.refresh_token.trim() ||
+    tokens.refresh_token.length > 16 * 1024 ||
+    /[\u0000-\u001f\u007f]/.test(tokens.refresh_token) ||
+    !Number.isSafeInteger(tokens.expires_in) ||
+    tokens.expires_in <= 0 ||
+    tokens.expires_in > 10 * 365 * 24 * 60 * 60 ||
+    !Number.isSafeInteger(tokens.refresh_expires_in) ||
+    tokens.refresh_expires_in <= 0 ||
+    tokens.refresh_expires_in > 10 * 365 * 24 * 60 * 60
+  ) {
+    throw new Error("Server returned invalid session tokens");
+  }
   const currentSession = getSession();
   const now = Date.now();
   const tokenDeviceId =
-    typeof tokens.device_id === "string" && tokens.device_id.trim()
-      ? tokens.device_id
+    typeof tokens.device_id === "string" &&
+    tokens.device_id.trim() &&
+    tokens.device_id.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/.test(tokens.device_id)
+      ? tokens.device_id.trim()
       : currentSession.deviceId;
+  const tokenTelegramId =
+    Number.isSafeInteger(tokens.telegram_id) && (tokens.telegram_id ?? 0) > 0
+      ? tokens.telegram_id
+      : null;
   const tokenIsLinked = Boolean(
-    tokens.is_linked && tokens.telegram_id !== null && tokens.telegram_id !== undefined,
+    tokens.is_linked === true && tokenTelegramId !== null,
   );
+  const boundedIdentity = (value: unknown): string | null => {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return trimmed &&
+      trimmed.length <= 512 &&
+      !/[\u0000-\u001f\u007f]/.test(trimmed)
+      ? trimmed
+      : null;
+  };
   const preserveLinkedIdentity = currentSession.isLinked && !tokenIsLinked;
   const isLinked = tokenIsLinked || preserveLinkedIdentity;
   return updateSession({
     deviceId: tokenDeviceId,
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
+    accessToken: tokens.access_token.trim(),
+    refreshToken: tokens.refresh_token.trim(),
     accessTokenExpiresAt: now + tokens.expires_in * 1000,
     refreshTokenExpiresAt: now + tokens.refresh_expires_in * 1000,
     isLinked,
     telegramId: tokenIsLinked
-      ? (tokens.telegram_id ?? null)
+      ? tokenTelegramId
       : (isLinked ? currentSession.telegramId : null),
     shortUuid: tokenIsLinked
-      ? (tokens.short_uuid ?? currentSession.shortUuid)
+      ? (boundedIdentity(tokens.short_uuid) ?? currentSession.shortUuid)
       : (isLinked ? currentSession.shortUuid : null),
     panelUserUuid: tokenIsLinked
-      ? (tokens.panel_user_uuid ?? currentSession.panelUserUuid)
+      ? (boundedIdentity(tokens.panel_user_uuid) ?? currentSession.panelUserUuid)
       : (isLinked ? currentSession.panelUserUuid : null),
     userPlan: isLinked ? currentSession.userPlan : "FREE_TRIAL",
     planDisplayName: isLinked ? currentSession.planDisplayName : null,
@@ -263,12 +312,45 @@ export function markLinkedIdentity(identity: {
   shortUuid?: string | null;
   panelUserUuid?: string | null;
 }): Session {
+  if (!Number.isSafeInteger(identity.telegramId) || identity.telegramId <= 0) {
+    throw new Error("Invalid Telegram identity");
+  }
   const currentSession = getSession();
+  const sameIdentity =
+    currentSession.isLinked && currentSession.telegramId === identity.telegramId;
+  const boundedIdentity = (value: string | null | undefined): string | null => {
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    return trimmed &&
+      trimmed.length <= 512 &&
+      !/[\u0000-\u001f\u007f]/.test(trimmed)
+      ? trimmed
+      : null;
+  };
+  const nextShortUuid =
+    boundedIdentity(identity.shortUuid) ?? (sameIdentity ? currentSession.shortUuid : null);
+  const nextPanelUserUuid =
+    boundedIdentity(identity.panelUserUuid) ??
+    (sameIdentity ? currentSession.panelUserUuid : null);
+  if (
+    !currentSession.isLinked ||
+    currentSession.telegramId !== identity.telegramId ||
+    nextShortUuid !== currentSession.shortUuid ||
+    nextPanelUserUuid !== currentSession.panelUserUuid
+  ) {
+    invalidateSessionWork();
+  }
   return updateSession({
     isLinked: true,
     telegramId: identity.telegramId,
-    shortUuid: identity.shortUuid ?? currentSession.shortUuid,
-    panelUserUuid: identity.panelUserUuid ?? currentSession.panelUserUuid,
+    shortUuid: nextShortUuid,
+    panelUserUuid: nextPanelUserUuid,
+    userPlan: sameIdentity ? currentSession.userPlan : "FREE_TRIAL",
+    planDisplayName: sameIdentity ? currentSession.planDisplayName : null,
+    planExpiresAt: sameIdentity ? currentSession.planExpiresAt : null,
+    isAdminProfile: sameIdentity ? currentSession.isAdminProfile : false,
+    trafficLimitBytes: sameIdentity ? currentSession.trafficLimitBytes : 0,
+    trafficUsedBytes: sameIdentity ? currentSession.trafficUsedBytes : 0,
+    email: sameIdentity ? currentSession.email : null,
   });
 }
 

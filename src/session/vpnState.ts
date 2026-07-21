@@ -162,7 +162,8 @@ async function refreshServerConfigAfterAccessCheck(
   }
   const availableServers = servers.filter(isAvailableVpnServer);
   if (availableServers.length === 0) {
-    if (canFallbackToStale()) return server;
+    // A successful empty response is authoritative: stale endpoints are only
+    // an offline fallback, never a fallback after revocation/removal.
     throw new Error(t("servers_empty"));
   }
   const automatic = loadAutomaticServerSelection();
@@ -177,7 +178,6 @@ async function refreshServerConfigAfterAccessCheck(
           candidate.sni === (server.sni ?? ""),
       ) ?? null;
   if (!fresh) {
-    if (canFallbackToStale()) return server;
     throw new Error(t("servers_empty"));
   }
   if (automatic) {
@@ -203,7 +203,13 @@ function startPolling() {
     let delta = 0;
     try {
       const stats = await getTrafficStats();
-      delta = stats.uplink + stats.downlink;
+      const uplink = Number.isFinite(stats.uplink)
+        ? Math.max(0, Math.floor(stats.uplink))
+        : 0;
+      const downlink = Number.isFinite(stats.downlink)
+        ? Math.max(0, Math.floor(stats.downlink))
+        : 0;
+      delta = Math.min(Number.MAX_SAFE_INTEGER, uplink + downlink);
       if (delta > 0) {
         lastTunnelTrafficAt = now;
       }
@@ -214,7 +220,10 @@ function startPolling() {
     // Persists into the local stats bucket store (used by StatsScreen).
     // The panel-side trafficUsedBytes is refreshed independently via syncSubscription.
     recordTraffic(delta, 1);
-    const nextSessionBytes = state.sessionBytes + delta;
+    const nextSessionBytes = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      state.sessionBytes + delta,
+    );
     setState({
       sessionBytes: nextSessionBytes,
       tick: state.tick + 1,
