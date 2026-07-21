@@ -1028,21 +1028,45 @@ export async function pingHwidOnly(): Promise<boolean> {
   }
 }
 
+let subscriptionUrlRefreshShortUuid: string | null = null;
+let subscriptionUrlRefreshInFlight: Promise<void> | null = null;
+
+/**
+ * Bot lookup for the panel's authoritative subscription URL, run in the
+ * background so callers never wait on it. Access itself is decided by the
+ * subscription endpoint directly (see readSubscriptionUrl below) — this only
+ * warms the cache for next time and is safe to skip entirely when the bot is
+ * unreachable.
+ */
+function refreshSubscriptionUrlFromBot(shortUuid: string, isCurrent: () => boolean): void {
+  if (subscriptionUrlRefreshInFlight && subscriptionUrlRefreshShortUuid === shortUuid) return;
+  if (!isCurrent() || !getSession().isLinked) return;
+  subscriptionUrlRefreshShortUuid = shortUuid;
+  subscriptionUrlRefreshInFlight = fetchCurrentSubscriptionPlan()
+    .then((currentPlanInfo) => {
+      if (isCurrent() && currentPlanInfo?.subscriptionUrl) {
+        writeCachedSubscriptionUrl(shortUuid, currentPlanInfo.subscriptionUrl);
+      }
+    })
+    .finally(() => {
+      subscriptionUrlRefreshInFlight = null;
+    });
+}
+
 async function readSubscriptionUrl(
   shortUuid: string,
   isCurrent: () => boolean,
 ): Promise<string | null> {
   const cached = readCachedSubscriptionUrl(shortUuid);
-  if (cached) return cached;
-  if (isCurrent() && getSession().isLinked) {
-    const currentPlanInfo = await fetchCurrentSubscriptionPlan();
-    if (!isCurrent()) return null;
-    if (currentPlanInfo?.subscriptionUrl) {
-      writeCachedSubscriptionUrl(shortUuid, currentPlanInfo.subscriptionUrl);
-      return currentPlanInfo.subscriptionUrl;
-    }
-  }
-  return null;
+  // Never block the connect/ping path on the bot: the subscription request
+  // itself already reconstructs the direct URL from shortUuid when we pass
+  // null (see pingSubscriptionUrl/fetchSubscriptionProfile), and that
+  // endpoint — not the bot — is authoritative for whether this user's
+  // servers are actually available. Refresh the cached bot-provided URL in
+  // the background for callers that benefit from it (e.g. a non-standard
+  // subscription domain), but don't wait on it here.
+  refreshSubscriptionUrlFromBot(shortUuid, isCurrent);
+  return cached;
 }
 
 async function runSyncSubscription(expectedGeneration: number): Promise<void> {
