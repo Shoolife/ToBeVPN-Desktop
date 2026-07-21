@@ -189,8 +189,10 @@ export default function ServersScreen({
       // Refresh button — opening the screen normally rides the throttle
       // window so re-entering doesn't hammer the panel.
       if (opts.force) {
-        await syncSubscription({ force: true }).catch(() => {});
-        if (!isCurrent()) return;
+        // Server availability is decided by the direct subscription response.
+        // Keep plan metadata refreshing without putting the bot in front of
+        // the user's server refresh.
+        void syncSubscription({ force: true }).catch(() => {});
       }
       const vpnServers = await fetchVpnServers();
       if (!isCurrent()) return;

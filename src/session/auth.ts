@@ -665,6 +665,15 @@ export async function initializeAuthSession(): Promise<void> {
     }
   }
 
+  const directSession = getSession();
+  const directGeneration = getSessionGeneration();
+  const earlyServerRefresh = directSession.shortUuid
+    ? settleStartupStep(
+        "refreshServers",
+        fetchVpnServers(),
+        STARTUP_SUBSCRIPTION_TIMEOUT_MS,
+      )
+    : null;
   await settleStartupStep(
     "ensureDeviceSession",
     ensureDeviceSession(),
@@ -673,11 +682,30 @@ export async function initializeAuthSession(): Promise<void> {
 
   const sessionAfterSync = getSession();
   if (sessionAfterSync.isLinked || sessionAfterSync.shortUuid) {
-    await settleStartupStep(
+    // Server availability comes from the subscription endpoint, not the bot.
+    // Start that request before the control-plane sync so a slow/unavailable
+    // bot cannot postpone the first usable server list.
+    const canReuseEarlyRefresh =
+      earlyServerRefresh !== null &&
+      getSessionGeneration() === directGeneration &&
+      sessionAfterSync.deviceId === directSession.deviceId &&
+      sessionAfterSync.shortUuid === directSession.shortUuid;
+    const serverRefresh = canReuseEarlyRefresh
+      ? earlyServerRefresh
+      : settleStartupStep(
+          "refreshServers",
+          fetchVpnServers(),
+          STARTUP_SUBSCRIPTION_TIMEOUT_MS,
+        );
+    const subscriptionSync = settleStartupStep(
       "syncSubscription",
       syncSubscription({ force: true }),
       STARTUP_SUBSCRIPTION_TIMEOUT_MS,
     );
+    await Promise.all([
+      subscriptionSync,
+      serverRefresh,
+    ]);
     startPendingPurchaseRefreshIfNeeded();
   }
 }

@@ -262,7 +262,12 @@ export default function HomeScreen({
     // Force-sync on mount so the block state lands before the user can act,
     // bypassing the 12h throttle of the unforced syncSubscription.
     void syncSubscription({ force: true }).catch(() => {});
-    void pingHwidOnly().catch(() => {});
+    // Do not make the first server refresh wait for the bot sync above. The
+    // subscription endpoint is authoritative for server availability. Reuse
+    // the access ping instead of issuing it twice inside fetchVpnServers().
+    void pingHwidOnly()
+      .then((blocked) => blocked ? [] : fetchVpnServers({ skipAccessPing: true }))
+      .catch(() => []);
     startPendingPurchaseRefreshIfNeeded();
 
     const BLOCK_POLL_MS = 30_000;
@@ -339,7 +344,9 @@ export default function HomeScreen({
   const prepareServerForConnect = async (): Promise<SelectedServer | null> => {
     if (!automaticServerSelection && !selectedServer) return null;
 
-    await syncSubscription({ force: true }).catch(() => {});
+    // Refresh plan metadata in the background; direct subscription access is
+    // sufficient to validate and refresh the server used for this connection.
+    void syncSubscription({ force: true }).catch(() => {});
     let freshServers: VpnServer[];
     try {
       freshServers = (await fetchVpnServers()).filter(isAvailableVpnServer);
