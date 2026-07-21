@@ -17,9 +17,14 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
+      icon: "update",
+      titleKey: "whats_new_stability_title",
+      descriptionKey: "whats_new_stability_description",
+    },
+    {
       icon: "notes",
-      titleKey: "whats_new_in_app_title",
-      descriptionKey: "whats_new_in_app_description",
+      titleKey: "whats_new_servers_title",
+      descriptionKey: "whats_new_servers_description",
     },
   ],
 };
