@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+const MAX_BYPASS_HOSTS: usize = 64;
+const MAX_SERVICE_DOMAINS: usize = 10_000;
+const MAX_CUSTOM_DOMAINS: usize = 128;
+
 /// Server params received from the frontend (mirrors TV's Server model).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -60,6 +64,69 @@ fn default_routing_mode() -> String {
 }
 
 impl ServerConfig {
+    /// Reject malformed or unreasonably large frontend input before a VPN
+    /// manager starts changing routes, DNS, or interfaces. Deliberately do
+    /// not require a public address: private, loopback, and IPv6 endpoints
+    /// are valid for self-hosted and local deployments.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("VPN server port must be between 1 and 65535".into());
+        }
+        if !is_valid_vless_id(&self.uuid)
+            || self
+                .uuid
+                .eq_ignore_ascii_case("00000000-0000-0000-0000-000000000000")
+        {
+            return Err("VPN server VLESS user ID is invalid".into());
+        }
+
+        validate_required_text(&self.address, 253, "VPN server address")?;
+        validate_optional_text(&self.flow, 128, "VLESS flow")?;
+        validate_optional_text(&self.security, 32, "transport security")?;
+        validate_optional_text(&self.sni, 253, "VPN SNI")?;
+        validate_optional_text(&self.fingerprint, 64, "TLS fingerprint")?;
+        validate_optional_text(&self.public_key, 256, "Reality public key")?;
+        validate_optional_text(&self.short_id, 64, "Reality short ID")?;
+        validate_optional_text(&self.network, 32, "transport network")?;
+        validate_optional_text(&self.path, 2048, "transport path")?;
+        validate_optional_text(&self.mode, 64, "XHTTP mode")?;
+        validate_optional_text(&self.spx, 2048, "Reality spider path")?;
+
+        if !matches!(
+            self.routing_mode.as_str(),
+            "blocked_only" | "selective" | "all_vpn"
+        ) {
+            return Err("Unsupported routing mode".into());
+        }
+
+        validate_text_list(&self.bypass_hosts, MAX_BYPASS_HOSTS, 253, "bypass hosts")?;
+        validate_text_list(
+            &self.selected_service_domains,
+            MAX_SERVICE_DOMAINS,
+            253,
+            "selected service domains",
+        )?;
+        validate_text_list(
+            &self.excluded_service_domains,
+            MAX_SERVICE_DOMAINS,
+            253,
+            "excluded service domains",
+        )?;
+        validate_text_list(
+            &self.direct_domains,
+            MAX_CUSTOM_DOMAINS,
+            253,
+            "direct domains",
+        )?;
+        validate_text_list(
+            &self.proxy_domains,
+            MAX_CUSTOM_DOMAINS,
+            253,
+            "proxy domains",
+        )?;
+        Ok(())
+    }
+
     pub fn requires_direct_interface(&self) -> bool {
         matches!(self.routing_mode.as_str(), "blocked_only" | "selective")
             || !self.direct_domains.is_empty()
@@ -69,6 +136,58 @@ impl ServerConfig {
         self.routing_mode == "blocked_only"
             || (self.routing_mode == "selective" && self.select_all_services)
     }
+}
+
+fn is_valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn is_valid_vless_id(value: &str) -> bool {
+    is_valid_uuid(value)
+        || (!value.is_empty()
+            && value.len() < 30
+            && !value.chars().any(|character| character.is_control()))
+}
+
+fn validate_required_text(value: &str, max_len: usize, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > max_len
+        || value.chars().any(|character| character.is_control())
+    {
+        return Err(format!("{label} is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_optional_text(value: &str, max_len: usize, label: &str) -> Result<(), String> {
+    if value.len() > max_len || value.chars().any(|character| character.is_control()) {
+        return Err(format!("VPN {label} is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_text_list(
+    values: &[String],
+    max_items: usize,
+    max_item_len: usize,
+    label: &str,
+) -> Result<(), String> {
+    if values.len() > max_items {
+        return Err(format!("Too many {label}"));
+    }
+    if values.iter().any(|value| {
+        value.len() > max_item_len || value.chars().any(|character| character.is_control())
+    }) {
+        return Err(format!("One or more {label} are invalid"));
+    }
+    Ok(())
 }
 
 pub const SOCKS_PORT: u16 = 10809;
@@ -390,7 +509,7 @@ mod tests {
         ServerConfig {
             address: "203.0.113.10".into(),
             port: 443,
-            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            uuid: "123e4567-e89b-42d3-a456-426614174000".into(),
             flow: String::new(),
             security: "reality".into(),
             sni: "example.com".into(),
@@ -410,6 +529,45 @@ mod tests {
             excluded_service_domains: Vec::new(),
             direct_interface: String::new(),
         }
+    }
+
+    #[test]
+    fn validates_server_input_without_forbidding_private_or_ipv6_endpoints() {
+        assert!(test_server().validate().is_ok());
+
+        let mut custom_id = test_server();
+        custom_id.uuid = "custom-vless-user".into();
+        assert!(custom_id.validate().is_ok());
+
+        let mut private = test_server();
+        private.address = "10.0.0.4".into();
+        assert!(private.validate().is_ok());
+
+        private.address = "::1".into();
+        assert!(private.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_or_unbounded_server_input() {
+        let mut invalid_port = test_server();
+        invalid_port.port = 0;
+        assert!(invalid_port.validate().is_err());
+
+        let mut invalid_id = test_server();
+        invalid_id.uuid = "x".repeat(30);
+        assert!(invalid_id.validate().is_err());
+
+        let mut invalid_routing = test_server();
+        invalid_routing.routing_mode = "typo".into();
+        assert!(invalid_routing.validate().is_err());
+
+        let mut oversized = test_server();
+        oversized.direct_domains = vec!["example.com".into(); MAX_CUSTOM_DOMAINS + 1];
+        assert!(oversized.validate().is_err());
+
+        let mut control_character = test_server();
+        control_character.address = "vpn.example.com\nignored".into();
+        assert!(control_character.validate().is_err());
     }
 
     #[test]

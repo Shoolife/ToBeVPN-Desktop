@@ -31,8 +31,8 @@
         "default-src": "'self' tauri: ipc:",
         "img-src": "'self' data: blob: tauri: asset: ipc:",
         "style-src": "'self' 'unsafe-inline'",
-        "script-src": "'self' 'wasm-unsafe-eval'",
-        "connect-src": "'self' ipc: http://ipc.localhost https://__BOT_API_HOST__ https://__PANEL_HOST__ https://speed.cloudflare.com https://api.github.com https://github.com https://objects.githubusercontent.com",
+        "script-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost https://__BOT_API_HOST__ https://__PANEL_HOST__ https://speed.cloudflare.com https://api.github.com",
         "font-src": "'self' data: tauri: ipc:"
       }
     },

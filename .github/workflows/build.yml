@@ -25,7 +25,7 @@ jobs:
   audit:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Require fallback endpoints for tagged releases
         if: startsWith(github.ref, 'refs/tags/v')
@@ -54,12 +54,14 @@ jobs:
           validate_endpoint FALLBACK_BOT_DOMAIN "$FALLBACK_BOT_DOMAIN"
           validate_endpoint FALLBACK_SUBS_DOMAIN "$FALLBACK_SUBS_DOMAIN"
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.94.1
 
       - name: Verify release version consistency
         shell: bash
@@ -81,7 +83,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        run: cargo install --locked --version 0.22.1 cargo-audit
 
       - name: cargo audit
         working-directory: src-tauri
@@ -91,17 +93,19 @@ jobs:
     needs: audit
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.94.1
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri -> target
 
@@ -120,9 +124,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p src-tauri/bin
           mkdir -p public/routing
+
+          XRAY_VERSION="v26.3.27"
+          XRAY_LINUX_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
 
           download_verified_release_asset() {
             local repo="$1"
@@ -199,7 +206,8 @@ jobs:
 
           echo "Downloading Xray-core (Linux x64)..."
           curl -fsSL -o xray.zip \
-            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+          echo "${XRAY_LINUX_SHA256}  xray.zip" | sha256sum -c -
           unzip -o xray.zip -d xray-extracted
           cp xray-extracted/xray src-tauri/bin/xray-x86_64-unknown-linux-gnu
           chmod +x src-tauri/bin/xray-x86_64-unknown-linux-gnu
@@ -297,7 +305,7 @@ jobs:
       # Built clients contain runtime configuration. Keep disposable branch
       # validation binaries on the runner; publish installers only for releases.
       - if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ToBeVPN-linux-deb
           path: |
@@ -313,19 +321,20 @@ jobs:
     needs: audit
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
+          toolchain: 1.94.1
           targets: x86_64-pc-windows-msvc
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri -> target
 
@@ -337,6 +346,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
           New-Item -ItemType Directory -Force -Path public/routing | Out-Null
+
+          $XrayVersion = "v26.3.27"
+          $XrayWindowsSha256 = "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad"
 
           function Download-VerifiedReleaseAsset {
             param(
@@ -429,7 +441,10 @@ jobs:
           }
 
           Write-Host "Downloading Xray-core (Windows x64)..."
-          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip" -OutFile xray.zip
+          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/download/$XrayVersion/Xray-windows-64.zip" -OutFile xray.zip
+          if ((Get-FileHash -Algorithm SHA256 xray.zip).Hash.ToLowerInvariant() -ne $XrayWindowsSha256) {
+            throw "Xray-core $XrayVersion SHA-256 mismatch"
+          }
           Expand-Archive -Path xray.zip -DestinationPath xray-extracted -Force
           Copy-Item xray-extracted/xray.exe src-tauri/bin/xray-x86_64-pc-windows-msvc.exe
 
@@ -492,6 +507,10 @@ jobs:
 
           Write-Host "Downloading Wintun driver..."
           Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
+          $expectedWintunSha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+          if ((Get-FileHash -Algorithm SHA256 wintun.zip).Hash.ToLowerInvariant() -ne $expectedWintunSha256) {
+            throw "Wintun 0.14.1 SHA-256 mismatch"
+          }
           Expand-Archive -Path wintun.zip -DestinationPath wintun-extracted -Force
           Copy-Item wintun-extracted/wintun/bin/amd64/wintun.dll src-tauri/bin/wintun.dll
 
@@ -532,7 +551,7 @@ jobs:
       # Built clients contain runtime configuration. Keep disposable branch
       # validation binaries on the runner; publish installers only for releases.
       - if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           # GitHub Actions always wraps uploaded artifacts in a zip; we can't
           # ship a bare .exe through this API. The archive contains a single
@@ -555,11 +574,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           path: dist
 
@@ -570,16 +589,33 @@ jobs:
         # is the standard one Tauri expects: `version`, `pub_date`, and a
         # `platforms` map keyed by `os-arch`. We only build for x86_64 today.
         run: |
-          set -e
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          DEB=$(find dist/ToBeVPN-linux-deb -name "*.deb" -not -name "*.sig" | head -1)
-          DEB_SIG=$(find dist/ToBeVPN-linux-deb -name "*.deb.sig" | head -1)
-          EXE=$(find dist/ToBeVPN-windows-exe -name "*.exe" -not -name "*.sig" | head -1)
-          EXE_SIG=$(find dist/ToBeVPN-windows-exe -name "*.exe.sig" | head -1)
+          mapfile -t DEBS < <(find dist/ToBeVPN-linux-deb -type f -name "*.deb" ! -name "*.sig")
+          mapfile -t DEB_SIGS < <(find dist/ToBeVPN-linux-deb -type f -name "*.deb.sig")
+          mapfile -t EXES < <(find dist/ToBeVPN-windows-exe -type f -name "*.exe" ! -name "*.sig")
+          mapfile -t EXE_SIGS < <(find dist/ToBeVPN-windows-exe -type f -name "*.exe.sig")
 
-          if [ -z "$DEB" ] || [ -z "$DEB_SIG" ] || [ -z "$EXE" ] || [ -z "$EXE_SIG" ]; then
-            echo "::error::Missing one of: deb=$DEB sig=$DEB_SIG exe=$EXE sig=$EXE_SIG"
+          if [ "${#DEBS[@]}" -ne 1 ] || [ "${#DEB_SIGS[@]}" -ne 1 ] \
+             || [ "${#EXES[@]}" -ne 1 ] || [ "${#EXE_SIGS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one signed installer per platform"
             ls -R dist/
+            exit 1
+          fi
+
+          DEB="${DEBS[0]}"
+          DEB_SIG="${DEB_SIGS[0]}"
+          EXE="${EXES[0]}"
+          EXE_SIG="${EXE_SIGS[0]}"
+
+          if [ "$DEB_SIG" != "${DEB}.sig" ] || [ "$EXE_SIG" != "${EXE}.sig" ]; then
+            echo "::error::Updater signatures do not match the installer filenames"
+            exit 1
+          fi
+          if [ ! -s "$DEB_SIG" ] || [ ! -s "$EXE_SIG" ] \
+             || [ "$(wc -c < "$DEB_SIG")" -gt 16384 ] \
+             || [ "$(wc -c < "$EXE_SIG")" -gt 16384 ]; then
+            echo "::error::Updater signature is empty or unexpectedly large"
             exit 1
           fi
 
@@ -590,22 +626,22 @@ jobs:
           DEB_SIG_CONTENT=$(cat "$DEB_SIG")
           EXE_SIG_CONTENT=$(cat "$EXE_SIG")
 
-          cat > latest.json <<EOF
-          {
-            "version": "${VERSION}",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": {
-              "linux-x86_64": {
-                "signature": "${DEB_SIG_CONTENT}",
-                "url": "${DEB_URL}"
-              },
-              "windows-x86_64": {
-                "signature": "${EXE_SIG_CONTENT}",
-                "url": "${EXE_URL}"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg deb_signature "$DEB_SIG_CONTENT" \
+            --arg deb_url "$DEB_URL" \
+            --arg exe_signature "$EXE_SIG_CONTENT" \
+            --arg exe_url "$EXE_URL" \
+            '{
+              version: $version,
+              pub_date: $pub_date,
+              platforms: {
+                "linux-x86_64": { signature: $deb_signature, url: $deb_url },
+                "windows-x86_64": { signature: $exe_signature, url: $exe_url }
               }
-            }
-          }
-          EOF
+            }' > latest.json
+          jq -e . latest.json > /dev/null
           echo "--- latest.json ---"
           cat latest.json
 
@@ -621,7 +657,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: ${{ github.ref_name }}
           files: |

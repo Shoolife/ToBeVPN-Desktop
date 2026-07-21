@@ -4,21 +4,22 @@
   "description": "Capability for the main window",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "opener:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-set-size",
+    "core:window:allow-center",
+    "core:window:allow-primary-monitor",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
         { "url": "tg://*" },
-        { "url": "https://t.me/*" }
+        { "url": "https://t.me/*" },
+        { "url": "https://shoolife.github.io/tobevpn-legal/*" }
       ]
     },
-    "core:event:default",
-    "core:event:allow-listen",
-    "core:event:allow-emit",
-    "core:window:allow-minimize",
-    "core:window:allow-set-size",
-    "core:window:allow-center",
     {
       "identifier": "http:default",
       "allow": [
@@ -30,7 +31,7 @@
       ]
     },
     "updater:default",
-    "process:default",
+    "process:allow-exit",
     "process:allow-restart"
   ]
 }

@@ -628,6 +628,9 @@ async fn start_vpn(
     state: tauri::State<'_, AppVpn>,
     pipeline: tauri::State<'_, VpnPipelineLock>,
 ) -> Result<(), String> {
+    // Validate untrusted renderer/backend data before touching native network
+    // state. This is intentionally structural and allows private/IPv6 servers.
+    server.validate()?;
     // Signal cancellation before waiting on the gate. Otherwise a rapid
     // server switch or Stop press can wait behind an obsolete start that
     // still raises system routes and briefly becomes active.
