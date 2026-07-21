@@ -5,12 +5,14 @@
 
 set -e
 
-cd "$(dirname "$0")"
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 if [ "$EUID" -ne 0 ]; then
     echo "Need root to install. Re-running with sudo..."
-    exec sudo bash "$0"
+    exec sudo /bin/bash "$SCRIPT_DIR/$(basename -- "$0")"
 fi
+
+cd "$SCRIPT_DIR"
 
 install -m 755 tobevpn-helper.sh /usr/local/bin/tobevpn-helper.sh
 install -m 755 tobevpn-update-helper.sh /usr/local/bin/tobevpn-update-helper.sh

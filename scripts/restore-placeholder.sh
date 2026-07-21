@@ -101,6 +101,15 @@ restore_fallback_in() {
 
 restore_in src-tauri/tauri.conf.json
 restore_in src-tauri/capabilities/default.json
+if [ "$BOT" = "$PANEL" ]; then
+    # The first global substitution necessarily turns both equal hosts into
+    # BOT placeholders. Restore the second CSP slot structurally so the
+    # public tree remains stable after builds that use one shared domain.
+    sed -i.bak \
+        's|https://__BOT_API_HOST__ https://__BOT_API_HOST__|https://__BOT_API_HOST__ https://__PANEL_HOST__|' \
+        src-tauri/tauri.conf.json
+    rm -f src-tauri/tauri.conf.json.bak
+fi
 restore_fallback_in src-tauri/capabilities/default.json "$SUBSCRIPTION_HOST_VAL" __SUBSCRIPTION_HOST__
 restore_fallback_in src-tauri/capabilities/default.json "$FALLBACK_BOT_HOST_VAL" __FALLBACK_BOT_HOST__
 restore_fallback_in src-tauri/capabilities/default.json "$FALLBACK_SUBS_HOST_VAL" __FALLBACK_SUBS_HOST__

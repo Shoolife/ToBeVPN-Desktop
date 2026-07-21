@@ -65,7 +65,7 @@ jobs:
           Desktop release steps:
           1. Bump the desktop app patch version.
           2. Create and push the new \`v*\` tag.
-          3. Let the release workflow build the app. It downloads the latest Xray-core sidecar during CI.
+          3. Update the pinned Xray version and both archive SHA-256 values in the release workflow.
           4. Verify Settings shows the bundled Xray version from the sidecar binary.
           5. Confirm Linux \`.deb\`, Windows installer, signatures, and \`latest.json\` are present.
 

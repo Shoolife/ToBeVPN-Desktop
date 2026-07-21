@@ -30,9 +30,26 @@ jobs:
       - name: Require fallback endpoints for tagged releases
         if: startsWith(github.ref, 'refs/tags/v')
         env:
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST }}
           FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
           FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
         run: |
+          validate_host() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ] || [[ ! "$value" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+              echo "::error::${name} must be a hostname without a path or credentials"
+              exit 1
+            fi
+            case "$value" in
+              *your-*|*example.invalid*|*__*)
+                echo "::error::${name} still contains a placeholder value"
+                exit 1
+                ;;
+            esac
+          }
           validate_endpoint() {
             local name="$1"
             local value="$2"
@@ -51,6 +68,9 @@ jobs:
               exit 1
             fi
           }
+          validate_host BOT_API_HOST "$BOT_API_HOST"
+          validate_host PANEL_HOST "$PANEL_HOST"
+          validate_host SUBSCRIPTION_HOST "$SUBSCRIPTION_HOST"
           validate_endpoint FALLBACK_BOT_DOMAIN "$FALLBACK_BOT_DOMAIN"
           validate_endpoint FALLBACK_SUBS_DOMAIN "$FALLBACK_SUBS_DOMAIN"
 
@@ -274,11 +294,11 @@ jobs:
         # leaks production domains. We substitute the real hosts here from
         # CI secrets right before the build.
         env:
-          BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
-          PANEL_HOST: ${{ secrets.PANEL_HOST }}
-          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST }}
-          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
-          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST || 'example.invalid' }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST || 'example.invalid' }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
         run: bash scripts/inject-backend-host.sh
 
       - name: Build Linux .deb
@@ -295,12 +315,12 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
-          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST }}
-          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST }}/
+          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST || 'example.invalid' }}/
+          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST || 'example.invalid' }}
+          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}/
           # The audit job above rejects empty or placeholder release values.
-          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
-          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
 
       # Built clients contain runtime configuration. Keep disposable branch
       # validation binaries on the runner; publish installers only for releases.
@@ -530,11 +550,11 @@ jobs:
       - name: Inject backend hostnames
         shell: bash
         env:
-          BOT_API_HOST: ${{ secrets.BOT_API_HOST }}
-          PANEL_HOST: ${{ secrets.PANEL_HOST }}
-          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST }}
-          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
-          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST || 'example.invalid' }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST || 'example.invalid' }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
         run: bash scripts/inject-backend-host.sh
 
       - name: Build Windows .exe (NSIS)
@@ -542,11 +562,11 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST }}/
-          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST }}
-          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST }}/
-          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN }}
-          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN }}
+          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST || 'example.invalid' }}/
+          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST || 'example.invalid' }}
+          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}/
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
 
       # Built clients contain runtime configuration. Keep disposable branch
       # validation binaries on the runner; publish installers only for releases.
