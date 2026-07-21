@@ -10,10 +10,10 @@ use std::process::{Command as StdCommand, Stdio};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
-const UPDATE_HELPER: &str = "/usr/local/bin/tobevpn-update-helper.sh";
-const UPDATE_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.update.policy";
-const UPDATE_HELPER_SH: &str = include_str!("../../scripts/tobevpn-update-helper.sh");
-const UPDATE_POLICY_XML: &str = include_str!("../../scripts/app.tobevpn.update.policy");
+pub(crate) const UPDATE_HELPER: &str = "/usr/local/bin/tobevpn-update-helper.sh";
+pub(crate) const UPDATE_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.update.policy";
+pub(crate) const UPDATE_HELPER_SH: &str = include_str!("../../scripts/tobevpn-update-helper.sh");
+pub(crate) const UPDATE_POLICY_XML: &str = include_str!("../../scripts/app.tobevpn.update.policy");
 const UPDATE_ENDPOINT: &str =
     "https://github.com/Shoolife/ToBeVPN-Desktop/releases/latest/download/latest.json";
 const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDQTkyQzdDOUVGMzk5NEMKUldSTW1mT2VmQ3lwM01NWkFhQ2ZoZ21kVjdCWFNUbk5kU0E4UHRvUVhKRGhPZjR5QVRWYW00azMK";
@@ -62,7 +62,7 @@ pub fn maybe_run_update_helper() -> bool {
 
 pub async fn install_latest_via_polkit(version: String) -> Result<(), String> {
     validate_version(&version)?;
-    ensure_update_helper_ready()?;
+    ensure_update_helper_ready_with_self_heal().await?;
 
     let mut cmd = Command::new("pkexec");
     cmd.env_clear();
@@ -130,6 +130,24 @@ fn ensure_update_helper_ready() -> Result<(), String> {
 
     verify(UPDATE_HELPER, UPDATE_HELPER_SH.as_bytes())?;
     verify(UPDATE_POLICY, UPDATE_POLICY_XML.as_bytes())
+}
+
+/// Same check as `ensure_update_helper_ready`, but self-heals via a single
+/// pkexec install (shared with the VPN helper installer) when the
+/// package-installed update helper is missing or out of date, instead of
+/// hard-failing with "reinstall the .deb package". Normal runs never hit the
+/// pkexec path: the .deb/NSIS installer already dropped matching files.
+async fn ensure_update_helper_ready_with_self_heal() -> Result<(), String> {
+    if ensure_update_helper_ready().is_ok() {
+        return Ok(());
+    }
+    match crate::vpn::manager::VpnManager::ensure_helper_installed(None).await {
+        Ok(true) => ensure_update_helper_ready(),
+        Ok(false) => Err(format!(
+            "{UPDATE_HELPER} is missing or outdated and the install prompt was dismissed; reinstall the ToBeVPN .deb package"
+        )),
+        Err(e) => Err(e),
+    }
 }
 
 fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {

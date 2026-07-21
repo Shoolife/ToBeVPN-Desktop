@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::Read as _;
 use std::net::IpAddr;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use tokio::time::{sleep, timeout, Duration};
 use super::config::{self, ServerConfig, SOCKS_PORT, STATS_API_PORT};
 use super::state::{PingHostMapping, TrafficStats, VpnState};
 use super::{ConnectAttempt, CONNECT_CANCELLED};
+use crate::linux_update::{UPDATE_HELPER, UPDATE_HELPER_SH, UPDATE_POLICY, UPDATE_POLICY_XML};
 
 // ── TUN / routing constants (Linux) ───────────────────────────────
 const TUN_NAME: &str = "tobe0";
@@ -92,6 +93,36 @@ fn cache_dir() -> PathBuf {
         }
     }
     dir
+}
+
+/// Write `contents` to `path` with mode 0600, replacing any existing file
+/// atomically. Uses O_CREAT|O_TRUNC|O_NOFOLLOW so a malicious symlink in our
+/// own cache dir can't redirect the write — the dir is 0700 already, but
+/// belt-and-braces.
+fn write_secure(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(contents)?;
+    f.sync_all()?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// Single-quote a path for safe inclusion in a generated shell script. We
+/// only need this for paths under ~/.cache/tobevpn that we control, but be
+/// defensive — single quotes inside paths are escaped via the standard
+/// '\'' trick.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Run a Command with a hard timeout and the GUI/dbus env passed through so
@@ -1143,7 +1174,7 @@ impl VpnManager {
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
-        Self::ensure_helper_ready()?;
+        Self::ensure_helper_ready_with_self_heal(attempt).await?;
         let tun2socks_bin = self.resolve_bin("tun2socks");
         self.start_tun_via_helper(&tun2socks_bin, &server.address, control_bypass_ips, attempt)
             .await
@@ -1433,8 +1464,9 @@ echo "[TUN-SCRIPT] Done!"
     /// where another local user can swap the staged file's contents and end
     /// up with their own script installed at /usr/local/bin/tobevpn-helper.sh
     /// — passwordlessly callable as root forever after.
-    #[cfg(any())]
-    async fn ensure_helper_installed(attempt: &ConnectAttempt) -> Result<bool, String> {
+    pub(crate) async fn ensure_helper_installed(
+        attempt: Option<&ConnectAttempt>,
+    ) -> Result<bool, String> {
         // The .deb postinst (and the NSIS installer on Windows) drops both
         // files in their final locations as part of installing the app, so
         // by the time the user starts a session the helper is already on
@@ -1510,7 +1542,7 @@ echo "INSTALLED"
 
         let mut cmd = Command::new("pkexec");
         cmd.arg("bash").arg(&staged_install);
-        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, Some(attempt)).await;
+        let output = run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, attempt).await;
 
         let _ = std::fs::remove_file(&staged_install);
         let _ = std::fs::remove_file(&staged_helper);
@@ -1569,6 +1601,24 @@ echo "INSTALLED"
     fn ensure_helper_ready() -> Result<(), String> {
         Self::verify_installed_privilege_file_exact(POLKIT_HELPER, HELPER_SH.as_bytes())?;
         Self::verify_installed_privilege_file_exact(POLKIT_POLICY, POLICY_XML.as_bytes())
+    }
+
+    /// Same check as `ensure_helper_ready`, but self-heals via a single
+    /// pkexec install when the package-installed helper is missing or out of
+    /// date (e.g. the .deb postinst didn't run) instead of hard-failing.
+    /// Normal runs never hit the pkexec path: the .deb/NSIS installer already
+    /// dropped matching files, so the fast check above succeeds silently.
+    async fn ensure_helper_ready_with_self_heal(attempt: &ConnectAttempt) -> Result<(), String> {
+        if Self::ensure_helper_ready().is_ok() {
+            return Ok(());
+        }
+        match Self::ensure_helper_installed(Some(attempt)).await {
+            Ok(true) => Self::ensure_helper_ready(),
+            Ok(false) => Err(format!(
+                "{POLKIT_HELPER} is missing or outdated and the install prompt was dismissed; reinstall the ToBeVPN .deb package"
+            )),
+            Err(e) => Err(e),
+        }
     }
 
     fn ensure_helper_trusted_for_cleanup() -> Result<(), String> {
@@ -1635,7 +1685,7 @@ echo "INSTALLED"
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
-        Self::ensure_helper_ready()?;
+        Self::ensure_helper_ready_with_self_heal(attempt).await?;
         let mut cmd = Command::new("pkexec");
         cmd.arg(POLKIT_HELPER).arg("guard-switch").arg(server_ip);
         for ip in control_bypass_ips {
