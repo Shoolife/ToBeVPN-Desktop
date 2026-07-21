@@ -100,6 +100,13 @@ const listeners = new Set<() => void>();
 
 function setState(patch: Partial<VpnRuntimeState>) {
   state = { ...state, ...patch };
+  // A stale error from an unrelated earlier failure (e.g. best-effort
+  // startup cleanup of a leftover adapter) must never sit alongside a
+  // genuinely active tunnel — whatever set connected: true already proved
+  // the connection works, regardless of which code path got it there.
+  if (state.connected && state.lastError !== null) {
+    state = { ...state, lastError: null };
+  }
   for (const fn of listeners) fn();
 }
 

@@ -18,6 +18,11 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   highlights: [
     {
       icon: "notes",
+      titleKey: "whats_new_windows_status_title",
+      descriptionKey: "whats_new_windows_status_description",
+    },
+    {
+      icon: "notes",
       titleKey: "whats_new_server_availability_title",
       descriptionKey: "whats_new_server_availability_description",
     },

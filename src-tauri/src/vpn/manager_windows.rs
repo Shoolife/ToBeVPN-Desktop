@@ -223,9 +223,13 @@ impl VpnManager {
             }
         }
         if !errors.is_empty() {
-            let message = errors.join("; ");
-            log_win!("[VPN-WIN] stale cleanup failed: {message}");
-            self.set_state(VpnState::Error { message }).await;
+            // Best-effort cleanup of an already-abandoned leftover adapter from
+            // a previous crashed run, not a live connection. Surfacing this as
+            // VpnState::Error made a harmless startup hiccup look like the
+            // user's current tunnel was broken, even after a subsequent
+            // connect succeeded. Log it and leave native state untouched —
+            // the next Start attempt runs its own cleanup regardless.
+            log_win!("[VPN-WIN] stale cleanup failed: {}", errors.join("; "));
         }
     }
 
