@@ -1196,8 +1196,8 @@ fn parse_stat_value(text: &str) -> Option<u64> {
             .trim_matches(',')
             .trim()
             .trim_matches('"');
-        if let Ok(v) = cleaned.parse::<i64>() {
-            return Some(v.unsigned_abs());
+        if let Ok(value) = cleaned.parse::<u64>() {
+            return Some(value);
         }
     }
     None
@@ -1210,5 +1210,20 @@ fn parse_xray_version(text: &str) -> String {
         (Some("Xray"), Some(version)) => format!("Xray-core v{}", version),
         _ if !first_line.is_empty() => first_line.to_string(),
         _ => "unknown".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_stat_value;
+
+    #[test]
+    fn parses_unsigned_xray_counters_without_accepting_negative_values() {
+        assert_eq!(
+            parse_stat_value("value: 18446744073709551615"),
+            Some(u64::MAX)
+        );
+        assert_eq!(parse_stat_value("\"value\": \"42\","), Some(42));
+        assert_eq!(parse_stat_value("value: -1"), None);
     }
 }

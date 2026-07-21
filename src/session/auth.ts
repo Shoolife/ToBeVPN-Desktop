@@ -765,17 +765,44 @@ export async function pingHwidOnly(): Promise<boolean> {
   }
 }
 
+const subscriptionUrlRefreshes = new Map<string, Promise<void>>();
+
+function refreshSubscriptionUrlFromBot(shortUuid: string): void {
+  if (subscriptionUrlRefreshes.has(shortUuid)) return;
+  const session = getSession();
+  if (!session.isLinked || session.shortUuid !== shortUuid) return;
+
+  const refresh = fetchCurrentSubscriptionPlan()
+    .then((currentPlanInfo) => {
+      const currentSession = getSession();
+      if (
+        currentSession.isLinked &&
+        currentSession.shortUuid === shortUuid &&
+        currentPlanInfo?.subscriptionUrl
+      ) {
+        writeCachedSubscriptionUrl(shortUuid, currentPlanInfo.subscriptionUrl);
+      }
+    })
+    .catch(() => undefined);
+
+  subscriptionUrlRefreshes.set(shortUuid, refresh);
+  void refresh.then(() => {
+    if (subscriptionUrlRefreshes.get(shortUuid) === refresh) {
+      subscriptionUrlRefreshes.delete(shortUuid);
+    }
+  });
+}
+
 async function readSubscriptionUrl(shortUuid: string): Promise<string | null> {
   const cached = readCachedSubscriptionUrl(shortUuid);
-  if (cached) return cached;
-  if (getSession().isLinked) {
-    const currentPlanInfo = await fetchCurrentSubscriptionPlan();
-    if (currentPlanInfo?.subscriptionUrl) {
-      writeCachedSubscriptionUrl(shortUuid, currentPlanInfo.subscriptionUrl);
-      return currentPlanInfo.subscriptionUrl;
-    }
+  if (!cached) {
+    // The subscription service can reconstruct its direct URL from shortUuid.
+    // Do not hold server loading or VPN connect behind the bot's timeout; use
+    // the direct endpoint now and warm the optional bot-provided URL for the
+    // next request in the background.
+    refreshSubscriptionUrlFromBot(shortUuid);
   }
-  return null;
+  return cached;
 }
 
 async function runSyncSubscription(): Promise<void> {

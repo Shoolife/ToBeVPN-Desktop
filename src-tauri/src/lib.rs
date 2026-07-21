@@ -73,7 +73,6 @@ fn show_main_window(app: &tauri::AppHandle) {
             restore_window_chrome(&window);
             let _ = window.set_focus();
             refresh_window_chrome_after_show(window);
-            return;
         }
 
         #[cfg(not(target_os = "linux"))]

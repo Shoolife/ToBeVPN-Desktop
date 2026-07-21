@@ -162,11 +162,7 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
 
 fn select_platform(manifest: &UpdateManifest) -> Result<UpdatePlatform, String> {
     if let Some(platforms) = &manifest.platforms {
-        let arch = match std::env::consts::ARCH {
-            "x86_64" => "x86_64",
-            "aarch64" => "aarch64",
-            other => other,
-        };
+        let arch = std::env::consts::ARCH;
         let deb_target = format!("linux-{arch}-deb");
         let plain_target = format!("linux-{arch}");
         for target in [&deb_target, &plain_target] {

@@ -13,7 +13,7 @@ where
 pub fn launched_from_autostart() -> bool {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
-        return args_contain_autostart(std::env::args());
+        args_contain_autostart(std::env::args())
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -33,15 +33,14 @@ pub fn get_autostart_enabled(_app: tauri::AppHandle) -> Result<bool, String> {
     #[cfg(target_os = "linux")]
     {
         use tauri_plugin_autostart::ManagerExt;
-        return _app
-            .autolaunch()
+        _app.autolaunch()
             .is_enabled()
-            .map_err(|error| format!("Could not read Linux autostart state: {error}"));
+            .map_err(|error| format!("Could not read Linux autostart state: {error}"))
     }
 
     #[cfg(target_os = "windows")]
     {
-        return windows::is_enabled();
+        windows::is_enabled()
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -54,21 +53,21 @@ pub fn set_autostart_enabled(_app: tauri::AppHandle, enabled: bool) -> Result<()
     {
         use tauri_plugin_autostart::ManagerExt;
         let manager = _app.autolaunch();
-        return if enabled {
+        if enabled {
             manager.enable()
         } else {
             manager.disable()
         }
-        .map_err(|error| format!("Could not update Linux autostart: {error}"));
+        .map_err(|error| format!("Could not update Linux autostart: {error}"))
     }
 
     #[cfg(target_os = "windows")]
     {
-        return if enabled {
+        if enabled {
             windows::enable()
         } else {
             windows::disable()
-        };
+        }
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
