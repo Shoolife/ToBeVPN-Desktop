@@ -135,14 +135,14 @@ export interface PanelUserDto {
   uuid: string;
   short_uuid: string;
   username: string;
-  status: string;
-  traffic_limit_bytes: number;
-  traffic_limit_strategy: string;
+  status?: string | null;
+  traffic_limit_bytes?: number | null;
+  traffic_limit_strategy?: string | null;
   expire_at: string | null;
   telegram_id: number | null;
   vless_uuid: string;
   subscription_url: string;
-  active_internal_squads: PanelSquadRefDto[];
+  active_internal_squads?: PanelSquadRefDto[] | null;
   user_traffic: PanelUserTrafficDto | null;
   hwid_device_limit?: number | null;
   email?: string | null;

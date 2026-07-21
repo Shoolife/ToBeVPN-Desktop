@@ -10,7 +10,7 @@
 // "Проверить" in Settings re-surfaces this banner.
 
 import { useEffect } from "react";
-import { t } from "../i18n";
+import { t, tf } from "../i18n";
 import {
   dismissUpdate,
   ensureInitialCheck,
@@ -114,8 +114,8 @@ function Downloading({
         {installing || progress.indeterminate
           ? t("update_banner_installing_privileged")
           : totalMb
-            ? `${downloadedMb} МБ / ${totalMb} МБ`
-            : `${downloadedMb} МБ`}
+            ? tf("update_banner_progress_of", downloadedMb, totalMb)
+            : tf("update_banner_progress", downloadedMb)}
       </div>
     </>
   );

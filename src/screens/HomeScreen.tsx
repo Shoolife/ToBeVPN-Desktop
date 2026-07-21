@@ -850,8 +850,8 @@ function UpdateRequiredDialog() {
               {indeterminate
                 ? t("update_banner_installing_privileged")
                 : totalMb
-                  ? `${downloadedMb} МБ / ${totalMb} МБ`
-                  : `${downloadedMb} МБ`}
+                  ? tf("update_banner_progress_of", downloadedMb, totalMb)
+                  : tf("update_banner_progress", downloadedMb)}
             </div>
           </>
         ) : ready ? (

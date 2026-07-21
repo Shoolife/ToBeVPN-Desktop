@@ -485,8 +485,14 @@ function cleanDesktopModelName(model: string, platform: string): string {
   return generic.has(normalized) ? "" : trimmed;
 }
 
+function panelUpper(value: unknown): string {
+  return typeof value === "string" ? value.toLocaleUpperCase("en-US") : "";
+}
+
 function planForPanelUser(user: PanelUserDto): UserPlan {
-  const squads = user.active_internal_squads.map((s) => s.name.toUpperCase());
+  const squads = Array.isArray(user.active_internal_squads)
+    ? user.active_internal_squads.map((s) => panelUpper(s?.name))
+    : [];
   if (squads.includes("ADMINS")) return "ADMIN";
   if (squads.includes("STANDART")) return "PAID";
   return "FREE_TRIAL";
@@ -576,10 +582,23 @@ async function fetchCurrentSubscriptionPlan(): Promise<CurrentSubscriptionPlanIn
   }
 }
 
+function parsePanelTimestamp(value: string | null | undefined): number | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  // The panel treats offset-less ISO date-times as UTC. JavaScript treats
+  // them as local time, which shifts expiry by the machine's timezone.
+  const hasExplicitOffset = /(?:z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
+  const normalized = trimmed.includes("T") && !hasExplicitOffset
+    ? `${trimmed}Z`
+    : trimmed;
+  const parsed = Date.parse(normalized);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 function parsePanelExpireAtMillis(value: string | null | undefined): number {
-  if (!value) return Number.NEGATIVE_INFINITY;
-  const ts = Date.parse(value);
-  return Number.isNaN(ts) ? Number.NEGATIVE_INFINITY : ts;
+  return parsePanelTimestamp(value) ?? Number.NEGATIVE_INFINITY;
 }
 
 function selectBestPanelUser(
@@ -604,21 +623,19 @@ function selectBestPanelUser(
     const planDiff = planRank(b) - planRank(a);
     if (planDiff !== 0) return planDiff;
     const activeDiff =
-      (b.status.toUpperCase() === "ACTIVE" ? 1 : 0) -
-      (a.status.toUpperCase() === "ACTIVE" ? 1 : 0);
+      (panelUpper(b.status) === "ACTIVE" ? 1 : 0) -
+      (panelUpper(a.status) === "ACTIVE" ? 1 : 0);
     if (activeDiff !== 0) return activeDiff;
     const monthDiff =
-      (b.traffic_limit_strategy.toUpperCase() === "MONTH" ? 1 : 0) -
-      (a.traffic_limit_strategy.toUpperCase() === "MONTH" ? 1 : 0);
+      (panelUpper(b.traffic_limit_strategy) === "MONTH" ? 1 : 0) -
+      (panelUpper(a.traffic_limit_strategy) === "MONTH" ? 1 : 0);
     if (monthDiff !== 0) return monthDiff;
     return parsePanelExpireAtMillis(b.expire_at) - parsePanelExpireAtMillis(a.expire_at);
   })[0] ?? null;
 }
 
 function parseExpiresAtMillis(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const ts = Date.parse(value);
-  return Number.isNaN(ts) ? null : ts;
+  return parsePanelTimestamp(value);
 }
 
 function resolvePlanFromCurrentPlan(cachedPlan: UserPlan, currentPlanInfo: CurrentSubscriptionPlanInfo | null): UserPlan {
@@ -1079,12 +1096,12 @@ async function runSyncSubscription(expectedGeneration: number): Promise<void> {
 
   if (panelUser) {
     const panelPlan = planForPanelUser(panelUser);
-    const isActive = panelUser.status.toUpperCase() === "ACTIVE";
+    const isActive = panelUpper(panelUser.status) === "ACTIVE";
     const plan: UserPlan = !isActive
       ? "EXPIRED"
       : panelPlan !== "FREE_TRIAL"
         ? panelPlan
-        : panelUser.traffic_limit_strategy.toUpperCase() === "MONTH"
+        : panelUpper(panelUser.traffic_limit_strategy) === "MONTH"
           ? "PAID"
           : session.userPlan === "PAID" || session.userPlan === "ADMIN"
             ? session.userPlan
@@ -1095,7 +1112,9 @@ async function runSyncSubscription(expectedGeneration: number): Promise<void> {
         session.userPlan === plan && plan !== "EXPIRED" ? session.planDisplayName : null,
       planExpiresAt: parseExpiresAtMillis(panelUser.expire_at),
       trafficLimitBytes:
-        profileResult?.trafficLimitBytes ?? panelUser.traffic_limit_bytes,
+        profileResult?.trafficLimitBytes ??
+        panelUser.traffic_limit_bytes ??
+        session.trafficLimitBytes,
       trafficUsedBytes:
         profileResult?.trafficUsedBytes ??
         panelUser.user_traffic?.used_traffic_bytes ??
@@ -1440,7 +1459,8 @@ function sanitizeLinkedDevices(value: unknown): LinkedDevicesDto {
   const source = value !== null && typeof value === "object"
     ? value as Record<string, unknown>
     : {};
-  if (!Array.isArray(source.devices)) {
+  const rawDevices = source.devices == null ? [] : source.devices;
+  if (!Array.isArray(rawDevices)) {
     throw new Error("Invalid linked devices response");
   }
   const boundedString = (input: unknown, max = 256): string | null => {
@@ -1459,7 +1479,7 @@ function sanitizeLinkedDevices(value: unknown): LinkedDevicesDto {
       ? Number(input)
       : null;
   const devices = new Map<string, LinkedDevicesDto["devices"][number]>();
-  for (const raw of source.devices.slice(0, 128)) {
+  for (const raw of rawDevices.slice(0, 128)) {
     if (raw === null || typeof raw !== "object") continue;
     const item = raw as Record<string, unknown>;
     const deviceId = boundedString(item.device_id, 128);
@@ -1737,22 +1757,46 @@ export function isAvailableVpnServer(server: VpnServer): boolean {
   return !isSentinelServer(server);
 }
 
+function protectVlessQueryPluses(url: string): string {
+  const fragmentIndex = url.indexOf("#");
+  const queryIndex = url.indexOf("?");
+  if (queryIndex < 0 || (fragmentIndex >= 0 && queryIndex > fragmentIndex)) return url;
+  const queryEnd = fragmentIndex >= 0 ? fragmentIndex : url.length;
+  return `${url.slice(0, queryIndex + 1)}${url
+    .slice(queryIndex + 1, queryEnd)
+    .replace(/\+/g, "%2B")}${url.slice(queryEnd)}`;
+}
+
+function decodeVlessComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function parseVlessUrl(url: string): VpnServer | null {
   if (!url.startsWith("vless://")) return null;
   try {
-    const u = new URL(url);
-    const uuid = u.username;
+    // URLSearchParams follows form semantics and normally turns a literal '+'
+    // into a space. VLESS query strings use URI semantics, so preserve it.
+    const u = new URL(protectVlessQueryPluses(url));
+    const uuid = decodeVlessComponent(u.username).trim();
     if (!uuid) {
       console.warn("[parseVlessUrl] missing uuid");
       return null;
     }
-    const address = u.hostname;
+    const rawAddress = u.hostname;
+    const address = rawAddress.startsWith("[") && rawAddress.endsWith("]")
+      ? rawAddress.slice(1, -1)
+      : rawAddress;
     if (!address) {
       console.warn("[parseVlessUrl] missing host");
       return null;
     }
-    const port = u.port ? parseInt(u.port, 10) : 443;
-    const name = u.hash ? decodeURIComponent(u.hash.slice(1)) : address;
+    const port = u.port ? Number.parseInt(u.port, 10) : 443;
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) return null;
+    const name = (u.hash ? decodeVlessComponent(u.hash.slice(1)) : address).trim() || address;
     const p = u.searchParams;
     const sni = p.get("sni") ?? "";
 
