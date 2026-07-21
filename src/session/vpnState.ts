@@ -596,14 +596,21 @@ async function disconnectVpnInternal(): Promise<void> {
     }
     // Every non-Disconnected/unknown result is ambiguous: keep credentials
     // and recovery context so another Stop attempt can finish cleanup.
-    const cleanupIncomplete = true;
     currentServerForRecovery = serverBeforeStop;
-    if (nativeState?.status === "Connected") {
+    const nativeConnected = nativeState?.status === "Connected";
+    if (nativeConnected) {
       startPolling();
       startTunnelHealthCheck(gen);
     }
     setState({
-      connected: cleanupIncomplete,
+      // Native state is authoritative here, same as the Disconnected check
+      // above. force_stop can fail on a late cleanup step (e.g. Windows DNS
+      // reset) after it already killed xray/tun2socks, leaving native state
+      // at Error, not Connected — showing `connected: true` in that case
+      // trapped the user behind a UI that looked live but had no working
+      // tunnel and wasn't polling, so pressing Stop again just repeated the
+      // same failure with no way out.
+      connected: nativeConnected,
       connecting: false,
       disconnecting: false,
       lastError: userFacingVpnError(error, t("vpn_error_tunnel_stopped")),
