@@ -1,64 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
-import {
-  getSessionSecrets,
-  type SessionSecrets,
-} from "./store";
+import { getSessionSecrets, type SessionSecrets } from "./store";
 
-const FALLBACK_STORAGE_KEY = "tobevpn_secure_session_v1";
-const STORAGE_MODE_KEY = "tobevpn_secure_storage_mode_v1";
-const KEYRING_TIMEOUT_MS = 1500;
+// v1 stored tokens as plaintext after a short keyring timeout. It is read only
+// for one-time migration and removed before any asynchronous operation starts.
+const LEGACY_FALLBACK_STORAGE_KEY = "tobevpn_secure_session_v1";
+const LEGACY_STORAGE_MODE_KEY = "tobevpn_secure_storage_mode_v1";
+const CLEAR_TOMBSTONE_KEY = "tobevpn_secure_session_clear_pending_v1";
 
-type StorageMode = "keyring" | "fallback";
-
-let cachedMode: StorageMode | null = null;
 let lastPersistedPayload: string | null = null;
+let secureOperationQueue: Promise<void> = Promise.resolve();
+// Incremented synchronously whenever credentials are revoked. A save/load that
+// was already in flight must never clear the durable revocation marker after a
+// newer logout request.
+let secureClearGeneration = 0;
 
-// Try the platform keyring first on every OS — including Linux. On systems
-// without secret-service (headless / minimal WMs), the first invocation
-// times out and we sticky-switch to the localStorage fallback for this
-// session. We do NOT pre-flag Linux as fallback — most users have
-// gnome-keyring or kwallet running, and forcing fallback there means
-// auth tokens land in plain JSON on disk.
-function loadStorageMode(): StorageMode {
-  if (cachedMode) return cachedMode;
-  try {
-    const raw = localStorage.getItem(STORAGE_MODE_KEY);
-    if (raw === "fallback") {
-      cachedMode = "fallback";
-      return cachedMode;
-    }
-  } catch {
-    // ignore
-  }
-  cachedMode = "keyring";
-  return cachedMode;
-}
-
-function setStorageMode(mode: StorageMode) {
-  cachedMode = mode;
-  try {
-    localStorage.setItem(STORAGE_MODE_KEY, mode);
-  } catch {
-    // ignore
-  }
-}
-
-async function invokeSecure<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  let timeoutId: number | null = null;
-  try {
-    return await Promise.race([
-      invoke<T>(cmd, args),
-      new Promise<T>((_, reject) => {
-        timeoutId = window.setTimeout(() => {
-          reject(new Error(`Secure storage timeout (${KEYRING_TIMEOUT_MS}ms)`));
-        }, KEYRING_TIMEOUT_MS);
-      }),
-    ]);
-  } finally {
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId);
-    }
-  }
+function enqueueSecureOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = secureOperationQueue.then(operation, operation);
+  secureOperationQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
 }
 
 function parseSecrets(raw: string | null): SessionSecrets | null {
@@ -68,19 +30,31 @@ function parseSecrets(raw: string | null): SessionSecrets | null {
     if (
       typeof parsed.deviceId !== "string" ||
       !parsed.deviceId.trim() ||
+      parsed.deviceId.length > 128 ||
+      /[\u0000-\u001f\u007f]/.test(parsed.deviceId) ||
       typeof parsed.accessToken !== "string" ||
       !parsed.accessToken.trim() ||
       typeof parsed.refreshToken !== "string" ||
       !parsed.refreshToken.trim() ||
+      parsed.accessToken.length > 16 * 1024 ||
+      parsed.refreshToken.length > 16 * 1024 ||
+      /[\u0000-\u001f\u007f]/.test(parsed.accessToken) ||
+      /[\u0000-\u001f\u007f]/.test(parsed.refreshToken) ||
       typeof parsed.accessTokenExpiresAt !== "number" ||
-      typeof parsed.refreshTokenExpiresAt !== "number"
+      !Number.isSafeInteger(parsed.accessTokenExpiresAt) ||
+      typeof parsed.refreshTokenExpiresAt !== "number" ||
+      !Number.isSafeInteger(parsed.refreshTokenExpiresAt) ||
+      parsed.accessTokenExpiresAt <= 0 ||
+      parsed.refreshTokenExpiresAt <= 0 ||
+      parsed.accessTokenExpiresAt > 4_102_444_800_000 ||
+      parsed.refreshTokenExpiresAt > 4_102_444_800_000
     ) {
       return null;
     }
     return {
-      deviceId: parsed.deviceId,
-      accessToken: parsed.accessToken,
-      refreshToken: parsed.refreshToken,
+      deviceId: parsed.deviceId.trim(),
+      accessToken: parsed.accessToken.trim(),
+      refreshToken: parsed.refreshToken.trim(),
       accessTokenExpiresAt: parsed.accessTokenExpiresAt,
       refreshTokenExpiresAt: parsed.refreshTokenExpiresAt,
     };
@@ -89,51 +63,99 @@ function parseSecrets(raw: string | null): SessionSecrets | null {
   }
 }
 
-function loadFallbackSecrets(): SessionSecrets | null {
+function takeLegacyPlaintextSecrets(): SessionSecrets | null {
   try {
-    const parsed = parseSecrets(localStorage.getItem(FALLBACK_STORAGE_KEY));
-    lastPersistedPayload = parsed ? JSON.stringify(parsed) : null;
+    const parsed = parseSecrets(localStorage.getItem(LEGACY_FALLBACK_STORAGE_KEY));
+    // Delete first: a crash or keyring failure must not leave reusable tokens
+    // in WebView storage.
+    localStorage.removeItem(LEGACY_FALLBACK_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_STORAGE_MODE_KEY);
     return parsed;
   } catch {
     return null;
   }
 }
 
-function saveFallbackSecrets(secrets: SessionSecrets | null) {
+function hasClearTombstone(): boolean {
   try {
-    if (secrets) {
-      localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(secrets));
-      lastPersistedPayload = JSON.stringify(secrets);
-    } else {
-      localStorage.removeItem(FALLBACK_STORAGE_KEY);
-      lastPersistedPayload = null;
-    }
+    return localStorage.getItem(CLEAR_TOMBSTONE_KEY) === "1";
   } catch {
-    // ignore
+    return true;
+  }
+}
+
+function setClearTombstone(enabled: boolean): void {
+  try {
+    if (enabled) localStorage.setItem(CLEAR_TOMBSTONE_KEY, "1");
+    else localStorage.removeItem(CLEAR_TOMBSTONE_KEY);
+  } catch {
+    // If storage is unavailable, the in-process operation queue still
+    // preserves save/clear ordering for the current run.
   }
 }
 
 export async function loadSecureSession(): Promise<SessionSecrets | null> {
-  if (loadStorageMode() === "fallback") {
-    return loadFallbackSecrets();
-  }
-
-  try {
-    const raw = await invokeSecure<string | null>("load_secure_session");
-    if (typeof raw === "string") {
-      const parsed = parseSecrets(raw);
-      if (parsed) {
-        lastPersistedPayload = JSON.stringify(parsed);
-        saveFallbackSecrets(null);
-        return parsed;
+  const legacySecrets = takeLegacyPlaintextSecrets();
+  const clearGeneration = secureClearGeneration;
+  return enqueueSecureOperation(async () => {
+    if (hasClearTombstone()) {
+      try {
+        await invoke("clear_secure_session");
+        if (clearGeneration === secureClearGeneration) {
+          setClearTombstone(false);
+        }
+      } catch (error) {
+        console.warn("[secureSession] pending keyring clear failed:", error);
       }
+      lastPersistedPayload = null;
+      return null;
     }
-    return loadFallbackSecrets();
-  } catch (error) {
-    console.warn("[secureSession] keyring load failed, switching to fallback:", error);
-    setStorageMode("fallback");
-    return loadFallbackSecrets();
-  }
+
+    if (legacySecrets) {
+      const payload = JSON.stringify(legacySecrets);
+      try {
+        await invoke("save_secure_session", { value: payload });
+        if (
+          clearGeneration !== secureClearGeneration ||
+          hasClearTombstone()
+        ) {
+          lastPersistedPayload = null;
+          return null;
+        }
+        lastPersistedPayload = payload;
+      } catch (error) {
+        // Keep the migrated value in memory for this run, but never write it
+        // back to plaintext storage.
+        console.warn("[secureSession] legacy token migration failed:", error);
+        if (
+          clearGeneration !== secureClearGeneration ||
+          hasClearTombstone()
+        ) {
+          lastPersistedPayload = null;
+          return null;
+        }
+      }
+      return legacySecrets;
+    }
+
+    try {
+      const raw = await invoke<string | null>("load_secure_session");
+      if (
+        clearGeneration !== secureClearGeneration ||
+        hasClearTombstone()
+      ) {
+        lastPersistedPayload = null;
+        return null;
+      }
+      const parsed = typeof raw === "string" ? parseSecrets(raw) : null;
+      lastPersistedPayload = parsed ? JSON.stringify(parsed) : null;
+      return parsed;
+    } catch (error) {
+      console.warn("[secureSession] keyring load failed; using memory-only session:", error);
+      lastPersistedPayload = null;
+      return null;
+    }
+  });
 }
 
 export async function saveSecureSession(secrets: SessionSecrets | null): Promise<void> {
@@ -141,40 +163,51 @@ export async function saveSecureSession(secrets: SessionSecrets | null): Promise
     await clearSecureSession();
     return;
   }
-
   const payload = JSON.stringify(secrets);
-  if (payload === lastPersistedPayload) return;
+  if (payload === lastPersistedPayload && !hasClearTombstone()) return;
+  const clearGeneration = secureClearGeneration;
 
-  if (loadStorageMode() === "fallback") {
-    saveFallbackSecrets(secrets);
-    return;
-  }
-
-  try {
-    await invokeSecure("save_secure_session", { value: payload });
-    lastPersistedPayload = payload;
-    saveFallbackSecrets(null);
-  } catch (error) {
-    console.warn("[secureSession] keyring save failed, switching to fallback:", error);
-    setStorageMode("fallback");
-    saveFallbackSecrets(secrets);
-  }
+  await enqueueSecureOperation(async () => {
+    // A clear requested after this save was queued supersedes it. Skipping the
+    // write also avoids briefly resurrecting the old token in the keyring.
+    if (clearGeneration !== secureClearGeneration) return;
+    try {
+      await invoke("save_secure_session", { value: payload });
+      if (
+        clearGeneration !== secureClearGeneration ||
+        hasClearTombstone()
+      ) {
+        // The write may have won a race with a newer clear. Keep the tombstone
+        // set so a crash before the queued delete cannot revive this payload.
+        lastPersistedPayload = null;
+        return;
+      }
+      lastPersistedPayload = payload;
+      setClearTombstone(false);
+    } catch (error) {
+      lastPersistedPayload = null;
+      console.warn("[secureSession] keyring save failed; session is memory-only:", error);
+    }
+  });
 }
 
 export async function clearSecureSession(): Promise<void> {
+  // Mark revoked synchronously, before waiting behind an in-flight save. A
+  // future launch refuses to load the keyring value until deletion succeeds.
+  const clearGeneration = ++secureClearGeneration;
+  setClearTombstone(true);
   lastPersistedPayload = null;
-  if (loadStorageMode() === "fallback") {
-    saveFallbackSecrets(null);
-    return;
-  }
-
-  try {
-    await invokeSecure("clear_secure_session");
-  } catch (error) {
-    console.warn("[secureSession] keyring clear failed, switching to fallback:", error);
-    setStorageMode("fallback");
-  }
-  saveFallbackSecrets(null);
+  takeLegacyPlaintextSecrets();
+  await enqueueSecureOperation(async () => {
+    try {
+      await invoke("clear_secure_session");
+      if (clearGeneration === secureClearGeneration) {
+        setClearTombstone(false);
+      }
+    } catch (error) {
+      console.warn("[secureSession] keyring clear failed; tombstone retained:", error);
+    }
+  });
 }
 
 export async function persistCurrentSessionSecrets(): Promise<void> {

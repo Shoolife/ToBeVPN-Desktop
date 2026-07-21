@@ -6,11 +6,10 @@
   "scripts": {
     "inject-host": "bash scripts/inject-backend-host.sh",
     "restore-host": "bash scripts/restore-placeholder.sh",
-    "dev": "npm run inject-host && vite",
-    "build": "npm run inject-host && tsc && vite build",
+    "dev": "vite",
+    "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "post-tauri-build": "npm run restore-host"
+    "tauri": "bash scripts/with-backend-hosts.sh tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

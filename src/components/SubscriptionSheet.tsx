@@ -6,6 +6,7 @@ import {
   markPendingPurchaseStarted,
   pingHwidOnly,
   startPendingPurchaseRefreshIfNeeded,
+  sanitizePurchasePlansData,
 } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { getCurrentPlan } from "../api/client";
@@ -23,6 +24,7 @@ interface CurrentLimits {
 
 function normalizePlanTrafficLimit(value: number | null | undefined): number | null {
   if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value) || value < 0) return null;
   if (value <= 0) return 0;
   return value > 1024 * 1024 ? value : value * 1024 * 1024 * 1024;
 }
@@ -31,19 +33,35 @@ function currentLimitsFromPlan(dto: CurrentPlanDto | null | undefined): CurrentL
   if (!dto) return null;
   const snapshot = dto.current_plan ?? dto.plan_snapshot ?? null;
   const subscription = dto.subscription ?? null;
-  const renewalUrl = (dto.renewal_url ?? "").trim() || null;
+  const renewalUrl = safePaymentUrl(dto.renewal_url);
   const trafficLimitBytes =
     subscription?.traffic_limit_bytes ??
     normalizePlanTrafficLimit(subscription?.traffic_limit) ??
     snapshot?.traffic_limit_bytes ??
     normalizePlanTrafficLimit(snapshot?.traffic_limit);
-  const deviceLimit = subscription?.device_limit ?? snapshot?.device_limit;
+  const rawDeviceLimit = subscription?.device_limit ?? snapshot?.device_limit;
+  const deviceLimit = Number.isSafeInteger(rawDeviceLimit) && (rawDeviceLimit ?? -1) >= 0
+    ? Math.min(rawDeviceLimit ?? 0, 10_000)
+    : null;
   if (trafficLimitBytes === null && deviceLimit === null && !renewalUrl) return null;
   return {
-    trafficLimitBytes: trafficLimitBytes ?? 0,
+    trafficLimitBytes:
+      Number.isFinite(trafficLimitBytes) && (trafficLimitBytes ?? -1) >= 0
+        ? Math.min(trafficLimitBytes ?? 0, Number.MAX_SAFE_INTEGER)
+        : 0,
     deviceLimit: deviceLimit ?? 0,
     renewalUrl,
   };
+}
+
+function safePaymentUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 2_048) return null;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "https:" && !url.username && !url.password ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 const FALLBACK_PLAN_DURATIONS = [
@@ -53,7 +71,12 @@ const FALLBACK_PLAN_DURATIONS = [
   { days: 90, rubPrice: 500 },
   { days: 365, rubPrice: 1500 },
 ];
-const PURCHASE_PLANS_CACHE_KEY = "tobevpn_purchase_plans_shape_v1";
+const LEGACY_PURCHASE_PLANS_CACHE_KEY = "tobevpn_purchase_plans_shape_v1";
+const PURCHASE_PLANS_CACHE_KEY = "tobevpn_purchase_plans_shape_v2";
+const PURCHASE_PLANS_CACHE_VERSION = 2;
+const PURCHASE_PLANS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const PURCHASE_PLANS_CACHE_MAX_BYTES = 512 * 1024;
+const PURCHASE_PLANS_CACHE_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 
 const PREVIEW_PURCHASE_PLANS: PurchasePlansDto = {
   telegram_id: 100000001,
@@ -130,21 +153,99 @@ function createPreviewPlan(
   };
 }
 
-function readCachedPurchasePlans(): PurchasePlansDto | null {
+interface PurchasePlansCacheRecord {
+  version: number;
+  savedAt: number;
+  data: unknown;
+}
+
+function encodedByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function removeCachedPurchasePlans(): void {
   try {
+    localStorage.removeItem(PURCHASE_PLANS_CACHE_KEY);
+    localStorage.removeItem(LEGACY_PURCHASE_PLANS_CACHE_KEY);
+  } catch {
+    // Storage is optional.
+  }
+}
+
+function readCachedPurchasePlans(expectedTelegramId: number | null): PurchasePlansDto | null {
+  try {
+    // v1 was neither identity-scoped nor time-bounded and could contain a
+    // reusable payment link. It must never be consumed again.
+    localStorage.removeItem(LEGACY_PURCHASE_PLANS_CACHE_KEY);
+    if (
+      expectedTelegramId === null ||
+      !Number.isSafeInteger(expectedTelegramId) ||
+      expectedTelegramId <= 0
+    ) return null;
     const raw = localStorage.getItem(PURCHASE_PLANS_CACHE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as PurchasePlansDto;
-    return Array.isArray(parsed.plans) ? parsed : null;
+    if (
+      raw.length > PURCHASE_PLANS_CACHE_MAX_BYTES ||
+      encodedByteLength(raw) > PURCHASE_PLANS_CACHE_MAX_BYTES
+    ) {
+      removeCachedPurchasePlans();
+      return null;
+    }
+    const record = JSON.parse(raw) as Partial<PurchasePlansCacheRecord>;
+    const now = Date.now();
+    if (
+      record.version !== PURCHASE_PLANS_CACHE_VERSION ||
+      !Number.isSafeInteger(record.savedAt) ||
+      (record.savedAt ?? 0) > now + PURCHASE_PLANS_CACHE_FUTURE_TOLERANCE_MS ||
+      now - (record.savedAt ?? 0) > PURCHASE_PLANS_CACHE_TTL_MS
+    ) {
+      removeCachedPurchasePlans();
+      return null;
+    }
+    const data = sanitizePurchasePlansData(record.data, expectedTelegramId);
+    if (!data || data.plans.length === 0) {
+      removeCachedPurchasePlans();
+      return null;
+    }
+    return data;
   } catch {
+    removeCachedPurchasePlans();
     return null;
   }
 }
 
-function writeCachedPurchasePlans(data: PurchasePlansDto | null): void {
+function writeCachedPurchasePlans(
+  data: PurchasePlansDto | null,
+  expectedTelegramId: number | null,
+): void {
   try {
-    if (!data || !Array.isArray(data.plans) || data.plans.length === 0) return;
-    localStorage.setItem(PURCHASE_PLANS_CACHE_KEY, JSON.stringify(data));
+    const sanitized = sanitizePurchasePlansData(data, expectedTelegramId);
+    if (!sanitized || sanitized.plans.length === 0) return;
+    // The cache exists only to render a degraded, masked plan list. Payment
+    // actions must always come from a fresh authenticated response.
+    const displayOnly: PurchasePlansDto = {
+      ...sanitized,
+      plans: sanitized.plans.map((plan) => ({
+        ...plan,
+        durations: plan.durations.map((duration) => ({
+          ...duration,
+          bot_start_param: null,
+          bot_payment_url: null,
+          payment_methods: [],
+        })),
+      })),
+    };
+    const raw = JSON.stringify({
+      version: PURCHASE_PLANS_CACHE_VERSION,
+      savedAt: Date.now(),
+      data: displayOnly,
+    } satisfies PurchasePlansCacheRecord);
+    if (
+      raw.length > PURCHASE_PLANS_CACHE_MAX_BYTES ||
+      encodedByteLength(raw) > PURCHASE_PLANS_CACHE_MAX_BYTES
+    ) return;
+    localStorage.setItem(PURCHASE_PLANS_CACHE_KEY, raw);
+    localStorage.removeItem(LEGACY_PURCHASE_PLANS_CACHE_KEY);
   } catch {
     // The live response is enough; cache failure should not block the sheet.
   }
@@ -277,7 +378,7 @@ function buildTabs(data: PurchasePlansDto | null, isRu: boolean, masked = false)
           title: planTitle(d.days),
           description: desc,
           priceDisplay: masked ? t("plan_unknown_name") : formatDurationPrice(d, isRu),
-          paymentUrl: masked ? null : (d.bot_payment_url ?? "").trim() || null,
+          paymentUrl: masked ? null : safePaymentUrl(d.bot_payment_url),
         })),
     };
   });
@@ -328,7 +429,14 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const showLimits = session.userPlan === "PAID" || session.userPlan === "ADMIN";
   const currentLimitsKey =
     session.isLinked && session.telegramId !== null
-      ? `${session.telegramId}:${session.userPlan}:${session.planExpiresAt ?? ""}`
+      ? JSON.stringify([
+          session.deviceId,
+          session.telegramId,
+          session.shortUuid ?? "",
+          session.panelUserUuid ?? "",
+          session.userPlan,
+          session.planExpiresAt,
+        ])
       : null;
 
   const [plansData, setPlansData] = useState<PurchasePlansDto | null>(null);
@@ -340,9 +448,18 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [qrVisible, setQrVisible] = useState(false);
   const [qrClosing, setQrClosing] = useState(false);
+  const [qrPaymentUrl, setQrPaymentUrl] = useState<string | null>(null);
+  const [qrIsRenewal, setQrIsRenewal] = useState(false);
+  const [purchaseOpening, setPurchaseOpening] = useState(false);
   const [closing, setClosing] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const periodsContentRef = useRef<HTMLDivElement | null>(null);
+  const qrClosingRef = useRef(false);
+  const sheetClosingRef = useRef(false);
+  const purchaseOpeningRef = useRef(false);
+  const purchaseAttemptRef = useRef(0);
+  const qrCloseTimerRef = useRef<number | null>(null);
+  const dismissTimerRef = useRef<number | null>(null);
   const tabTransitionIdRef = useRef(0);
   const tabTransitionTimerRef = useRef<number | null>(null);
   const tabsScrollerRef = useRef<HTMLDivElement | null>(null);
@@ -357,11 +474,16 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   });
 
   const closeQr = () => {
-    if (qrClosing) return;
+    if (qrClosingRef.current) return;
+    qrClosingRef.current = true;
     setQrClosing(true);
-    setTimeout(() => {
+    qrCloseTimerRef.current = window.setTimeout(() => {
       setQrVisible(false);
       setQrClosing(false);
+      setQrPaymentUrl(null);
+      setOpenError(null);
+      qrClosingRef.current = false;
+      qrCloseTimerRef.current = null;
     }, 200);
   };
 
@@ -373,24 +495,32 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       return;
     }
 
+    const telegramId =
+      session.isLinked && session.telegramId !== null ? session.telegramId : null;
     let cancelled = false;
+    setPlansData(null);
+    setPlansFromCache(false);
+    if (telegramId === null) {
+      setPlansLoading(false);
+      return;
+    }
     setPlansLoading(true);
     fetchPurchasePlans()
       .then((data) => {
         if (cancelled) return;
         if (data && data.plans.length > 0) {
-          writeCachedPurchasePlans(data);
+          writeCachedPurchasePlans(data, telegramId);
           setPlansData(data);
           setPlansFromCache(false);
           return;
         }
-        const cached = readCachedPurchasePlans();
+        const cached = readCachedPurchasePlans(telegramId);
         setPlansData(cached);
         setPlansFromCache(Boolean(cached));
       })
       .catch(() => {
         if (cancelled) return;
-        const cached = readCachedPurchasePlans();
+        const cached = readCachedPurchasePlans(telegramId);
         setPlansData(cached);
         setPlansFromCache(Boolean(cached));
       })
@@ -400,7 +530,15 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [
+    session.deviceId,
+    session.isLinked,
+    session.panelUserUuid,
+    session.planExpiresAt,
+    session.shortUuid,
+    session.telegramId,
+    session.userPlan,
+  ]);
 
   // Fetch real per-user limits (matches phone's loadCurrentLimits in MainViewModel).
   useEffect(() => {
@@ -602,9 +740,12 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   }, [plansLoading, selectedTab?.key, plansFromCache]);
 
   const handleClose = () => {
-    if (closing) return;
+    if (sheetClosingRef.current) return;
+    sheetClosingRef.current = true;
+    purchaseAttemptRef.current += 1;
+    purchaseOpeningRef.current = false;
     setClosing(true);
-    setTimeout(() => onDismiss(), 240);
+    dismissTimerRef.current = window.setTimeout(() => onDismiss(), 240);
   };
 
   useEffect(() => {
@@ -620,8 +761,16 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
 
   useEffect(() => {
     return () => {
+      purchaseAttemptRef.current += 1;
+      purchaseOpeningRef.current = false;
       if (tabTransitionTimerRef.current !== null) {
         window.clearTimeout(tabTransitionTimerRef.current);
+      }
+      if (qrCloseTimerRef.current !== null) {
+        window.clearTimeout(qrCloseTimerRef.current);
+      }
+      if (dismissTimerRef.current !== null) {
+        window.clearTimeout(dismissTimerRef.current);
       }
       if (tabsScrollAnimationRef.current !== null) {
         window.cancelAnimationFrame(tabsScrollAnimationRef.current);
@@ -648,6 +797,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     selectedRow?.paymentUrl ??
     (isRenewal && !plansFromCache ? currentLimits?.renewalUrl ?? null : null);
   const handleShowQr = async () => {
+    if (purchaseOpeningRef.current || sheetClosingRef.current) return;
     if (!canPurchase) {
       setOpenError(t("not_authorized"));
       return;
@@ -657,16 +807,37 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       setOpenError(t("plans_load_error"));
       return;
     }
-    if (await pingHwidOnly().catch(() => false)) {
-      onDismiss();
-      return;
+    const paymentUrl = selectedPaymentUrl;
+    const renewal = isRenewal;
+    const attempt = ++purchaseAttemptRef.current;
+    purchaseOpeningRef.current = true;
+    setPurchaseOpening(true);
+    setOpenError(null);
+    try {
+      if (await pingHwidOnly().catch(() => false)) {
+        if (attempt === purchaseAttemptRef.current && !sheetClosingRef.current) {
+          purchaseAttemptRef.current += 1;
+          purchaseOpeningRef.current = false;
+          setPurchaseOpening(false);
+          onDismiss();
+        }
+        return;
+      }
+      if (attempt !== purchaseAttemptRef.current || sheetClosingRef.current) return;
+      markPendingPurchaseStarted({
+        baselinePlan: session.userPlan,
+        baselineExpiresAt: session.planExpiresAt,
+      });
+      startPendingPurchaseRefreshIfNeeded();
+      setQrPaymentUrl(paymentUrl);
+      setQrIsRenewal(renewal);
+      setQrVisible(true);
+    } finally {
+      if (attempt === purchaseAttemptRef.current) {
+        purchaseOpeningRef.current = false;
+        setPurchaseOpening(false);
+      }
     }
-    markPendingPurchaseStarted({
-      baselinePlan: session.userPlan,
-      baselineExpiresAt: session.planExpiresAt,
-    });
-    startPendingPurchaseRefreshIfNeeded();
-    setQrVisible(true);
   };
   const buyText = selectedRow
     ? canPurchase
@@ -850,6 +1021,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
                       type="button"
                       className={`sub-tab ${selectedTab?.key === tab.key ? "sub-tab--selected" : ""}`}
                       onClick={() => selectTab(tab)}
+                      disabled={purchaseOpening}
                       aria-pressed={selectedTab?.key === tab.key}
                     >
                       <span>{tab.title}</span>
@@ -883,7 +1055,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
                   ref={periodsContentRef}
                   className="sub-periods sub-periods--enter"
                 >
-                  {renderPeriodRows(selectedTab?.periods ?? [], selectedKey, true)}
+                  {renderPeriodRows(selectedTab?.periods ?? [], selectedKey, !purchaseOpening)}
                   {plansFromCache && (
                     <div className="sub-sheet__hint sub-sheet__hint--compact">
                       {t("plans_load_error")}
@@ -899,7 +1071,8 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           <button
             className="sub-sheet__buy-btn"
             onClick={handleShowQr}
-            disabled={!selectedRow || !canPurchase || !selectedPaymentUrl}
+            disabled={purchaseOpening || !selectedRow || !canPurchase || !selectedPaymentUrl}
+            aria-busy={purchaseOpening}
           >
             {buyText}
           </button>
@@ -907,20 +1080,20 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       </div>
 
       {/* QR overlay */}
-      {qrVisible && selectedPaymentUrl && (
+      {qrVisible && qrPaymentUrl && (
         <div
           className={`sub-qr-overlay ${qrClosing ? "sub-qr-overlay--closing" : ""}`}
           onClick={(e) => e.target === e.currentTarget && closeQr()}
         >
           <div className={`sub-qr-card ${qrClosing ? "sub-qr-card--closing" : ""}`}>
             <div className="sub-qr-card__title">
-              {t(isRenewal ? "subscription_qr_renew_title" : "subscription_qr_title")}
+              {t(qrIsRenewal ? "subscription_qr_renew_title" : "subscription_qr_title")}
             </div>
             <div className="sub-qr-card__qr">
-              <QRCodeSVG value={selectedPaymentUrl} size={220} level="M" />
+              <QRCodeSVG value={qrPaymentUrl} size={220} level="M" />
             </div>
             <div className="sub-qr-card__hint">
-              {t(isRenewal ? "subscription_qr_renew_hint" : "subscription_qr_hint")}
+              {t(qrIsRenewal ? "subscription_qr_renew_hint" : "subscription_qr_hint")}
             </div>
             <div className="sub-qr-card__hint">{t("subscription_sync_hint")}</div>
             {openError && (

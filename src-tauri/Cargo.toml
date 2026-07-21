@@ -20,11 +20,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
 tauri-plugin-opener = "2"
-tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "time", "process", "sync", "macros", "io-util"] }
-hostname = "0.4"
 log = "0.4"
 tauri-plugin-http = "2.5.8"
 tauri-plugin-updater = "2"

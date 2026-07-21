@@ -26,6 +26,11 @@ const BLOCK_HEADER = "is-hack";
 const BLOCK_VALUE = "yes";
 const SUBSCRIPTION_USERINFO_HEADER = "subscription-userinfo";
 const VERSION_PATTERN = /^\d+(?:\.\d+)*$/;
+const MAX_PROFILE_BYTES = 2 * 1024 * 1024;
+const PROFILE_BODY_TIMEOUT_MS = 15_000;
+const PROFILE_BODY_IDLE_TIMEOUT_MS = 8_000;
+const MAX_PROFILE_LINKS = 512;
+const MAX_PROFILE_LINK_LENGTH = 16 * 1024;
 
 declare const __APP_VERSION__: string;
 
@@ -73,11 +78,16 @@ export async function pingSubscriptionUrl(
       if (!fallbackUrl) return null;
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) return null;
-      return readResult(response, minimumVersionHeader);
+      return readResult(
+        requireAuthoritativeResponse(response, minimumVersionHeader),
+        minimumVersionHeader,
+      );
     }
-    const fallbackUrl = buildFallbackUrl(subscriptionUrl);
+    const primaryUrl = validateSubscriptionUrl(subscriptionUrl);
+    if (!primaryUrl) return null;
+    const fallbackUrl = buildFallbackUrl(primaryUrl);
     return await primaryThenFallback(
-      subscriptionUrl,
+      primaryUrl,
       fallbackUrl,
       headers,
       minimumVersionHeader,
@@ -108,11 +118,16 @@ export async function fetchSubscriptionProfile(
       if (!fallbackUrl) return null;
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) return null;
-      return await readProfileResult(response, minimumVersionHeader);
+      return await readProfileResult(
+        requireAuthoritativeResponse(response, minimumVersionHeader),
+        minimumVersionHeader,
+      );
     }
-    const fallbackUrl = buildFallbackUrl(subscriptionUrl);
+    const primaryUrl = validateSubscriptionUrl(subscriptionUrl);
+    if (!primaryUrl) return null;
+    const fallbackUrl = buildFallbackUrl(primaryUrl);
     return await primaryThenFallbackProfile(
-      subscriptionUrl,
+      primaryUrl,
       fallbackUrl,
       headers,
       minimumVersionHeader,
@@ -144,14 +159,34 @@ async function buildSubscriptionRequestContext(): Promise<SubscriptionRequestCon
   };
 }
 
-async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
+async function timedFetch(
+  url: string,
+  headers: HeadersInit,
+  timeoutMs: number,
+  parentSignal?: AbortSignal,
+): Promise<Response> {
   const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  if (parentSignal?.aborted) controller.abort();
+  else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await httpFetch(url, { method: "GET", headers, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
+    parentSignal?.removeEventListener("abort", abortFromParent);
   }
+}
+
+function requireAuthoritativeResponse(
+  response: Response,
+  _minimumVersionHeader: string | null,
+): Response {
+  const hasExplicitAccessState =
+    response.headers.has(BLOCK_HEADER) ||
+    response.headers.has("is_hack");
+  if (response.ok || hasExplicitAccessState) return response;
+  throw new Error(`Subscription endpoint returned HTTP ${response.status}`);
 }
 
 function buildPrimaryUrlFromKey(rawKey: string | null | undefined): string | null {
@@ -202,23 +237,21 @@ async function primaryThenFallback(
   minimumVersionHeader: string | null,
 ): Promise<SubscriptionPingResult> {
   if (!fallbackUrl) {
-    return readResult(
-      await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS),
-      minimumVersionHeader,
-    );
+    const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
+    return readResult(requireAuthoritativeResponse(response, minimumVersionHeader), minimumVersionHeader);
   }
 
-  if (primaryUnavailableUntil > Date.now()) {
+  if (primaryUnavailableUntil > performance.now()) {
     try {
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) {
         throw new Error("Fallback route rejected request");
       }
-      return readResult(response, minimumVersionHeader);
+      return readResult(requireAuthoritativeResponse(response, minimumVersionHeader), minimumVersionHeader);
     } catch {
       const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
       primaryUnavailableUntil = 0;
-      return readResult(response, minimumVersionHeader);
+      return readResult(requireAuthoritativeResponse(response, minimumVersionHeader), minimumVersionHeader);
     }
   }
 
@@ -226,41 +259,52 @@ async function primaryThenFallback(
     source: "primary" | "fallback";
     response: Response;
   };
-  let rejectedPrimaryResult: SubscriptionPingResult | null = null;
+  const primaryController = new AbortController();
+  const fallbackController = new AbortController();
+  let primaryFailed = false;
   const primaryPromise: Promise<HedgedResponse> = timedFetch(
     primaryUrl,
     headers,
     PRIMARY_TIMEOUT_MS,
+    primaryController.signal,
   ).then((response) => {
-    if (response.status === FALLBACK_HTTP_STATUS) {
-      rejectedPrimaryResult = readResult(response, minimumVersionHeader);
-      throw new Error("Primary subscription route rejected request");
-    }
-    return { source: "primary", response };
+    return {
+      source: "primary" as const,
+      response: requireAuthoritativeResponse(response, minimumVersionHeader),
+    };
+  }).catch((error) => {
+    if (!primaryController.signal.aborted) primaryFailed = true;
+    throw error;
   });
   const fallbackPromise: Promise<HedgedResponse> = (async () => {
     await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+    const response = await timedFetch(
+      fallbackUrl,
+      headers,
+      FALLBACK_TIMEOUT_MS,
+      fallbackController.signal,
+    );
     if (await isProxyGatewayAuthError(response)) {
       throw new Error("Fallback route rejected request");
     }
-    return response;
+    return requireAuthoritativeResponse(response, minimumVersionHeader);
   })().then((response) => ({ source: "fallback", response }));
 
   let winner: HedgedResponse;
   try {
     winner = await firstSuccessful([primaryPromise, fallbackPromise]);
   } catch (error) {
-    if (rejectedPrimaryResult) {
-      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
-      return rejectedPrimaryResult;
-    }
+    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
     throw error;
   }
   if (winner.source === "primary") {
+    fallbackController.abort();
     primaryUnavailableUntil = 0;
   } else {
-    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    primaryController.abort();
+    if (primaryFailed) {
+      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    }
   }
   return readResult(winner.response, minimumVersionHeader);
 }
@@ -272,23 +316,30 @@ async function primaryThenFallbackProfile(
   minimumVersionHeader: string | null,
 ): Promise<SubscriptionProfileResult> {
   if (!fallbackUrl) {
+    const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
     return readProfileResult(
-      await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS),
+      requireAuthoritativeResponse(response, minimumVersionHeader),
       minimumVersionHeader,
     );
   }
 
-  if (primaryUnavailableUntil > Date.now()) {
+  if (primaryUnavailableUntil > performance.now()) {
     try {
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) {
         throw new Error("Fallback route rejected request");
       }
-      return readProfileResult(response, minimumVersionHeader);
+      return readProfileResult(
+        requireAuthoritativeResponse(response, minimumVersionHeader),
+        minimumVersionHeader,
+      );
     } catch {
       const response = await timedFetch(primaryUrl, headers, PRIMARY_TIMEOUT_MS);
       primaryUnavailableUntil = 0;
-      return readProfileResult(response, minimumVersionHeader);
+      return readProfileResult(
+        requireAuthoritativeResponse(response, minimumVersionHeader),
+        minimumVersionHeader,
+      );
     }
   }
 
@@ -296,41 +347,52 @@ async function primaryThenFallbackProfile(
     source: "primary" | "fallback";
     response: Response;
   };
-  let rejectedPrimaryResult: SubscriptionProfileResult | null = null;
+  const primaryController = new AbortController();
+  const fallbackController = new AbortController();
+  let primaryFailed = false;
   const primaryPromise: Promise<HedgedResponse> = timedFetch(
     primaryUrl,
     headers,
     PRIMARY_TIMEOUT_MS,
-  ).then(async (response) => {
-    if (response.status === FALLBACK_HTTP_STATUS) {
-      rejectedPrimaryResult = await readProfileResult(response, minimumVersionHeader);
-      throw new Error("Primary subscription route rejected request");
-    }
-    return { source: "primary", response };
+    primaryController.signal,
+  ).then((response) => {
+    return {
+      source: "primary" as const,
+      response: requireAuthoritativeResponse(response, minimumVersionHeader),
+    };
+  }).catch((error) => {
+    if (!primaryController.signal.aborted) primaryFailed = true;
+    throw error;
   });
   const fallbackPromise: Promise<HedgedResponse> = (async () => {
     await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+    const response = await timedFetch(
+      fallbackUrl,
+      headers,
+      FALLBACK_TIMEOUT_MS,
+      fallbackController.signal,
+    );
     if (await isProxyGatewayAuthError(response)) {
       throw new Error("Fallback route rejected request");
     }
-    return response;
+    return requireAuthoritativeResponse(response, minimumVersionHeader);
   })().then((response) => ({ source: "fallback", response }));
 
   let winner: HedgedResponse;
   try {
     winner = await firstSuccessful([primaryPromise, fallbackPromise]);
   } catch (error) {
-    if (rejectedPrimaryResult) {
-      primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
-      return rejectedPrimaryResult;
-    }
+    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
     throw error;
   }
   if (winner.source === "primary") {
+    fallbackController.abort();
     primaryUnavailableUntil = 0;
   } else {
-    primaryUnavailableUntil = Date.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    primaryController.abort();
+    if (primaryFailed) {
+      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    }
   }
   return readProfileResult(winner.response, minimumVersionHeader);
 }
@@ -338,7 +400,7 @@ async function primaryThenFallbackProfile(
 async function isProxyGatewayAuthError(response: Response): Promise<boolean> {
   if (response.status !== FALLBACK_HTTP_STATUS) return false;
   try {
-    const text = await response.clone().text();
+    const text = await readTextLimited(response.clone(), 16 * 1024);
     if (!text) return false;
     const parsed = JSON.parse(text) as {
       errorCode?: unknown;
@@ -377,7 +439,7 @@ async function readProfileResult(
   response: Response,
   minimumVersionHeader: string | null,
 ): Promise<SubscriptionProfileResult> {
-  const body = await response.text().catch(() => "");
+  const body = await readTextLimited(response, MAX_PROFILE_BYTES);
   const userInfo = readSubscriptionUserInfo(response.headers.get(SUBSCRIPTION_USERINFO_HEADER));
   return {
     ...readResult(response, minimumVersionHeader),
@@ -386,6 +448,66 @@ async function readProfileResult(
     trafficLimitBytes: userInfo.totalBytes,
     isSuccessful: response.ok,
   };
+}
+
+async function readTextLimited(response: Response, maxBytes: number): Promise<string> {
+  const rawLength = response.headers.get("content-length");
+  const declaredLength = rawLength !== null && /^\d+$/.test(rawLength.trim())
+    ? Number(rawLength)
+    : null;
+  if (
+    declaredLength !== null &&
+    Number.isSafeInteger(declaredLength) &&
+    declaredLength > maxBytes
+  ) {
+    throw new Error(`Subscription response exceeds ${maxBytes} bytes`);
+  }
+  if (!response.body) {
+    if (declaredLength === 0 || response.status === 204 || response.status === 205) return "";
+    throw new Error("Subscription response body is not available as a bounded stream");
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const deadline = performance.now() + PROFILE_BODY_TIMEOUT_MS;
+  try {
+    while (true) {
+      const remainingTime = deadline - performance.now();
+      if (remainingTime <= 0) throw new Error("Subscription response timed out");
+      let timeoutId: number | null = null;
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(
+            () => reject(new Error("Subscription response timed out")),
+            Math.min(
+              PROFILE_BODY_IDLE_TIMEOUT_MS,
+              remainingTime,
+            ),
+          );
+        }),
+      ]).finally(() => {
+        if (timeoutId !== null) window.clearTimeout(timeoutId);
+      });
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        throw new Error(`Subscription response exceeds ${maxBytes} bytes`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 function minimumVersionHeaderForPlatform(platform: string): string | null {
@@ -416,8 +538,9 @@ function isVersionBelowMinimum(rawMinimum: string | null): boolean {
 }
 
 function parseVersion(raw: string | null): number[] | null {
+  if (!raw || raw.length > 64) return null;
   const normalized = raw
-    ?.trim()
+    .trim()
     .replace(/^[vV]/, "")
     .split(/[-+]/, 1)[0];
   if (!normalized || !VERSION_PATTERN.test(normalized)) return null;
@@ -448,7 +571,10 @@ function readSubscriptionUserInfo(raw: string | null): {
   const total = parseIntegerHeader(parts.get("total"));
   const used = [upload, download]
     .filter((value): value is number => value !== null)
-    .reduce((sum, value) => sum + value, 0);
+    .reduce(
+      (sum, value) => Math.min(Number.MAX_SAFE_INTEGER, sum + value),
+      0,
+    );
   return {
     usedBytes: upload === null && download === null ? null : used,
     totalBytes: total,
@@ -456,9 +582,9 @@ function readSubscriptionUserInfo(raw: string | null): {
 }
 
 function parseIntegerHeader(raw: string | undefined): number | null {
-  if (!raw) return null;
+  if (!raw || !/^\d{1,20}$/.test(raw)) return null;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function parseProfileLinks(body: string): string[] {
@@ -469,7 +595,9 @@ function parseProfileLinks(body: string): string[] {
 }
 
 function extractVlessLinks(text: string): string[] {
-  return Array.from(new Set(text.match(/vless:\/\/[^\s<>"']+/g) ?? []));
+  return Array.from(new Set(text.match(/vless:\/\/[^\s<>"']+/g) ?? []))
+    .filter((link) => link.length <= MAX_PROFILE_LINK_LENGTH)
+    .slice(0, MAX_PROFILE_LINKS);
 }
 
 function decodeBase64Profile(raw: string): string | null {
@@ -478,15 +606,21 @@ function decodeBase64Profile(raw: string): string | null {
   const normalized = compact.replace(/-/g, "+").replace(/_/g, "/");
   const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), "=");
   try {
-    return atob(padded);
+    // atob() yields a Latin-1 string, but subscription profiles are UTF-8 —
+    // Cyrillic server names in the URL fragment would turn into mojibake.
+    // Re-decode the raw bytes as UTF-8.
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   } catch {
     return null;
   }
 }
 
 function readIntervalMs(raw: string | null): number | null {
-  if (!raw) return null;
-  const parsed = parseFloat(raw.trim());
+  const normalized = raw?.trim() ?? "";
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return null;
+  const parsed = Number(normalized);
   if (!isFinite(parsed) || parsed <= 0) return null;
   const hours = Math.min(Math.max(parsed, MIN_INTERVAL_HOURS), MAX_INTERVAL_HOURS);
   return hours * 60 * 60 * 1000;
@@ -504,9 +638,37 @@ function buildFallbackUrl(panelUrl: string): string | null {
   return buildFallbackUrlFromKey(key);
 }
 
+function validateSubscriptionUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const configured = SUBSCRIPTION_BASE_URL
+      ? new URL(SUBSCRIPTION_BASE_URL)
+      : null;
+    const protocolAllowed =
+      url.protocol === "https:" ||
+      (import.meta.env.DEV &&
+        url.protocol === "http:" &&
+        configured?.protocol === "http:");
+    if (!protocolAllowed || url.username || url.password) return null;
+    if (SUBSCRIPTION_BASE_URL) {
+      if (url.origin !== configured?.origin) return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function buildFallbackUrlFromKey(subscriptionKey: string | null | undefined): string | null {
   if (!SUBS_FALLBACK_URL) return null;
   const key = subscriptionKey?.trim();
   if (!key) return null;
-  return `${SUBS_FALLBACK_URL}${encodeURIComponent(key)}`;
+  try {
+    const url = new URL(SUBS_FALLBACK_URL);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    url.searchParams.set("sub", key);
+    return url.toString();
+  } catch {
+    return null;
+  }
 }

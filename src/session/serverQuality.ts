@@ -20,6 +20,7 @@ const MAX_CONFIRMED_TRAFFIC_BYTES = 50 * 1024 * 1024;
 const MAX_COUNTER = 100;
 const MAX_CONSECUTIVE_FAILURES = 5;
 const MAX_RECORDS = 100;
+const MAX_CONCURRENT_PINGS = 6;
 
 export interface ServerQualityIdentity {
   address: string;
@@ -85,15 +86,21 @@ function isAvailableServer(server: VpnServer): boolean {
 function isQualityRecord(value: unknown): value is QualityRecord {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
+  const counter = (item: unknown, max: number) =>
+    Number.isSafeInteger(item) && Number(item) >= 0 && Number(item) <= max;
+  const timestamp = (item: unknown) =>
+    Number.isSafeInteger(item) &&
+    Number(item) >= 0 &&
+    Number(item) <= Date.now() + 24 * 60 * 60 * 1_000;
   return (
-    typeof record.successfulConnections === "number" &&
-    typeof record.failedConnections === "number" &&
-    typeof record.consecutiveFailures === "number" &&
-    typeof record.lastSuccessAt === "number" &&
-    typeof record.lastFailureAt === "number" &&
-    typeof record.lastHealthyAt === "number" &&
-    typeof record.lastTrafficAt === "number" &&
-    typeof record.confirmedTrafficBytes === "number"
+    counter(record.successfulConnections, MAX_COUNTER) &&
+    counter(record.failedConnections, MAX_COUNTER) &&
+    counter(record.consecutiveFailures, MAX_CONSECUTIVE_FAILURES) &&
+    timestamp(record.lastSuccessAt) &&
+    timestamp(record.lastFailureAt) &&
+    timestamp(record.lastHealthyAt) &&
+    timestamp(record.lastTrafficAt) &&
+    counter(record.confirmedTrafficBytes, MAX_CONFIRMED_TRAFFIC_BYTES)
   );
 }
 
@@ -111,8 +118,10 @@ function readState(): QualityState {
         ? (parsed.records as Record<string, unknown>)
         : {};
     const records: Record<string, QualityRecord> = {};
-    for (const [key, value] of Object.entries(source)) {
-      if (isQualityRecord(value)) records[key] = value;
+    for (const [key, value] of Object.entries(source).slice(0, MAX_RECORDS * 4)) {
+      if (key.length <= 512 && !/[\u0000-\u001f\u007f]/.test(key) && isQualityRecord(value)) {
+        records[key] = value;
+      }
     }
     cachedState = { records };
   } catch {
@@ -151,6 +160,7 @@ function updateRecord(
     const now = Date.now();
     if (
       minWriteIntervalMs > 0 &&
+      now >= current.lastHealthyAt &&
       now - current.lastHealthyAt < minWriteIntervalMs &&
       current.lastFailureAt <= current.lastHealthyAt
     ) {
@@ -172,7 +182,9 @@ function updateRecord(
 
 function nextConsecutiveFailures(record: QualityRecord, now: number): number {
   const previous =
-    record.lastFailureAt <= 0 || now - record.lastFailureAt >= FAILURE_DECAY_MS
+    record.lastFailureAt <= 0 ||
+    now < record.lastFailureAt ||
+    now - record.lastFailureAt >= FAILURE_DECAY_MS
       ? 0
       : record.consecutiveFailures;
   return Math.min(previous + 1, MAX_CONSECUTIVE_FAILURES);
@@ -180,7 +192,7 @@ function nextConsecutiveFailures(record: QualityRecord, now: number): number {
 
 function recencyBonus(timestamp: number, now: number, windowMs: number, maxBonus: number): number {
   if (timestamp <= 0) return 0;
-  const age = now - timestamp;
+  const age = Math.max(0, now - timestamp);
   if (age >= windowMs) return 0;
   return maxBonus * (1 - age / windowMs);
 }
@@ -252,7 +264,8 @@ export async function measureVpnServerPings(
       continue;
     }
     const cached = pingCache.get(qualityKey(server));
-    if (!options.force && cached && now - cached.measuredAt <= PING_CACHE_TTL_MS) {
+    const cacheAge = cached ? now - cached.measuredAt : -1;
+    if (!options.force && cached && cacheAge >= 0 && cacheAge <= PING_CACHE_TTL_MS) {
       result.set(server.id, cached.ping);
     } else {
       pending.push(server);
@@ -262,11 +275,17 @@ export async function measureVpnServerPings(
 
   const targets = await preparePingBypass(pending.map((server) => server.address))
     .catch(() => new Map<string, string>());
-  await Promise.all(
-    pending.map(async (server) => {
-      const target = targets.get(server.address) ?? server.address;
+  let nextServerIndex = 0;
+  const worker = async () => {
+    while (nextServerIndex < pending.length) {
+      const server = pending[nextServerIndex++];
+      const target = targets.get(server.address);
       let ping = -1;
       try {
+        // Ping only the exact public IPv4 resolved by the native manager.
+        // Falling back to the hostname would perform a second DNS lookup and
+        // could hit an un-routed or private rebinding result.
+        if (!target) throw new Error("No safe ping destination");
         const measured = await invoke<number>("tcp_ping", {
           host: target,
           port: server.port,
@@ -278,7 +297,13 @@ export async function measureVpnServerPings(
       }
       pingCache.set(qualityKey(server), { ping, measuredAt: Date.now() });
       result.set(server.id, ping);
-    }),
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAX_CONCURRENT_PINGS, pending.length) },
+      () => worker(),
+    ),
   );
   return result;
 }
@@ -386,13 +411,14 @@ export function recordServerTraffic(
   server: ServerQualityIdentity,
   bytes: number,
 ): Promise<void> {
-  if (bytes <= 0) return Promise.resolve();
+  if (!Number.isFinite(bytes) || bytes <= 0) return Promise.resolve();
+  const safeBytes = Math.min(Math.floor(bytes), MAX_CONFIRMED_TRAFFIC_BYTES);
   return updateRecord(server, (current, now) => ({
     ...current,
     consecutiveFailures: 0,
     lastTrafficAt: now,
     confirmedTrafficBytes: Math.min(
-      current.confirmedTrafficBytes + bytes,
+      current.confirmedTrafficBytes + safeBytes,
       MAX_CONFIRMED_TRAFFIC_BYTES,
     ),
   }));

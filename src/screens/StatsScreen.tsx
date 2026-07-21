@@ -1,6 +1,12 @@
 import { useState, useEffect } from "react";
 import { t, getSavedLang } from "../i18n";
-import { getDayStats, getWeekStats, getMonthStats, type StatSlot } from "../session/stats";
+import {
+  getDayStats,
+  getWeekStats,
+  getMonthStats,
+  subscribeStats,
+  type StatSlot,
+} from "../session/stats";
 import "./StatsScreen.css";
 
 type Period = "day" | "week" | "month";
@@ -25,15 +31,16 @@ function shortBytes(bytes: number): string {
 }
 
 function formatTime(seconds: number): string {
+  const wholeSeconds = Math.max(0, Math.floor(seconds));
   const isRu = getSavedLang() === "ru";
   const hUnit = isRu ? "ч" : "h";
   const mUnit = isRu ? "м" : "m";
   const sUnit = isRu ? "с" : "s";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
+  const h = Math.floor(wholeSeconds / 3600);
+  const m = Math.floor((wholeSeconds % 3600) / 60);
   if (h > 0) return `${h}${hUnit} ${m}${mUnit}`;
   if (m > 0) return `${m}${mUnit}`;
-  return `${seconds}${sUnit}`;
+  return `${wholeSeconds}${sUnit}`;
 }
 
 function formatSlotLabel(epochSeconds: number, period: Period, index: number): string {
@@ -66,7 +73,13 @@ function formatRowLabel(epochSeconds: number, period: Period): string {
     }
     case "month": {
       const start = date.toLocaleDateString(locale, { day: "numeric", month: "short" });
-      const end = new Date((epochSeconds + 6 * 86400) * 1000).toLocaleDateString(locale, { day: "numeric", month: "short" });
+      // The final slot is a partial week — cap the shown end at the last day
+      // of the month so it never reads "29 Jul — 4 Aug".
+      const lastDayOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+      const rawEnd = new Date(date);
+      rawEnd.setDate(date.getDate() + 6);
+      const cappedEnd = rawEnd.getTime() > lastDayOfMonth.getTime() ? lastDayOfMonth : rawEnd;
+      const end = cappedEnd.toLocaleDateString(locale, { day: "numeric", month: "short" });
       return `${start} — ${end}`;
     }
   }
@@ -79,14 +92,24 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     setAnimated(false);
-    switch (period) {
-      case "day": setStats(getDayStats()); break;
-      case "week": setStats(getWeekStats()); break;
-      case "month": setStats(getMonthStats()); break;
-    }
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => setAnimated(true));
+    const refresh = () => {
+      switch (period) {
+        case "day": setStats(getDayStats()); break;
+        case "week": setStats(getWeekStats()); break;
+        case "month": setStats(getMonthStats()); break;
+      }
+    };
+    refresh();
+    let innerFrame = 0;
+    const outerFrame = requestAnimationFrame(() => {
+      innerFrame = requestAnimationFrame(() => setAnimated(true));
     });
+    const unsubscribe = subscribeStats(refresh);
+    return () => {
+      cancelAnimationFrame(outerFrame);
+      if (innerFrame) cancelAnimationFrame(innerFrame);
+      unsubscribe();
+    };
   }, [period]);
 
   const totalBytes = stats.reduce((s, st) => s + st.totalBytes, 0);

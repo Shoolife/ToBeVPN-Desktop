@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr};
+
+const MAX_BYPASS_HOSTS: usize = 64;
+const MAX_SERVICE_DOMAINS: usize = 10_000;
+const MAX_CUSTOM_DOMAINS: usize = 128;
 
 /// Server params received from the frontend (mirrors TV's Server model).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +65,95 @@ fn default_routing_mode() -> String {
 }
 
 impl ServerConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("VPN server port must be between 1 and 65535".into());
+        }
+        if !is_valid_uuid(&self.uuid)
+            || self
+                .uuid
+                .eq_ignore_ascii_case("00000000-0000-0000-0000-000000000000")
+        {
+            return Err("VPN server UUID is invalid".into());
+        }
+        validate_endpoint_host(&self.address, "VPN server address")?;
+        if let Ok(ip) = self.address.parse::<IpAddr>() {
+            match ip {
+                IpAddr::V4(ip) if is_allowed_server_ipv4(ip) => {}
+                IpAddr::V4(_) => {
+                    return Err("VPN server address is not a public IPv4 address".into())
+                }
+                IpAddr::V6(_) => return Err("IPv6 VPN endpoints are not supported".into()),
+            }
+        }
+        if !matches!(self.security.as_str(), "none" | "tls" | "reality") {
+            return Err("Unsupported VPN transport security".into());
+        }
+        if !matches!(self.network.as_str(), "tcp" | "ws" | "xhttp") {
+            return Err("Unsupported VPN transport network".into());
+        }
+        if !self.flow.is_empty() && self.flow != "xtls-rprx-vision" {
+            return Err("Unsupported VLESS flow".into());
+        }
+        if !self.sni.is_empty() {
+            validate_endpoint_host(&self.sni, "VPN SNI")?;
+        }
+        if self.security == "reality" {
+            if self.sni.is_empty()
+                || self.public_key.len() < 20
+                || self.public_key.len() > 128
+                || !self
+                    .public_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return Err("Reality server parameters are invalid".into());
+            }
+            if self.short_id.len() > 32
+                || !self.short_id.len().is_multiple_of(2)
+                || !self.short_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("Reality short ID is invalid".into());
+            }
+        }
+        validate_short_ascii(&self.fingerprint, 32, "TLS fingerprint")?;
+        validate_text_field(&self.path, 2048, "transport path")?;
+        validate_short_ascii(&self.mode, 32, "XHTTP mode")?;
+        validate_text_field(&self.spx, 2048, "Reality spider path")?;
+        if !matches!(
+            self.routing_mode.as_str(),
+            "blocked_only" | "selective" | "all_vpn"
+        ) {
+            return Err("Unsupported routing mode".into());
+        }
+        validate_domain_list(&self.bypass_hosts, MAX_BYPASS_HOSTS, "bypass hosts", true)?;
+        validate_domain_list(
+            &self.selected_service_domains,
+            MAX_SERVICE_DOMAINS,
+            "selected service domains",
+            false,
+        )?;
+        validate_domain_list(
+            &self.excluded_service_domains,
+            MAX_SERVICE_DOMAINS,
+            "excluded service domains",
+            false,
+        )?;
+        validate_domain_list(
+            &self.direct_domains,
+            MAX_CUSTOM_DOMAINS,
+            "direct domains",
+            false,
+        )?;
+        validate_domain_list(
+            &self.proxy_domains,
+            MAX_CUSTOM_DOMAINS,
+            "proxy domains",
+            false,
+        )?;
+        Ok(())
+    }
+
     pub fn requires_direct_interface(&self) -> bool {
         matches!(self.routing_mode.as_str(), "blocked_only" | "selective")
             || !self.direct_domains.is_empty()
@@ -69,6 +163,97 @@ impl ServerConfig {
         self.routing_mode == "blocked_only"
             || (self.routing_mode == "selective" && self.select_all_services)
     }
+}
+
+fn is_valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn validate_endpoint_host(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 253 || value.chars().any(char::is_control) {
+        return Err(format!("{label} is invalid"));
+    }
+    if value.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if !value.contains('.') || !is_valid_domain(value) {
+        return Err(format!("{label} is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_short_ascii(value: &str, max_len: usize, label: &str) -> Result<(), String> {
+    if value.len() > max_len
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(format!("VPN {label} is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_text_field(value: &str, max_len: usize, label: &str) -> Result<(), String> {
+    if value.len() > max_len || value.chars().any(char::is_control) {
+        return Err(format!("VPN {label} is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_domain_list(
+    values: &[String],
+    max_items: usize,
+    label: &str,
+    require_fqdn: bool,
+) -> Result<(), String> {
+    if values.len() > max_items {
+        return Err(format!("Too many {label}"));
+    }
+    if values.iter().any(|value| {
+        let normalized = value.trim().trim_start_matches("*.").trim_end_matches('.');
+        !is_valid_domain(normalized) || (require_fqdn && !normalized.contains('.'))
+    }) {
+        return Err(format!("One or more {label} are invalid"));
+    }
+    Ok(())
+}
+
+fn is_valid_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && (domain.contains('.') || domain.len() >= 2)
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+pub fn is_allowed_server_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+        || a == 0
+        || a >= 240
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 192 && b == 0)
+        || (a == 198 && matches!(b, 18 | 19)))
 }
 
 pub const SOCKS_PORT: u16 = 10809;
@@ -276,19 +461,7 @@ fn normalize_domain_rules(domains: &[String]) -> Vec<String> {
             .trim_start_matches("*.")
             .trim_end_matches('.')
             .to_ascii_lowercase();
-        if domain.is_empty()
-            || domain.len() > 253
-            || (!domain.contains('.') && domain.len() < 2)
-            || domain.split('.').any(|label| {
-                label.is_empty()
-                    || label.len() > 63
-                    || label.starts_with('-')
-                    || label.ends_with('-')
-                    || !label
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            })
-        {
+        if !is_valid_domain(&domain) {
             continue;
         }
         let rule = format!("domain:{domain}");
@@ -388,15 +561,15 @@ mod tests {
 
     fn test_server() -> ServerConfig {
         ServerConfig {
-            address: "203.0.113.10".into(),
+            address: "1.1.1.1".into(),
             port: 443,
-            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            uuid: "123e4567-e89b-42d3-a456-426614174000".into(),
             flow: String::new(),
             security: "reality".into(),
             sni: "example.com".into(),
             fingerprint: "chrome".into(),
-            public_key: "test".into(),
-            short_id: "test".into(),
+            public_key: "0123456789abcdefghijklmnopqrstuv_-ABCD".into(),
+            short_id: "0123abcd".into(),
             network: "tcp".into(),
             path: String::new(),
             mode: String::new(),
@@ -410,6 +583,32 @@ mod tests {
             excluded_service_domains: Vec::new(),
             direct_interface: String::new(),
         }
+    }
+
+    #[test]
+    fn validates_server_before_native_network_changes() {
+        assert!(test_server().validate().is_ok());
+
+        let mut private = test_server();
+        private.address = "127.0.0.1".into();
+        assert!(private.validate().is_err());
+
+        let mut invalid_uuid = test_server();
+        invalid_uuid.uuid = "not-a-uuid".into();
+        assert!(invalid_uuid.validate().is_err());
+
+        let mut oversized = test_server();
+        oversized.direct_domains = vec!["example.com".into(); MAX_CUSTOM_DOMAINS + 1];
+        assert!(oversized.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_non_public_resolved_server_addresses() {
+        assert!(is_allowed_server_ipv4(Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(!is_allowed_server_ipv4(Ipv4Addr::LOCALHOST));
+        assert!(!is_allowed_server_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(!is_allowed_server_ipv4(Ipv4Addr::new(100, 64, 0, 1)));
+        assert!(!is_allowed_server_ipv4(Ipv4Addr::new(198, 18, 0, 1)));
     }
 
     #[test]
