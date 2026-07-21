@@ -16,6 +16,7 @@ const LEGACY_STORAGE_KEYS = [
   "tobevpn_routing_settings_v1",
 ];
 const MAX_DOMAINS_PER_LIST = 128;
+const MAX_SERVICE_DOMAINS = 10_000;
 
 const DEFAULT_SETTINGS: RoutingSettings = {
   mode: "blocked_only",
@@ -44,7 +45,14 @@ function normalizeDomainValue(value: unknown): string | null {
     (!input.includes(".") && input.length < 2) ||
     input.startsWith(".") ||
     input.endsWith(".") ||
-    input.split(".").some((label) => !label || label.length > 63)
+    input.split(".").some(
+      (label) =>
+        !label ||
+        label.length > 63 ||
+        label.startsWith("-") ||
+        label.endsWith("-") ||
+        !/^[a-z0-9-]+$/.test(label),
+    )
   ) {
     return null;
   }
@@ -108,7 +116,7 @@ function normalizeSettings(value: unknown): RoutingSettings {
         parsed.directServiceDomains,
         parsed.ruServiceDomains,
       ),
-      100_000,
+      MAX_SERVICE_DOMAINS,
     ),
     excludedServiceDomains: normalizeDomainList(
       firstArray(
@@ -116,7 +124,7 @@ function normalizeSettings(value: unknown): RoutingSettings {
         parsed.excludedDomains,
         parsed.excludedRuDomains,
       ),
-      100_000,
+      MAX_SERVICE_DOMAINS,
     ),
     directDomains: normalizeDomainList(
       firstArray(

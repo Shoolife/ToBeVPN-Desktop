@@ -53,7 +53,7 @@ export default function SplashScreen({
     let doneTimer: number | null = null;
 
     void (async () => {
-      const startedAt = Date.now();
+      const startedAt = performance.now();
 
       if (getAutoUpdateEnabled()) {
         setPhase("checking");
@@ -91,7 +91,10 @@ export default function SplashScreen({
       }
       if (cancelled) return;
 
-      const remainingDelay = Math.max(0, SPLASH_HOLD_MS - (Date.now() - startedAt));
+      const remainingDelay = Math.max(
+        0,
+        SPLASH_HOLD_MS - (performance.now() - startedAt),
+      );
       leaveTimer = window.setTimeout(() => {
         if (cancelled) return;
         setLeaving(true);

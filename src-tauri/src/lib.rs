@@ -5,7 +5,7 @@ mod vpn;
 
 use keyring::{Entry, Error as KeyringError};
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -22,6 +22,8 @@ use gtk::prelude::*;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 
 use vpn::config::ServerConfig;
 use vpn::manager::VpnManager;
@@ -42,11 +44,57 @@ struct VpnPipelineLock {
 
 const SECURE_SESSION_SERVICE: &str = "network.tobevpn.desktop";
 const SECURE_SESSION_ACCOUNT: &str = "device-session-v1";
+const SECURE_SESSION_TOMBSTONE: &str = "tobevpn-revoked-v1";
+const MAX_SECURE_SESSION_BYTES: usize = 64 * 1024;
 const MAX_DESKTOP_STATS_BYTES: usize = 512 * 1024;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(target_os = "linux")]
 const LEGACY_WEBKIT_WAL_COMPACT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+
+#[cfg(target_os = "windows")]
+fn windows_system_directory() -> Result<PathBuf, String> {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = vec![0u16; 32_768];
+    let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+    if length == 0 || length >= buffer.len() {
+        return Err("Could not resolve the Windows system directory".into());
+    }
+    Ok(PathBuf::from(OsString::from_wide(&buffer[..length])))
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_powershell_environment(
+    command: &mut std::process::Command,
+) -> Result<(), String> {
+    let system_dir = windows_system_directory()?;
+    let windows_dir = system_dir
+        .parent()
+        .ok_or_else(|| "Windows system directory has no parent".to_string())?;
+    let powershell_dir = system_dir.join("WindowsPowerShell").join("v1.0");
+    let module_path = powershell_dir.join("Modules");
+    let wbem_dir = system_dir.join("Wbem");
+    let trusted_path = std::env::join_paths([
+        system_dir.as_path(),
+        wbem_dir.as_path(),
+        powershell_dir.as_path(),
+    ])
+    .map_err(|_| "Could not construct the trusted Windows command path".to_string())?;
+
+    command
+        .env_clear()
+        .env("SystemRoot", windows_dir)
+        .env("WINDIR", windows_dir)
+        .env("ComSpec", system_dir.join("cmd.exe"))
+        .env("PATH", trusted_path)
+        .env("PSModulePath", module_path)
+        .env("TEMP", windows_dir.join("Temp"))
+        .env("TMP", windows_dir.join("Temp"))
+        .env("POWERSHELL_TELEMETRY_OPTOUT", "1")
+        .current_dir(&system_dir);
+    Ok(())
+}
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -319,7 +367,19 @@ fn clean_device_model_part(value: &str) -> Option<String> {
     if generic.contains(&normalized.as_str()) {
         None
     } else {
-        Some(cleaned.to_string())
+        let bounded = cleaned
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .take(256)
+            .collect::<String>();
+        let bounded = bounded.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!bounded.is_empty()).then_some(bounded)
     }
 }
 
@@ -385,7 +445,16 @@ fn detect_hardware_model() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn detect_hardware_model() -> Option<String> {
-    let mut command = std::process::Command::new("powershell.exe");
+    let powershell = windows_system_directory()
+        .ok()?
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if !powershell.is_file() {
+        return None;
+    }
+    let mut command = std::process::Command::new(powershell);
+    configure_windows_powershell_environment(&mut command).ok()?;
     let output = command
         .args([
             "-NoProfile",
@@ -430,7 +499,8 @@ fn secure_session_entry() -> Result<Entry, String> {
 fn load_secure_session() -> Result<Option<String>, String> {
     let entry = secure_session_entry()?;
     match entry.get_password() {
-        Ok(value) => Ok(Some(value)),
+        Ok(value) if value.len() <= MAX_SECURE_SESSION_BYTES => Ok(Some(value)),
+        Ok(_) => Err("Secure session payload is unexpectedly large".into()),
         Err(KeyringError::NoEntry) => Ok(None),
         Err(e) => Err(format!("Could not load secure session: {e}")),
     }
@@ -438,6 +508,9 @@ fn load_secure_session() -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn save_secure_session(value: String) -> Result<(), String> {
+    if value.len() > MAX_SECURE_SESSION_BYTES {
+        return Err("Secure session payload is unexpectedly large".into());
+    }
     let entry = secure_session_entry()?;
     entry
         .set_password(&value)
@@ -447,53 +520,166 @@ fn save_secure_session(value: String) -> Result<(), String> {
 #[tauri::command]
 fn clear_secure_session() -> Result<(), String> {
     let entry = secure_session_entry()?;
-    match entry.delete_credential() {
-        Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(e) => Err(format!("Could not clear secure session: {e}")),
+    // Overwrite before delete. If a keyring backend updates successfully but
+    // then fails deletion, the surviving value can no longer restore a login.
+    match entry.set_password(SECURE_SESSION_TOMBSTONE) {
+        Ok(()) => {
+            match entry.delete_credential() {
+                Ok(_) | Err(KeyringError::NoEntry) => {}
+                Err(error) => eprintln!(
+                    "[SESSION] keyring tombstone retained because deletion failed: {error}"
+                ),
+            }
+            Ok(())
+        }
+        Err(overwrite_error) => match entry.delete_credential() {
+            Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(delete_error) => Err(format!(
+                "Could not revoke secure session (overwrite: {overwrite_error}; delete: {delete_error})"
+            )),
+        },
     }
 }
 
-fn desktop_stats_path() -> PathBuf {
+fn desktop_stats_path() -> Result<PathBuf, String> {
     dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ToBeVPN")
-        .join("stats.json")
+        .ok_or_else(|| "Could not resolve the per-user local data directory".to_string())
+        .map(|directory| directory.join("ToBeVPN").join("stats.json"))
+}
+
+fn validate_desktop_stats_payload(payload: &str) -> Result<(), String> {
+    if payload.len() > MAX_DESKTOP_STATS_BYTES {
+        return Err("Desktop stats payload is unexpectedly large".into());
+    }
+    let parsed: serde_json::Value = serde_json::from_str(payload)
+        .map_err(|error| format!("Desktop stats JSON is invalid: {error}"))?;
+    if !parsed
+        .as_object()
+        .and_then(|object| object.get("buckets"))
+        .is_some_and(serde_json::Value::is_array)
+    {
+        return Err("Desktop stats payload has an invalid shape".into());
+    }
+    Ok(())
+}
+
+fn read_desktop_stats_file(path: &std::path::Path) -> Result<Option<String>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not inspect {}: {error}", path.display())),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "Desktop stats path {} is not a regular file",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_DESKTOP_STATS_BYTES as u64 {
+        return Err(format!(
+            "Desktop stats file {} is too large",
+            path.display()
+        ));
+    }
+    let file = fs::File::open(path)
+        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_DESKTOP_STATS_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    if bytes.len() > MAX_DESKTOP_STATS_BYTES {
+        return Err(format!(
+            "Desktop stats file {} is too large",
+            path.display()
+        ));
+    }
+    let payload = String::from_utf8(bytes)
+        .map_err(|_| format!("Desktop stats file {} is not UTF-8", path.display()))?;
+    validate_desktop_stats_payload(&payload)?;
+    Ok(Some(payload))
 }
 
 #[tauri::command]
 fn load_desktop_stats() -> Result<Option<String>, String> {
-    match fs::read_to_string(desktop_stats_path()) {
-        Ok(value) => Ok(Some(value)),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("Could not load desktop stats: {error}")),
+    let path = desktop_stats_path()?;
+    match read_desktop_stats_file(&path) {
+        Ok(Some(value)) => return Ok(Some(value)),
+        Ok(None) => {}
+        Err(error) => eprintln!("[STATS] primary stats file rejected: {error}"),
+    }
+    let backup = path.with_extension("json.bak");
+    match read_desktop_stats_file(&backup) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            // Both copies are unusable. Start from an empty in-memory store;
+            // the next valid save repairs the primary without trusting either.
+            eprintln!("[STATS] backup stats file rejected: {error}");
+            Ok(None)
+        }
     }
 }
 
 #[tauri::command]
 fn save_desktop_stats(payload: String) -> Result<(), String> {
-    if payload.len() > MAX_DESKTOP_STATS_BYTES {
-        return Err("Desktop stats payload is unexpectedly large".into());
-    }
+    validate_desktop_stats_payload(&payload)?;
 
-    let path = desktop_stats_path();
+    let path = desktop_stats_path()?;
     let parent = path
         .parent()
         .ok_or_else(|| "Desktop stats path has no parent directory".to_string())?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("Could not create desktop stats directory: {error}"))?;
-
-    let temporary_path = path.with_extension("json.tmp");
-    fs::write(&temporary_path, payload)
-        .map_err(|error| format!("Could not write desktop stats: {error}"))?;
-
-    #[cfg(target_os = "windows")]
-    if path.exists() {
-        fs::remove_file(&path)
-            .map_err(|error| format!("Could not replace desktop stats: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("Could not secure desktop stats directory: {error}"))?;
     }
 
-    fs::rename(&temporary_path, &path)
-        .map_err(|error| format!("Could not commit desktop stats: {error}"))
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".stats-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|error| format!("Could not create desktop stats temp file: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not secure desktop stats temp file: {error}"))?;
+    }
+    temporary
+        .as_file_mut()
+        .write_all(payload.as_bytes())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|error| format!("Could not write desktop stats: {error}"))?;
+
+    let backup_path = path.with_extension("json.bak");
+    if fs::symlink_metadata(&path).is_ok() {
+        if read_desktop_stats_file(&path).ok().flatten().is_some() {
+            if fs::symlink_metadata(&backup_path).is_ok() {
+                fs::remove_file(&backup_path)
+                    .map_err(|error| format!("Could not replace desktop stats backup: {error}"))?;
+            }
+            fs::rename(&path, &backup_path)
+                .map_err(|error| format!("Could not stage previous desktop stats: {error}"))?;
+        } else {
+            fs::remove_file(&path)
+                .map_err(|error| format!("Could not remove corrupt desktop stats: {error}"))?;
+        }
+    }
+    if let Err(error) = temporary.persist(&path) {
+        if fs::symlink_metadata(&backup_path).is_ok() && fs::symlink_metadata(&path).is_err() {
+            let _ = fs::rename(&backup_path, &path);
+        }
+        return Err(format!("Could not commit desktop stats: {error}"));
+    }
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Could not sync desktop stats directory: {error}"))?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -950,4 +1136,17 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_desktop_stats_payload;
+
+    #[test]
+    fn desktop_stats_payload_requires_expected_shape() {
+        assert!(validate_desktop_stats_payload(r#"{"buckets":[]}"#).is_ok());
+        assert!(validate_desktop_stats_payload("[]").is_err());
+        assert!(validate_desktop_stats_payload(r#"{"buckets":{}}"#).is_err());
+        assert!(validate_desktop_stats_payload("not-json").is_err());
+    }
 }
