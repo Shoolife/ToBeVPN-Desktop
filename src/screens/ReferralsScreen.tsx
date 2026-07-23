@@ -22,6 +22,7 @@ import CopyNotification, {
 } from "../components/CopyNotification";
 import MaterialIcon from "../components/MaterialIcon";
 import Spinner from "../components/Spinner";
+import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import { getSavedLang, t, tf, type StringKey } from "../i18n";
 import { useSession } from "../session/store";
 import "./ReferralsScreen.css";
@@ -464,9 +465,9 @@ export default function ReferralsScreen({
           <MaterialIcon name="arrowBack" size={23} />
         </button>
         <h1 className="referrals-topbar__title">{t("referrals_title")}</h1>
-        <button
-          type="button"
-          className="referrals-topbar__button"
+        <TopbarRefreshButton
+          label={t("refresh")}
+          loading={isInitialLoading || isRefreshing}
           onClick={() => void loadPage(true)}
           disabled={
             !session.isLinked ||
@@ -475,12 +476,7 @@ export default function ReferralsScreen({
             isLoadingMore ||
             isAssigningReferrer
           }
-          aria-label={t("refresh")}
-          title={t("refresh")}
-          aria-busy={isInitialLoading || isRefreshing}
-        >
-          <SmoothRefreshIcon spinning={isInitialLoading || isRefreshing} />
-        </button>
+        />
       </header>
 
       <main className="referrals-content">
@@ -694,38 +690,6 @@ export default function ReferralsScreen({
   );
 }
 
-function SmoothRefreshIcon({ spinning }: { spinning: boolean }) {
-  const [animating, setAnimating] = useState(spinning);
-  const stopRequestedRef = useRef(false);
-
-  useEffect(() => {
-    if (spinning) {
-      stopRequestedRef.current = false;
-      setAnimating(true);
-    } else if (animating) {
-      // Keep the same linear animation alive until its current revolution
-      // ends. Removing it exactly at 360° avoids the visible snap to 0°.
-      stopRequestedRef.current = true;
-    }
-  }, [animating, spinning]);
-
-  return (
-    <MaterialIcon
-      name="refresh"
-      size={22}
-      className={`referrals-refresh-icon ${
-        animating ? "referrals-refresh-icon--spinning" : ""
-      }`}
-      onAnimationIteration={() => {
-        if (stopRequestedRef.current && !spinning) {
-          stopRequestedRef.current = false;
-          setAnimating(false);
-        }
-      }}
-    />
-  );
-}
-
 function ReferralCenteredState({
   title,
   description,
@@ -841,46 +805,21 @@ function InvitedFriendsSheet({
   onDismiss: () => void;
 }) {
   const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
-  const sheetRef = useRef<HTMLDivElement>(null);
 
   const requestClose = useCallback(() => {
-    if (closing) return;
+    if (closingRef.current) return;
+    closingRef.current = true;
     setClosing(true);
     closeTimerRef.current = window.setTimeout(onDismiss, SHEET_EXIT_MS);
-  }, [closing, onDismiss]);
+  }, [onDismiss]);
 
   useEffect(() => {
-    const previousFocus =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    requestAnimationFrame(() => sheetRef.current?.focus());
-
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         requestClose();
-        return;
-      }
-      if (event.key !== "Tab" || !sheetRef.current) return;
-      const controls = [
-        ...sheetRef.current.querySelectorAll<HTMLElement>(
-          "button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex='-1'])",
-        ),
-      ];
-      if (controls.length === 0) {
-        event.preventDefault();
-        return;
-      }
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
       }
     };
 
@@ -890,7 +829,6 @@ function InvitedFriendsSheet({
       if (closeTimerRef.current !== null) {
         window.clearTimeout(closeTimerRef.current);
       }
-      previousFocus?.focus();
     };
   }, [requestClose]);
 
@@ -903,12 +841,10 @@ function InvitedFriendsSheet({
       onClick={(event) => event.target === event.currentTarget && requestClose()}
     >
       <div
-        ref={sheetRef}
         className={`referrals-sheet ${closing ? "referrals-sheet--closing" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="referrals-sheet-title"
-        tabIndex={-1}
       >
         <div className="referrals-sheet__handle" aria-hidden="true" />
         <div className="referrals-sheet__header">

@@ -16,8 +16,7 @@
   flex-shrink: 0;
 }
 
-.servers-topbar__back,
-.servers-topbar__refresh {
+.servers-topbar__back {
   background: none;
   border: none;
   color: var(--text);
@@ -32,27 +31,8 @@
   flex-shrink: 0;
 }
 
-.servers-topbar__back:hover,
-.servers-topbar__refresh:hover {
+.servers-topbar__back:hover {
   background: var(--surface-2);
-}
-
-.servers-topbar__refresh {
-  color: var(--text-muted);
-  margin-left: auto;
-}
-
-.servers-topbar__refresh:disabled {
-  cursor: default;
-  opacity: 0.7;
-}
-
-.servers-topbar__refresh-icon--spinning {
-  animation: servers-refresh-spin 0.9s linear infinite;
-}
-
-@keyframes servers-refresh-spin {
-  to { transform: rotate(360deg); }
 }
 
 .servers-topbar__title {

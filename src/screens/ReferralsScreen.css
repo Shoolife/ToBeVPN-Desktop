@@ -51,18 +51,6 @@
   letter-spacing: -0.01em;
 }
 
-.referrals-refresh-icon {
-  transform: rotate(0deg);
-}
-
-.referrals-refresh-icon--spinning {
-  animation: referrals-refresh-spin 900ms linear infinite;
-}
-
-@keyframes referrals-refresh-spin {
-  to { transform: rotate(360deg); }
-}
-
 .referrals-content {
   flex: 1;
   min-height: 0;

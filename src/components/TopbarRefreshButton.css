@@ -1,0 +1,37 @@
+.topbar-refresh {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.topbar-refresh:hover {
+  background: var(--surface-2);
+}
+
+.topbar-refresh:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.topbar-refresh__icon {
+  transform: rotate(0deg);
+}
+
+.topbar-refresh__icon--spinning {
+  animation: topbar-refresh-spin 0.9s linear infinite;
+}
+
+@keyframes topbar-refresh-spin {
+  to { transform: rotate(360deg); }
+}
