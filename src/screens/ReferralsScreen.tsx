@@ -28,7 +28,7 @@ import "./ReferralsScreen.css";
 
 const PAGE_SIZE = 20;
 const MIN_REFRESH_FEEDBACK_MS = 900;
-const DIALOG_EXIT_MS = 200;
+const SHEET_EXIT_MS = 240;
 const MAX_TELEGRAM_ID_DIGITS = 19;
 
 type ReferralData = {
@@ -847,7 +847,7 @@ function InvitedFriendsSheet({
   const requestClose = useCallback(() => {
     if (closing) return;
     setClosing(true);
-    closeTimerRef.current = window.setTimeout(onDismiss, DIALOG_EXIT_MS);
+    closeTimerRef.current = window.setTimeout(onDismiss, SHEET_EXIT_MS);
   }, [closing, onDismiss]);
 
   useEffect(() => {
