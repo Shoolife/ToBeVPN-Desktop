@@ -221,7 +221,10 @@
 /* Category tiles */
 .settings-tiles {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* Keep both columns equal even when one tile contains a long single-line
+     description. minmax(0, 1fr) lets the text shrink inside the card instead
+     of widening its whole grid column. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -235,6 +238,8 @@
   border: none;
   border-radius: 20px;
   padding: 16px;
+  min-width: 0;
+  overflow: hidden;
   cursor: pointer;
   transition: background 120ms, transform 80ms;
 }
@@ -252,6 +257,7 @@
   align-items: center;
   justify-content: space-between;
   width: 100%;
+  min-width: 0;
 }
 
 .settings-tile__icon {
@@ -279,6 +285,8 @@
 /* Push the label + description block to the bottom of the tile. */
 .settings-tile__label {
   margin-top: auto;
+  max-width: 100%;
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
   color: var(--text);
@@ -286,6 +294,9 @@
 
 .settings-tile__desc {
   margin-top: 2px;
+  display: block;
+  width: 100%;
+  min-width: 0;
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.3;
