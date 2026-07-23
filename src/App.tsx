@@ -12,6 +12,7 @@ import StatsScreen from "./screens/StatsScreen";
 import SpeedTestScreen from "./screens/SpeedTestScreen";
 import DevicesScreen from "./screens/DevicesScreen";
 import RoutingScreen from "./screens/RoutingScreen";
+import ReferralsScreen from "./screens/ReferralsScreen";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import UpdateBanner from "./components/UpdateBanner";
 import brandLogo from "./assets/onboarding_logo.svg";
@@ -43,7 +44,7 @@ import {
 import { selectBestVpnServer } from "./session/serverQuality";
 import "./App.css";
 
-export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing";
+export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing" | "referrals";
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
 
@@ -536,12 +537,20 @@ export default function App({
             onLoggedOut={() => { stopDeviceLinkPolling(); forceGoToPairing(); }}
             onDevices={() => goForward("devices")}
             onRouting={() => goForward("routing")}
+            onReferrals={() => goForward("referrals")}
           />
         );
       case "devices":
         return <DevicesScreen onBack={() => goBack("settings")} />;
       case "routing":
         return <RoutingScreen onBack={() => goBack("settings")} />;
+      case "referrals":
+        return (
+          <ReferralsScreen
+            onBack={() => goBack("settings")}
+            browserPreview={browserPreview}
+          />
+        );
       case "servers":
         return (
           <ServersScreen

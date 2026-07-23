@@ -49,7 +49,14 @@ if (requestedRoutingMode && routingModes.has(requestedRoutingMode as RoutingMode
     mode: requestedRoutingMode as RoutingMode,
   });
 }
-const previewScreens = new Set<Screen>(["splash", "home", "settings", "servers", "routing"]);
+const previewScreens = new Set<Screen>([
+  "splash",
+  "home",
+  "settings",
+  "servers",
+  "routing",
+  "referrals",
+]);
 const initialScreen: Screen =
   requestedPreviewScreen && previewScreens.has(requestedPreviewScreen as Screen)
     ? (requestedPreviewScreen as Screen)

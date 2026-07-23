@@ -22,13 +22,19 @@ import {
   saveAutoUpdateEnabled,
 } from "../session/updateStore";
 import Spinner from "../components/Spinner";
+import CopyNotification, {
+  useCopyNotification,
+} from "../components/CopyNotification";
+import MaterialIcon, {
+  type MaterialIconName,
+} from "../components/MaterialIcon";
 import brandLogo from "../assets/onboarding_logo.svg";
 import "./SettingsScreen.css";
 
 const SUPPORT_URL = "https://t.me/meow_meow_vpn?direct";
 
 // Which category the user is currently viewing. The main screen mirrors the
-// Android redesign: an account card plus a 2×2 grid of category tiles, with
+// Android redesign: an account card plus a compact category grid, with
 // theme/language/devices/about pushed onto their own sub-sections. Navigation
 // stays inside this component (a local section state) so the surrounding App
 // router and every existing settings control keep working unchanged.
@@ -105,14 +111,17 @@ export default function SettingsScreen({
   onLoggedOut,
   onDevices,
   onRouting,
+  onReferrals,
 }: {
   onBack: () => void;
   onLoggedOut: () => void;
   onDevices: () => void;
   onRouting: () => void;
+  onReferrals: () => void;
 }) {
   const session = useSession();
   const currentLang = getSavedLang();
+  const { notice: copyNotice, copyWithNotification } = useCopyNotification();
   const [section, setSection] = useState<Section>("main");
   // During a section change we keep the previous section mounted for one
   // animation cycle so the two cross-fade (old fades/scales out, new fades in),
@@ -514,9 +523,24 @@ export default function SettingsScreen({
                 <span className={`settings-account__plan settings-account__plan--${tier}`}>
                   {planLabel(session.userPlan, session.planDisplayName)}
                 </span>
-                <span className="settings-account__id">
-                  ID {session.telegramId !== null ? String(session.telegramId) : "—"}
-                </span>
+                {session.telegramId !== null ? (
+                  <button
+                    type="button"
+                    className="settings-account__id settings-account__id--button"
+                    onClick={() =>
+                      void copyWithNotification(
+                        String(session.telegramId),
+                        t("settings_telegram_id_copied"),
+                      )
+                    }
+                    aria-label={t("settings_copy_telegram_id")}
+                    title={t("settings_copy_telegram_id")}
+                  >
+                    ID {session.telegramId}
+                  </button>
+                ) : (
+                  <span className="settings-account__id">ID —</span>
+                )}
                 {showExpires && (
                   <span className="settings-account__expires">
                     {t("expires")} {formatDateDots(session.planExpiresAt!)}
@@ -528,7 +552,8 @@ export default function SettingsScreen({
               </div>
             </div>
 
-            {/* 2×2 category grid */}
+            {/* Category grid: Support + Referrals share a row, while About
+                stays as the full-width final card, matching Android. */}
             <div className="settings-tiles">
               <CategoryTile
                 accent="#8B7CF6"
@@ -553,12 +578,20 @@ export default function SettingsScreen({
                 iconPath="M21 12.22C21 6.73 16.74 3 12 3c-4.69 0-9 3.65-9 9.28-.6.34-1 .98-1 1.72v2c0 1.1.9 2 2 2h1v-6.1c0-3.87 3.13-7 7-7s7 3.13 7 7V19h-8v2h8c1.1 0 2-.9 2-2v-1.22c.59-.31 1-.92 1-1.64v-2.3c0-.7-.41-1.31-1-1.62zM9 14c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1zm6 0c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1zm3-2.97C17.52 8.18 15.04 6 12.05 6c-3.03 0-6.29 2.51-6.03 6.45 2.47-1.01 4.33-3.21 4.86-5.89 1.31 2.63 4 4.44 7.12 4.47z"
               />
               <CategoryTile
+                accent="#E65C9C"
+                label={t("referrals_title")}
+                desc={t("settings_referrals_desc")}
+                onClick={onReferrals}
+                iconName="groupAdd"
+              />
+              <CategoryTile
                 accent="#FF9800"
                 label={t("about")}
                 desc={t("settings_about_desc")}
                 onClick={() => goToSection("about")}
                 iconPath="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
                 iconEvenOdd
+                wide
               />
             </div>
           </>
@@ -906,6 +939,8 @@ export default function SettingsScreen({
           </div>
         </div>
       )}
+
+      <CopyNotification notice={copyNotice} />
     </div>
   );
 }
@@ -1095,17 +1130,24 @@ function CategoryTile({
   desc,
   onClick,
   iconPath,
+  iconName,
   iconEvenOdd = false,
+  wide = false,
 }: {
   accent: string;
   label: string;
   desc: string;
   onClick: () => void;
-  iconPath: string;
+  iconPath?: string;
+  iconName?: MaterialIconName;
   iconEvenOdd?: boolean;
+  wide?: boolean;
 }) {
   return (
-    <button className="settings-tile" onClick={onClick}>
+    <button
+      className={`settings-tile ${wide ? "settings-tile--wide" : ""}`}
+      onClick={onClick}
+    >
       <div className="settings-tile__top">
         <div
           className="settings-tile__icon"
@@ -1114,9 +1156,13 @@ function CategoryTile({
             background: `color-mix(in srgb, ${accent} 18%, transparent)`,
           }}
         >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-            <path d={iconPath} fillRule={iconEvenOdd ? "evenodd" : "nonzero"} clipRule="evenodd" />
-          </svg>
+          {iconName ? (
+            <MaterialIcon name={iconName} size={24} />
+          ) : (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+              <path d={iconPath} fillRule={iconEvenOdd ? "evenodd" : "nonzero"} clipRule="evenodd" />
+            </svg>
+          )}
         </div>
         <div className="settings-tile__chevron">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">

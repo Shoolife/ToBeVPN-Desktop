@@ -382,7 +382,7 @@ function getBrowserPreviewState(): {
 } {
   const params = new URLSearchParams(window.location.search);
   const mode = params.get("startup") ?? "checking";
-  const version = params.get("updateVersion") ?? "1.0.77";
+  const version = params.get("updateVersion") ?? "1.0.78";
   const info = { version, notes: "" };
 
   if (mode === "downloading") {

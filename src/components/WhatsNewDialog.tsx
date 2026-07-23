@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { t } from "../i18n";
 import { CURRENT_RELEASE_NOTES, type ReleaseHighlight } from "../releaseNotes";
+import MaterialIcon from "./MaterialIcon";
 import "./WhatsNewDialog.css";
 
 const CLOSE_ANIMATION_MS = 180;
@@ -123,18 +124,7 @@ function Highlight({ highlight }: { highlight: ReleaseHighlight }) {
   return (
     <div className="whats-new-highlight">
       <span className="whats-new-highlight__icon" aria-hidden="true">
-        {highlight.icon === "update" ? (
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M20 12a8 8 0 1 1-2.34-5.66" />
-            <path d="M20 4v5h-5" />
-            <path d="M12 7v5l3 2" />
-          </svg>
-        ) : (
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M6 3h9l3 3v15H6z" />
-            <path d="M14 3v4h4M9 12h6M9 16h4" />
-          </svg>
-        )}
+        <MaterialIcon name={highlight.icon} size={22} />
       </span>
       <span className="whats-new-highlight__copy">
         <span className="whats-new-highlight__title">{t(highlight.titleKey)}</span>

@@ -92,6 +92,42 @@ export interface LinkedDevicesDto {
   devices: LinkedDeviceDto[];
 }
 
+// --- Referrals ---
+
+export interface ReferralUserDto {
+  telegram_id?: number | null;
+  display_name?: string | null;
+}
+
+export interface ReferralListItemDto {
+  telegram_id?: number | null;
+  display_name?: string | null;
+  level?: number | null;
+  created_at?: string | null;
+}
+
+export interface ReferralsDto {
+  referral_code?: string | null;
+  referral_url?: string | null;
+  referrer?: ReferralUserDto | null;
+  total?: number | null;
+  // RemnaShop v0.9.4 shipped the typo `referals`; accept both spellings so
+  // desktop remains compatible when the server corrects the contract.
+  referrals?: ReferralListItemDto[] | null;
+  referals?: ReferralListItemDto[] | null;
+  limit?: number | null;
+  offset?: number | null;
+}
+
+export interface SetReferrerRequestDto {
+  referrer_id: number;
+}
+
+export interface SetReferrerResponseDto {
+  referrer_id?: number | null;
+  created?: boolean | null;
+}
+
 // --- Email ---
 
 export interface SaveEmailRequestDto {

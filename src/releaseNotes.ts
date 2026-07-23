@@ -1,7 +1,8 @@
 import type { StringKey } from "./i18n";
+import type { MaterialIconName } from "./components/MaterialIcon";
 
 export interface ReleaseHighlight {
-  icon: "update" | "notes";
+  icon: MaterialIconName;
   titleKey: StringKey;
   descriptionKey: StringKey;
 }
@@ -17,14 +18,19 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
-      icon: "update",
-      titleKey: "whats_new_stability_title",
-      descriptionKey: "whats_new_stability_description",
+      icon: "cardGiftcard",
+      titleKey: "whats_new_referrals_title",
+      descriptionKey: "whats_new_referrals_description",
     },
     {
-      icon: "notes",
-      titleKey: "whats_new_servers_title",
-      descriptionKey: "whats_new_servers_description",
+      icon: "groups",
+      titleKey: "whats_new_invited_friends_title",
+      descriptionKey: "whats_new_invited_friends_description",
+    },
+    {
+      icon: "personAdd",
+      titleKey: "whats_new_assign_inviter_title",
+      descriptionKey: "whats_new_assign_inviter_description",
     },
   ],
 };

@@ -30,8 +30,11 @@ import type {
   PanelResponse,
   PanelUserDto,
   PurchasePlansDto,
+  ReferralsDto,
   RefreshRequestDto,
   SaveEmailRequestDto,
+  SetReferrerRequestDto,
+  SetReferrerResponseDto,
   SessionTokensDto,
   TvPairCreateRequestDto,
   TvPairCreateResponseDto,
@@ -735,6 +738,24 @@ export function logoutDevice(): Promise<ApiResponse<unknown>> {
 
 export function getDevices(): Promise<ApiResponse<LinkedDevicesDto>> {
   return request("api/devices", { method: "GET" });
+}
+
+// --- Referrals ---
+
+export function getReferrals(
+  limit = 20,
+  offset = 0,
+): Promise<ApiResponse<ReferralsDto>> {
+  return request("api/referrals", { method: "GET" }, { limit, offset });
+}
+
+export function setReferrer(
+  req: SetReferrerRequestDto,
+): Promise<ApiResponse<SetReferrerResponseDto>> {
+  return request("api/device/referrer", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
 }
 
 // --- TV pairing ---
