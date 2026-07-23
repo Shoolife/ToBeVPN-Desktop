@@ -308,7 +308,7 @@
 
 .settings-tile--wide {
   grid-column: 1 / -1;
-  min-height: 108px;
+  min-height: 76px;
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) 30px;
   grid-template-rows: auto auto;
