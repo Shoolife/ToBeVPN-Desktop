@@ -59,6 +59,7 @@ import {
   type SubscriptionProfileResult,
 } from "./subscriptionPinger";
 import { getDeviceFingerprint } from "./fingerprint";
+import { recordDiagnosticEvent } from "./diagnostics";
 
 const DEVICE_TYPE = "desktop";
 const PLATFORM = "Desktop";
@@ -924,12 +925,23 @@ export async function syncSubscription(opts: { force?: boolean } = {}): Promise<
     const age = Date.now() - last;
     if (last > 0 && age >= 0 && age < readSubInterval()) return;
   }
-  const promise = runSyncSubscription(generation).finally(() => {
-    if (syncInFlight === promise) {
-      syncInFlight = null;
-      syncInFlightGeneration = null;
-    }
-  });
+  recordDiagnosticEvent("Subscription", `Subscription synchronization started; forced=${force}`, "D");
+  const promise = runSyncSubscription(generation)
+    .then(() => recordDiagnosticEvent("Subscription", "Subscription synchronization completed", "D"))
+    .catch((error) => {
+      recordDiagnosticEvent(
+        "Subscription",
+        `Subscription synchronization failed: ${String(error)}`,
+        "W",
+      );
+      throw error;
+    })
+    .finally(() => {
+      if (syncInFlight === promise) {
+        syncInFlight = null;
+        syncInFlightGeneration = null;
+      }
+    });
   syncInFlight = promise;
   syncInFlightGeneration = generation;
   return promise;
@@ -983,7 +995,8 @@ export async function pingHwidOnly(): Promise<boolean> {
     setSubscriptionUsageBlocked(shortUuid, result.isUsageBlocked);
     setUpdateRequired(result.isUpdateRequired);
     return result.isUsageBlocked;
-  } catch {
+  } catch (error) {
+    recordDiagnosticEvent("Subscription", `Access heartbeat failed: ${String(error)}`, "W");
     return wasBlocked;
   }
 }
@@ -1684,6 +1697,34 @@ export function sanitizePurchasePlansData(
           prices.push({ currency, amount });
         }
       }
+      const paymentMethods: PurchasePlansDto["plans"][number]["durations"][number]["payment_methods"] = [];
+      if (Array.isArray(duration.payment_methods)) {
+        for (const rawMethod of duration.payment_methods.slice(0, 16)) {
+          if (rawMethod === null || typeof rawMethod !== "object") continue;
+          const method = rawMethod as Record<string, unknown>;
+          const gatewayType = text(method.gateway_type, 64, true);
+          const currency = text(method.currency, 16, true);
+          const originalAmount = text(method.original_amount, 64, true);
+          const finalAmount = text(method.final_amount, 64, true);
+          const discountPercent = integer(method.discount_percent, 0, 100);
+          if (
+            !gatewayType ||
+            !currency ||
+            !originalAmount ||
+            !finalAmount ||
+            discountPercent === null ||
+            !/^\d{1,12}(?:\.\d{1,6})?$/.test(originalAmount) ||
+            !/^\d{1,12}(?:\.\d{1,6})?$/.test(finalAmount)
+          ) continue;
+          paymentMethods.push({
+            gateway_type: gatewayType,
+            currency,
+            original_amount: originalAmount,
+            final_amount: finalAmount,
+            discount_percent: discountPercent,
+          });
+        }
+      }
       durations.push({
         id: durationId,
         days,
@@ -1691,7 +1732,7 @@ export function sanitizePurchasePlansData(
         bot_start_param: text(duration.bot_start_param, 256) || null,
         bot_payment_url: httpsUrl(duration.bot_payment_url),
         prices,
-        payment_methods: [],
+        payment_methods: paymentMethods,
       });
     }
     if (durations.length === 0) continue;
@@ -2068,7 +2109,13 @@ export async function fetchVpnServers(
   const debug = import.meta.env.DEV;
   if (!shortUuid) return [];
   if (isBrowserPreviewRuntime()) return getCachedVpnServers();
+  recordDiagnosticEvent(
+    "Servers",
+    `Server list refresh started; access_ping=${!opts.skipAccessPing}`,
+    "D",
+  );
   if (getSubscriptionUsageBlocked()) {
+    recordDiagnosticEvent("Servers", "Server list cleared because access is blocked", "W");
     clearVpnServersMemoryCache(shortUuid);
     return [];
   }
@@ -2078,6 +2125,7 @@ export async function fetchVpnServers(
     : await pingHwidOnly().catch(() => getSubscriptionUsageBlocked());
   if (!isCurrent()) return currentCache();
   if (blocked) {
+    recordDiagnosticEvent("Servers", "Server list refresh stopped because access is blocked", "W");
     clearVpnServersMemoryCache(shortUuid);
     return [];
   }
@@ -2104,6 +2152,11 @@ export async function fetchVpnServers(
   }
 
   if (!profile) {
+    recordDiagnosticEvent(
+      "Servers",
+      `Subscription profile unavailable; cached_servers=${getCachedVpnServers().length}`,
+      "W",
+    );
     return getCachedVpnServers();
   }
 
@@ -2113,9 +2166,11 @@ export async function fetchVpnServers(
     // empty subscription is authoritative; otherwise retain the last known
     // server list for this same account.
     if (profile.isSuccessful) {
+      recordDiagnosticEvent("Servers", "Successful subscription response contains no servers", "W");
       clearVpnServersMemoryCache(shortUuid);
       return [];
     }
+    recordDiagnosticEvent("Servers", "Unsuccessful empty response ignored; retaining cached servers", "W");
     return getCachedVpnServers();
   }
 
@@ -2125,6 +2180,10 @@ export async function fetchVpnServers(
   );
 
   if (debug) console.log("[fetchVpnServers] Parsed servers:", servers.length, "of", links.length);
+  recordDiagnosticEvent(
+    "Servers",
+    `Server list parsed; links=${links.length}, valid_servers=${servers.length}`,
+  );
   const generation = writeVpnServersMemoryCache(shortUuid, servers);
 
   const metadataTask = enrichVpnServersWithNodes(cloneVpnServers(servers));
@@ -2139,6 +2198,7 @@ export async function fetchVpnServers(
     })
     .catch(() => {
       if (debug) console.warn("[fetchVpnServers] nodes enrichment failed");
+      recordDiagnosticEvent("Servers", "Server availability metadata refresh failed", "W");
     });
 
   const enriched = await settleStartupStep(
@@ -2151,9 +2211,16 @@ export async function fetchVpnServers(
     if (isCurrent() && vpnServersCacheGeneration === generation) {
       writeVpnServersMemoryCache(shortUuid, enriched);
     }
+    const onlineCount = enriched.filter((server) => server.isOnline).length;
+    recordDiagnosticEvent(
+      "Servers",
+      `Server availability metadata applied; online=${onlineCount}, total=${enriched.length}`,
+      "D",
+    );
     return cloneVpnServers(enriched);
   }
 
+  recordDiagnosticEvent("Servers", "Server metadata timed out; using parsed server list", "W");
   return cloneVpnServers(servers);
 }
 

@@ -13,6 +13,12 @@ use super::config::{self, ServerConfig, SOCKS_PORT, STATS_API_PORT};
 use super::state::{PingHostMapping, TrafficStats, VpnState};
 use super::{ConnectAttempt, CONNECT_CANCELLED};
 
+macro_rules! diagnostic_linux {
+    ($($arg:tt)*) => {{
+        crate::diagnostics::record_native("VPN-Linux", &format!($($arg)*));
+    }};
+}
+
 // ── TUN / routing constants (Linux) ───────────────────────────────
 const TUN_NAME: &str = "tobe0";
 const TUN_ADDR: &str = "198.18.0.1/15";
@@ -325,6 +331,7 @@ impl VpnManager {
         eprintln!("══════════════════════════════════════════════════");
         eprintln!("[VPN] START called");
         eprintln!("[VPN] Server configuration loaded");
+        diagnostic_linux!("VPN start requested; server configuration loaded");
 
         let prev_state = self.state.lock().await.clone();
         eprintln!("[VPN] Current state: {:?}", prev_state);
@@ -347,6 +354,7 @@ impl VpnManager {
             Ok(ip) => ip,
             Err(e) => {
                 eprintln!("[VPN] ERROR: pre-resolve failed: {e}");
+                diagnostic_linux!("Endpoint resolution failed: {e}");
                 if !matches!(&prev_state, VpnState::Connected) {
                     self.set_state(VpnState::Error { message: e.clone() }).await;
                 }
@@ -354,6 +362,7 @@ impl VpnManager {
             }
         };
         eprintln!("[VPN] Server address resolved");
+        diagnostic_linux!("Endpoint resolved successfully");
         let mut control_bypass_ips = match bypass_res {
             Ok(ips) => ips,
             Err(e) => return Err(e),
@@ -394,6 +403,7 @@ impl VpnManager {
         }
         self.set_state(VpnState::Connecting).await;
         eprintln!("[VPN] State -> Connecting");
+        diagnostic_linux!("Native state changed to Connecting");
 
         // Rewrite address to IP. SNI (server.sni) keeps the domain for Reality/TLS.
         let mut server = server;
@@ -459,11 +469,13 @@ impl VpnManager {
             .spawn()
             .map_err(|e| {
                 eprintln!("[VPN] ERROR: Failed to spawn xray: {e}");
+                diagnostic_linux!("Could not start VPN core: {e}");
                 format!("Failed to start xray: {e}")
             })?;
 
         let xray_pid = xray_child.id();
         eprintln!("[VPN] xray spawned OK, PID: {:?}", xray_pid);
+        diagnostic_linux!("VPN core process started");
 
         // Spawn stderr reader for logging
         if let Some(stderr) = xray_child.stderr.take() {
@@ -487,6 +499,7 @@ impl VpnManager {
         eprintln!("[VPN] Waiting for SOCKS port {} ...", SOCKS_PORT);
         if let Err(e) = wait_for_port(SOCKS_PORT, Duration::from_secs(10), attempt).await {
             eprintln!("[VPN] ERROR: SOCKS port not ready: {e}");
+            diagnostic_linux!("VPN core readiness check failed: {e}");
             self.force_stop().await;
             if attempt.is_cancelled() {
                 self.set_state(VpnState::Disconnected).await;
@@ -496,6 +509,7 @@ impl VpnManager {
             return Err(e);
         }
         eprintln!("[VPN] SOCKS port {} is open", SOCKS_PORT);
+        diagnostic_linux!("VPN core readiness check passed");
 
         // Verify xray is still alive
         {
@@ -537,6 +551,7 @@ impl VpnManager {
         eprintln!("[VPN] Starting TUN setup (pkexec) ...");
         if let Err(e) = self.start_tun(&server, &control_bypass_ips, attempt).await {
             eprintln!("[VPN] ERROR: TUN setup failed: {e}");
+            diagnostic_linux!("TUN and route setup failed: {e}");
             self.force_stop().await;
             if attempt.is_cancelled() {
                 self.set_state(VpnState::Disconnected).await;
@@ -546,6 +561,7 @@ impl VpnManager {
             return Err(e);
         }
         eprintln!("[VPN] TUN setup OK");
+        diagnostic_linux!("TUN and routes configured successfully");
 
         if attempt.is_cancelled() {
             self.force_stop().await;
@@ -554,6 +570,7 @@ impl VpnManager {
         }
         self.set_state(VpnState::Connected).await;
         eprintln!("[VPN] State -> Connected");
+        diagnostic_linux!("Native state changed to Connected");
 
         // Bump the session generation and spawn a watchdog so the UI doesn't
         // keep showing "Connected" if xray dies (OOM, killed, crashed). The
@@ -622,6 +639,7 @@ impl VpnManager {
                 };
                 if let Some(msg) = dead {
                     eprintln!("[VPN-WATCHDOG] {msg} — running force_stop");
+                    diagnostic_linux!("Watchdog detected an unexpected process stop: {msg}");
                     manager_clone.force_stop().await;
                     *state.lock().await = VpnState::Error {
                         message: format!("VPN process stopped unexpectedly: {msg}"),
@@ -639,6 +657,7 @@ impl VpnManager {
     /// Stop VPN gracefully.
     pub async fn stop(&self) -> Result<(), String> {
         eprintln!("[VPN] STOP called");
+        diagnostic_linux!("VPN stop requested");
         // Bump generation so any running watchdog from the previous Connected
         // session exits its loop and stops emitting "vpn-died" while we tear
         // things down on purpose.
@@ -650,6 +669,7 @@ impl VpnManager {
         self.force_stop().await;
         self.set_state(VpnState::Disconnected).await;
         eprintln!("[VPN] State -> Disconnected");
+        diagnostic_linux!("Native state changed to Disconnected");
         Ok(())
     }
 
@@ -1302,6 +1322,7 @@ echo "INSTALLED"
     /// Force-stop everything: kill processes, restore routing.
     async fn force_stop(&self) {
         eprintln!("[VPN] force_stop called");
+        diagnostic_linux!("Native VPN cleanup started");
         *self.stats_running.lock().await = false;
 
         let tun2socks_pid = self.tun2socks_pid.lock().await.take();
@@ -1335,6 +1356,7 @@ echo "INSTALLED"
             let _ = std::fs::remove_file(cache_dir().join("xray.json"));
             if helper_stopped {
                 eprintln!("[VPN] force_stop done (helper)");
+                diagnostic_linux!("Native VPN cleanup completed through helper");
                 return;
             }
             eprintln!("[VPN] Helper cleanup failed; trying inline cleanup");
@@ -1428,6 +1450,7 @@ echo "STOPPED"
         let _ = std::fs::remove_file(dir.join("start_tun.sh"));
         let _ = std::fs::remove_file(dir.join("stop_tun.sh"));
         eprintln!("[VPN] force_stop done");
+        diagnostic_linux!("Native VPN cleanup completed");
     }
 }
 

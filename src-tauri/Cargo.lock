@@ -492,8 +492,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -4607,9 +4609,10 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tobevpn-desktop"
-version = "1.0.78"
+version = "1.0.79"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "dirs 6.0.0",
  "gtk",
  "hostname",
@@ -4620,6 +4623,7 @@ dependencies = [
  "machine-uid",
  "minisign-verify",
  "os_info",
+ "regex",
  "reqwest 0.13.4",
  "rusqlite",
  "rustls",

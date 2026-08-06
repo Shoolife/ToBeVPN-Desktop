@@ -8,7 +8,7 @@
   justify-content: center;
   padding: 24px;
   background: var(--overlay);
-  backdrop-filter: blur(5px);
+  backdrop-filter: blur(4px);
   pointer-events: auto;
   animation: whats-new-overlay-in 180ms ease-out;
 }
@@ -27,7 +27,9 @@ html[data-window-frame="windows"] .whats-new-overlay {
   width: min(390px, 100%);
   max-height: 100%;
   box-sizing: border-box;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   overscroll-behavior: contain;
   padding: 28px 24px 22px;
   border: 1px solid var(--border);
@@ -116,10 +118,54 @@ html[data-window-frame="windows"] .whats-new-overlay {
   text-align: center;
 }
 
+.whats-new-dialog__list-shell {
+  position: relative;
+  min-height: 0;
+  max-height: min(330px, 44vh);
+}
+
 .whats-new-dialog__list {
+  max-height: min(330px, 44vh);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding: 3px 3px 18px;
+}
+
+.whats-new-dialog__list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.whats-new-dialog__scroll-arrow {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  width: 22px;
+  height: 22px;
+  transform: translateX(-50%);
+  color: var(--text-muted);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+
+.whats-new-dialog__scroll-arrow--top { top: -2px; }
+.whats-new-dialog__scroll-arrow--bottom { bottom: -2px; }
+.whats-new-dialog__scroll-arrow.is-visible { opacity: 1; }
+.whats-new-dialog__scroll-arrow svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .whats-new-highlight {

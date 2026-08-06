@@ -43,8 +43,16 @@
 }
 
 /* Server list */
-.servers-list {
+.servers-list-wrap {
+  position: relative;
   flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.servers-list {
+  height: 100%;
+  box-sizing: border-box;
   overflow-y: scroll;
   scrollbar-width: none;
   /* Right padding is 18 (visible) + 24 (scrollbar gutter, clipped by
@@ -52,6 +60,32 @@
      WebKitGTK ignores ::-webkit-scrollbar for vertical scrollbars. */
   padding: 8px 42px 24px 18px;
   margin-right: -24px;
+}
+
+.servers-scroll-arrow {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  width: 23px;
+  height: 23px;
+  transform: translateX(-50%);
+  color: var(--text-muted);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+
+.servers-scroll-arrow--top { top: 3px; }
+.servers-scroll-arrow--bottom { bottom: 3px; }
+.servers-scroll-arrow.is-visible { opacity: 1; }
+.servers-scroll-arrow svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .servers-list::-webkit-scrollbar {

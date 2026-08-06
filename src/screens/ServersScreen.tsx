@@ -90,7 +90,17 @@ export default function ServersScreen({
   const pingGenRef = useRef(0);
   const loadGenRef = useRef(0);
   const mountedRef = useRef(true);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [listTopFade, setListTopFade] = useState(false);
+  const [listBottomFade, setListBottomFade] = useState(false);
   const loading = serverLoading || pingLoading;
+
+  const updateListFades = useCallback(() => {
+    const element = listRef.current;
+    if (!element) return;
+    setListTopFade(element.scrollTop > 1);
+    setListBottomFade(element.scrollTop < element.scrollHeight - element.clientHeight - 1);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -221,6 +231,11 @@ export default function ServersScreen({
     });
   }, [previewServers, showServers]);
 
+  useEffect(() => {
+    const frame = requestAnimationFrame(updateListFades);
+    return () => cancelAnimationFrame(frame);
+  }, [servers.length, error, serverLoading, updateListFades]);
+
   return (
     <div className="servers-root">
       {/* Top bar */}
@@ -239,30 +254,35 @@ export default function ServersScreen({
         />
       </div>
 
-      {/* Server list / states */}
-      {loading && servers.length === 0 ? (
-        <div className="servers-list spinner-center">
+      {/* Server list / states. Only this middle section scrolls; the top bar
+          remains visible and the edge cues make additional rows discoverable. */}
+      <div className="servers-list-wrap">
+        <div
+          className={`servers-list ${loading && servers.length === 0 ? "spinner-center" : ""}`}
+          ref={listRef}
+          onScroll={updateListFades}
+          style={{
+            WebkitMaskImage: `linear-gradient(to bottom, ${listTopFade ? "transparent" : "#000"} 0, #000 38px, #000 calc(100% - 38px), ${listBottomFade ? "transparent" : "#000"} 100%)`,
+            maskImage: `linear-gradient(to bottom, ${listTopFade ? "transparent" : "#000"} 0, #000 38px, #000 calc(100% - 38px), ${listBottomFade ? "transparent" : "#000"} 100%)`,
+          }}
+        >
+        {loading && servers.length === 0 ? (
           <Spinner size={36} />
-        </div>
-      ) : error ? (
-        <div className="servers-list">
+        ) : error ? (
           <div className="server-item" style={{ justifyContent: "center" }}>
             <div className="server-item__info">
               <div className="server-item__name">{t("servers_load_error")}</div>
               <div className="server-item__country">{error}</div>
             </div>
           </div>
-        </div>
-      ) : servers.length === 0 ? (
-        <div className="servers-list">
+        ) : servers.length === 0 ? (
           <div className="server-item" style={{ justifyContent: "center" }}>
             <div className="server-item__info">
               <div className="server-item__name">{t("servers_empty")}</div>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="servers-list">
+        ) : (
+          <>
           <div
             className={[
               "server-item",
@@ -385,8 +405,16 @@ export default function ServersScreen({
               </div>
             );
           })}
+          </>
+        )}
         </div>
-      )}
+        <div className={`servers-scroll-arrow servers-scroll-arrow--top ${listTopFade ? "is-visible" : ""}`}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="18 15 12 9 6 15" /></svg>
+        </div>
+        <div className={`servers-scroll-arrow servers-scroll-arrow--bottom ${listBottomFade ? "is-visible" : ""}`}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+        </div>
+      </div>
     </div>
   );
 }

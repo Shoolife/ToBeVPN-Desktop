@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { exit } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
+import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import {
   forceCheckUpdate,
   retryUpdate,
@@ -726,9 +727,9 @@ export default function HomeScreen({
       )}
 
       {showBlockedDialog && (
-        <div className="home-trial-dialog-overlay" onClick={() => setShowBlockedDialog(false)}>
-          <div className="home-trial-dialog home-trial-dialog--centered" onClick={(e) => e.stopPropagation()}>
-            <button className="home-trial-dialog__close" onClick={() => setShowBlockedDialog(false)}>
+        <HomeOverlayDialog onDismiss={() => setShowBlockedDialog(false)} centered>
+          {(requestClose) => (<>
+            <button className="home-trial-dialog__close" onClick={() => requestClose()}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
               </svg>
@@ -746,20 +747,22 @@ export default function HomeScreen({
               <button
                 className="home-trial-dialog__btn home-trial-dialog__btn--primary"
                 onClick={() => {
-                  setShowBlockedDialog(false);
-                  void openUrl("https://t.me/meow_meow_vpn?direct").catch(() => {});
+                  requestClose(() => {
+                    setShowBlockedDialog(false);
+                    void openUrl("https://t.me/meow_meow_vpn?direct").catch(() => {});
+                  });
                 }}
               >
                 {t("block_appeal_button")}
               </button>
             </div>
-          </div>
-        </div>
+          </>)}
+        </HomeOverlayDialog>
       )}
 
       {showTrialInfo && (
-        <div className="home-trial-dialog-overlay" onClick={() => setShowTrialInfo(false)}>
-          <div className="home-trial-dialog" onClick={(e) => e.stopPropagation()}>
+        <HomeOverlayDialog onDismiss={() => setShowTrialInfo(false)}>
+          {(requestClose) => (<>
             <div className="home-trial-dialog__header">
               <span className="home-trial-dialog__icon">
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -774,25 +777,53 @@ export default function HomeScreen({
             <div className="home-trial-dialog__actions">
               <button
                 className="home-trial-dialog__btn home-trial-dialog__btn--secondary"
-                onClick={() => setShowTrialInfo(false)}
+                onClick={() => requestClose()}
               >
                 {t("cancel")}
               </button>
               <button
                 className="home-trial-dialog__btn home-trial-dialog__btn--primary"
                 onClick={() => {
-                  setShowTrialInfo(false);
-                  void openSubscription();
+                  requestClose(() => {
+                    setShowTrialInfo(false);
+                    void openSubscription();
+                  });
                 }}
               >
                 {t("trial_access_open_plans")}
               </button>
             </div>
-          </div>
-        </div>
+          </>)}
+        </HomeOverlayDialog>
       )}
 
       {updateRequired && <UpdateRequiredDialog />}
+    </div>
+  );
+}
+
+function HomeOverlayDialog({
+  children,
+  centered = false,
+  onDismiss,
+}: {
+  children: (requestClose: (afterClose?: () => void) => void) => ReactNode;
+  centered?: boolean;
+  onDismiss: () => void;
+}) {
+  const { closing, requestClose } = useAnimatedDialogClose(onDismiss);
+  return (
+    <div
+      className={`home-trial-dialog-overlay ${closing ? "home-trial-dialog-overlay--closing" : ""}`}
+      onClick={(event) => event.target === event.currentTarget && requestClose()}
+    >
+      <div
+        className={`home-trial-dialog ${centered ? "home-trial-dialog--centered" : ""} ${closing ? "home-trial-dialog--closing" : ""}`}
+        role="dialog"
+        aria-modal="true"
+      >
+        {children(requestClose)}
+      </div>
     </div>
   );
 }

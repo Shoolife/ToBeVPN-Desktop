@@ -3,7 +3,7 @@ run-name: Check Xray-core updates
 
 on:
   schedule:
-    - cron: '17 6 * * 1'
+    - cron: '17 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -14,35 +14,55 @@ jobs:
   check:
     runs-on: ubuntu-22.04
     steps:
-      - name: Compare upstream Xray-core with latest app release
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Compare upstream Xray-core with bundled version
         env:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_REPO: XTLS/Xray-core
         run: |
           set -euo pipefail
 
-          upstream_json=$(gh api "repos/${UPSTREAM_REPO}/releases/latest")
+          # /releases/latest excludes pre-releases. Xray-core currently marks
+          # new calendar releases as pre-releases, so inspect the full feed.
+          releases_json=$(gh api "repos/${UPSTREAM_REPO}/releases?per_page=20")
+          upstream_json=$(jq -c '[.[] | select(.draft == false)] | first' <<<"$releases_json")
+          if [ -z "$upstream_json" ] || [ "$upstream_json" = "null" ]; then
+            echo "::error::No published Xray-core release found"
+            exit 1
+          fi
+
           upstream_tag=$(jq -r '.tag_name' <<<"$upstream_json")
           upstream_url=$(jq -r '.html_url' <<<"$upstream_json")
           upstream_published=$(jq -r '.published_at' <<<"$upstream_json")
+          upstream_prerelease=$(jq -r '.prerelease' <<<"$upstream_json")
+          upstream_linux_digest=$(jq -r '.assets[] | select(.name == "Xray-linux-64.zip") | .digest // empty' <<<"$upstream_json")
+          upstream_windows_digest=$(jq -r '.assets[] | select(.name == "Xray-windows-64.zip") | .digest // empty' <<<"$upstream_json")
 
-          app_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest")
-          app_tag=$(jq -r '.tag_name' <<<"$app_json")
-          app_url=$(jq -r '.html_url' <<<"$app_json")
-          app_published=$(jq -r '.published_at' <<<"$app_json")
+          bundled_tag=$(jq -er '.version' .github/xray-core.json)
+          bundled_linux_asset=$(jq -er '.linux.asset' .github/xray-core.json)
+          bundled_linux_sha=$(jq -er '.linux.sha256' .github/xray-core.json)
+          bundled_windows_asset=$(jq -er '.windows.asset' .github/xray-core.json)
+          bundled_windows_sha=$(jq -er '.windows.sha256' .github/xray-core.json)
 
-          upstream_ts=$(date -u -d "$upstream_published" +%s)
-          app_ts=$(date -u -d "$app_published" +%s)
+          echo "Newest Xray-core: ${upstream_tag} (${upstream_published}, prerelease=${upstream_prerelease})"
+          echo "Bundled Xray-core: ${bundled_tag}"
 
-          echo "Upstream Xray-core: ${upstream_tag} (${upstream_published})"
-          echo "Latest app release: ${app_tag} (${app_published})"
+          metadata_matches=false
+          if [ "$bundled_tag" = "$upstream_tag" ] \
+            && [ "$bundled_linux_asset" = "Xray-linux-64.zip" ] \
+            && [ "$bundled_windows_asset" = "Xray-windows-64.zip" ] \
+            && [ "$upstream_linux_digest" = "sha256:${bundled_linux_sha}" ] \
+            && [ "$upstream_windows_digest" = "sha256:${bundled_windows_sha}" ]; then
+            metadata_matches=true
+          fi
 
-          if [ "$upstream_ts" -le "$app_ts" ]; then
-            echo "Latest app release was published after the latest Xray-core release."
+          if [ "$metadata_matches" = true ]; then
+            echo "Bundled Xray-core version and both archive SHA-256 values are current."
             exit 0
           fi
 
-          title="Xray-core ${upstream_tag} is newer than desktop ${app_tag}"
+          title="Xray-core ${upstream_tag} is available (bundled ${bundled_tag})"
           existing=$(gh issue list \
             --state open \
             --search "\"${title}\" in:title" \
@@ -55,7 +75,12 @@ jobs:
           fi
 
           cat > issue-body.md <<EOF
-          Upstream Xray-core ${upstream_tag} was published after the current desktop release ${app_tag}.
+          The newest published Xray-core release is ${upstream_tag}; the desktop build currently bundles ${bundled_tag}.
+
+          Upstream release status: prerelease=${upstream_prerelease}
+          Published: ${upstream_published}
+
+          The check compares the version actually pinned in \`.github/xray-core.json\`, not the publication date of the ToBeVPN release. It also verifies the official SHA-256 digests for Linux and Windows archives.
 
           Release rule:
           - keep Xray updates inside a normal app release;
@@ -65,11 +90,10 @@ jobs:
           Desktop release steps:
           1. Bump the desktop app patch version.
           2. Create and push the new \`v*\` tag.
-          3. Update the pinned Xray version and both archive SHA-256 values in the release workflow.
+          3. Update the version and both archive SHA-256 values in \`.github/xray-core.json\`.
           4. Verify Settings shows the bundled Xray version from the sidecar binary.
           5. Confirm Linux \`.deb\`, Windows installer, signatures, and \`latest.json\` are present.
 
-          Current app release: ${app_url}
           Upstream Xray-core release: ${upstream_url}
           EOF
 

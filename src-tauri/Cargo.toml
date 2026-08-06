@@ -1,6 +1,6 @@
 [package]
 name = "tobevpn-desktop"
-version = "1.0.78"
+version = "1.0.79"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -23,6 +23,8 @@ tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = "0.4"
+regex = "1"
 tokio = { version = "1", features = ["net", "time", "process", "sync", "macros", "io-util"] }
 hostname = "0.4"
 log = "0.4"

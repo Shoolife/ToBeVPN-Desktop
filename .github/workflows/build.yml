@@ -149,8 +149,9 @@ jobs:
           mkdir -p src-tauri/bin
           mkdir -p public/routing
 
-          XRAY_VERSION="v26.3.27"
-          XRAY_LINUX_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+          XRAY_VERSION=$(jq -er '.version' .github/xray-core.json)
+          XRAY_LINUX_ASSET=$(jq -er '.linux.asset' .github/xray-core.json)
+          XRAY_LINUX_SHA256=$(jq -er '.linux.sha256' .github/xray-core.json)
 
           download_verified_release_asset() {
             local repo="$1"
@@ -227,7 +228,7 @@ jobs:
 
           echo "Downloading Xray-core (Linux x64)..."
           curl -fsSL -o xray.zip \
-            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${XRAY_LINUX_ASSET}"
           echo "${XRAY_LINUX_SHA256}  xray.zip" | sha256sum -c -
           unzip -o xray.zip -d xray-extracted
           cp xray-extracted/xray src-tauri/bin/xray-x86_64-unknown-linux-gnu
@@ -368,8 +369,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path src-tauri/bin | Out-Null
           New-Item -ItemType Directory -Force -Path public/routing | Out-Null
 
-          $XrayVersion = "v26.3.27"
-          $XrayWindowsSha256 = "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad"
+          $xrayConfig = Get-Content ".github/xray-core.json" -Raw | ConvertFrom-Json
+          $XrayVersion = $xrayConfig.version
+          $XrayWindowsAsset = $xrayConfig.windows.asset
+          $XrayWindowsSha256 = $xrayConfig.windows.sha256
 
           function Download-VerifiedReleaseAsset {
             param(
@@ -462,7 +465,7 @@ jobs:
           }
 
           Write-Host "Downloading Xray-core (Windows x64)..."
-          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/download/$XrayVersion/Xray-windows-64.zip" -OutFile xray.zip
+          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/download/$XrayVersion/$XrayWindowsAsset" -OutFile xray.zip
           if ((Get-FileHash -Algorithm SHA256 xray.zip).Hash.ToLowerInvariant() -ne $XrayWindowsSha256) {
             throw "Xray-core $XrayVersion SHA-256 mismatch"
           }

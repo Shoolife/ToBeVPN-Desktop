@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { t } from "../i18n";
 import { useVpnRuntime } from "../session/vpnState";
+import { recordDiagnosticEvent } from "../session/diagnostics";
 import "./SpeedTestScreen.css";
 
 type Phase = "idle" | "ping" | "download" | "done";
@@ -219,11 +220,16 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
     setDownload(0);
     setError(null);
     setPhase("ping");
+    recordDiagnosticEvent(
+      "SpeedTest",
+      `Manual speed test started; path=${vpnConnected ? "vpn" : "direct"}`,
+    );
 
     try {
       const pingMs = await measurePing(controller.signal);
       if (controller.signal.aborted) return;
       if (pingMs < 0) {
+        recordDiagnosticEvent("SpeedTest", "Manual speed test failed during latency measurement", "W");
         setError(t("speed_no_connection"));
         setPhase("done");
         return;
@@ -244,8 +250,13 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
       setDownload(finalMbps);
       setCurrentSpeed(finalMbps);
       setPhase("done");
-    } catch {
+      recordDiagnosticEvent(
+        "SpeedTest",
+        `Manual speed test completed; ping_ms=${pingMs}, download_mbps=${finalMbps.toFixed(2)}, path=${vpnConnected ? "vpn" : "direct"}`,
+      );
+    } catch (error) {
       if (!controller.signal.aborted) {
+        recordDiagnosticEvent("SpeedTest", `Manual speed test failed: ${String(error)}`, "E");
         setError(t("speed_measure_failed"));
         setPhase("done");
       }
@@ -263,6 +274,7 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
     const controller = abortRef.current;
     abortRef.current = null;
     controller?.abort();
+    if (controller) recordDiagnosticEvent("SpeedTest", "Manual speed test stopped by the user", "W");
     runningRef.current = false;
     setPhase("idle");
     setCurrentSpeed(0);

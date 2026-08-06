@@ -19,18 +19,23 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   highlights: [
     {
       icon: "cardGiftcard",
-      titleKey: "whats_new_referrals_title",
-      descriptionKey: "whats_new_referrals_description",
+      titleKey: "whats_new_promocodes_title",
+      descriptionKey: "whats_new_promocodes_description",
     },
     {
-      icon: "groups",
-      titleKey: "whats_new_invited_friends_title",
-      descriptionKey: "whats_new_invited_friends_description",
+      icon: "info",
+      titleKey: "whats_new_diagnostics_title",
+      descriptionKey: "whats_new_diagnostics_description",
     },
     {
-      icon: "personAdd",
-      titleKey: "whats_new_assign_inviter_title",
-      descriptionKey: "whats_new_assign_inviter_description",
+      icon: "autoAwesome",
+      titleKey: "whats_new_connection_title",
+      descriptionKey: "whats_new_connection_description",
+    },
+    {
+      icon: "refresh",
+      titleKey: "whats_new_xray_title",
+      descriptionKey: "whats_new_xray_description",
     },
   ],
 };

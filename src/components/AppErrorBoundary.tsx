@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { t } from "../i18n";
+import { recordDiagnosticEvent } from "../session/diagnostics";
 
 interface Props {
   children: ReactNode;
@@ -20,6 +21,11 @@ export default class AppErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("[app] render crashed:", error, errorInfo);
+    recordDiagnosticEvent(
+      "App-Render",
+      `React render failed: ${error.name}: ${error.message}`,
+      "E",
+    );
   }
 
   private handleReload = () => {

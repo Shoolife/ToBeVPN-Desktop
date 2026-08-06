@@ -12,6 +12,9 @@ export default function WhatsNewDialog({ onClose }: { onClose: () => void }) {
   const closingRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
   const dialogRef = useRef<HTMLElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [listTopFade, setListTopFade] = useState(false);
+  const [listBottomFade, setListBottomFade] = useState(false);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
@@ -23,6 +26,13 @@ export default function WhatsNewDialog({ onClose }: { onClose: () => void }) {
       () => onCloseRef.current(),
       CLOSE_ANIMATION_MS,
     );
+  }, []);
+
+  const updateListFades = useCallback(() => {
+    const element = listRef.current;
+    if (!element) return;
+    setListTopFade(element.scrollTop > 1);
+    setListBottomFade(element.scrollTop < element.scrollHeight - element.clientHeight - 1);
   }, []);
 
   useEffect(() => {
@@ -60,6 +70,15 @@ export default function WhatsNewDialog({ onClose }: { onClose: () => void }) {
       if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
     };
   }, [requestClose]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(updateListFades);
+    window.addEventListener("resize", updateListFades);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", updateListFades);
+    };
+  }, [updateListFades]);
 
   const target = document.getElementById("overlay-root") ?? document.body;
   const versionLabel = t("whats_new_version").replace(
@@ -105,10 +124,26 @@ export default function WhatsNewDialog({ onClose }: { onClose: () => void }) {
         <div className="whats-new-dialog__version">{versionLabel}</div>
         <p className="whats-new-dialog__intro">{t("whats_new_intro")}</p>
 
-        <div className="whats-new-dialog__list">
-          {CURRENT_RELEASE_NOTES.highlights.map((highlight) => (
-            <Highlight key={highlight.titleKey} highlight={highlight} />
-          ))}
+        <div className="whats-new-dialog__list-shell">
+          <div
+            className="whats-new-dialog__list"
+            ref={listRef}
+            onScroll={updateListFades}
+            style={{
+              WebkitMaskImage: `linear-gradient(to bottom, ${listTopFade ? "transparent" : "#000"} 0, #000 34px, #000 calc(100% - 34px), ${listBottomFade ? "transparent" : "#000"} 100%)`,
+              maskImage: `linear-gradient(to bottom, ${listTopFade ? "transparent" : "#000"} 0, #000 34px, #000 calc(100% - 34px), ${listBottomFade ? "transparent" : "#000"} 100%)`,
+            }}
+          >
+            {CURRENT_RELEASE_NOTES.highlights.map((highlight) => (
+              <Highlight key={highlight.titleKey} highlight={highlight} />
+            ))}
+          </div>
+          <div className={`whats-new-dialog__scroll-arrow whats-new-dialog__scroll-arrow--top ${listTopFade ? "is-visible" : ""}`}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="18 15 12 9 6 15" /></svg>
+          </div>
+          <div className={`whats-new-dialog__scroll-arrow whats-new-dialog__scroll-arrow--bottom ${listBottomFade ? "is-visible" : ""}`}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+          </div>
         </div>
 
         <button type="button" className="whats-new-dialog__done" onClick={requestClose}>

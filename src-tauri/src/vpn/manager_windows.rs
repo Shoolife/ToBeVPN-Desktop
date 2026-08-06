@@ -9,12 +9,10 @@
 // human-readable error so the UI can prompt them to "Run as administrator".
 
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -49,26 +47,10 @@ fn app_data_dir() -> PathBuf {
     dir
 }
 
-// Append-only log under the per-user app dir so users can share diagnostics
-// when the GUI gives no useful error (Windows release builds discard stderr).
-fn log_path() -> PathBuf {
-    app_data_dir().join("tobevpn.log")
-}
-
 fn write_log_line(msg: &str) {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
-        .unwrap_or_else(|_| "0.000".into());
     // Plain eprintln, NOT log_win! — calling the macro here would recurse.
     eprintln!("{}", msg);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path())
-    {
-        let _ = writeln!(f, "[{ts}] {msg}");
-    }
+    crate::diagnostics::record_native("VPN-Windows", msg);
 }
 
 macro_rules! log_win {
@@ -213,8 +195,6 @@ impl VpnManager {
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
-        // Reset the diagnostic log so users sharing it only ship the latest run.
-        let _ = std::fs::remove_file(log_path());
         log_win!("══════════════════════════════════════════════════");
         log_win!("[VPN-WIN] START called");
 

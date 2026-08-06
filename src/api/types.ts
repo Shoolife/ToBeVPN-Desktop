@@ -128,6 +128,44 @@ export interface SetReferrerResponseDto {
   created?: boolean | null;
 }
 
+// --- Promocodes ---
+
+export interface PromocodeActivateRequestDto {
+  code: string;
+  request_id: string;
+}
+
+export interface PromocodePlanSnapshotDto {
+  name?: string | null;
+  duration?: number | null;
+}
+
+export interface PromocodeActivationResultDto {
+  request_id?: string | null;
+  code?: string | null;
+  reward_type?: string | null;
+  reward?: number | null;
+  plan_snapshot?: PromocodePlanSnapshotDto | null;
+}
+
+export interface PromocodeHistoryItemDto {
+  activation_id?: number | null;
+  promocode_id?: number | null;
+  code?: string | null;
+  reward_type?: string | null;
+  reward?: number | null;
+  plan_snapshot?: PromocodePlanSnapshotDto | null;
+  activated_at?: string | null;
+}
+
+export interface PromocodeHistoryDto {
+  telegram_id: number;
+  total: number;
+  limit: number;
+  offset: number;
+  promocodes?: PromocodeHistoryItemDto[] | null;
+}
+
 // --- Email ---
 
 export interface SaveEmailRequestDto {

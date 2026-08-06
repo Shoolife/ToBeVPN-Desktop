@@ -1,4 +1,5 @@
 mod autostart;
+mod diagnostics;
 #[cfg(target_os = "linux")]
 pub mod linux_update;
 mod vpn;
@@ -97,6 +98,7 @@ fn configure_windows_powershell_environment(
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
+    diagnostics::record_native("Window", "Main window show requested");
     if let Some(window) = app.get_webview_window("main") {
         eprintln!(
             "[TRAY] show_main_window: visible={:?} minimized={:?}",
@@ -247,6 +249,7 @@ fn rebuild_wayland_titlebar(window: &tauri::WebviewWindow) {
 }
 
 fn send_window_to_background(window: tauri::WebviewWindow) {
+    diagnostics::record_native("Window", "Main window hidden to system tray");
     restore_window_chrome(&window);
 
     #[cfg(target_os = "linux")]
@@ -947,6 +950,12 @@ pub fn run() {
                 .unwrap_or_else(|_| exe_dir.clone());
             let resource_bin_dir = resource_dir.join("bin");
 
+            let diagnostic_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+            diagnostics::initialize(diagnostic_data_dir, env!("CARGO_PKG_VERSION").to_string())?;
+
             let xray_in_exe_dir = exe_dir.join("xray").exists()
                 || exe_dir.join("xray.exe").exists()
                 || exe_dir.join("xray-x86_64-unknown-linux-gnu").exists()
@@ -1114,6 +1123,13 @@ pub fn run() {
             get_vpn_state,
             get_traffic_stats,
             get_xray_version,
+            diagnostics::get_diagnostic_state,
+            diagnostics::set_diagnostic_mode,
+            diagnostics::set_diagnostic_collection,
+            diagnostics::append_diagnostic_event,
+            diagnostics::list_diagnostic_logs,
+            diagnostics::export_diagnostic_log,
+            diagnostics::delete_diagnostic_log,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1121,6 +1137,7 @@ pub fn run() {
             // Only run on ExitRequested — fires once before shutdown while async
             // runtime is still alive. Avoids double-prompt for the pkexec password.
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                diagnostics::record_native("App", "Application exit requested");
                 if let Some(state) = app_handle.try_state::<AppVpn>() {
                     let manager = state.0.clone();
                     tauri::async_runtime::block_on(async move {

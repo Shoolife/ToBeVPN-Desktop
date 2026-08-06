@@ -18,6 +18,7 @@
 
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { recordDiagnosticEvent } from "./diagnostics";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { t } from "../i18n";
@@ -244,23 +245,28 @@ function clearDismiss() {
 }
 
 async function probeNetwork(): Promise<ProbeResult> {
+  recordDiagnosticEvent("Update", "Application update check started", "D");
   try {
     const update = await check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
     if (!update) {
       cachedUpdate = null;
       writeCache(null);
+      recordDiagnosticEvent("Update", "Application is on the latest available version", "D");
       return { kind: "current" };
     }
     cachedUpdate = update;
     const info = updateInfo(update);
     if (!info) {
       cachedUpdate = null;
+      recordDiagnosticEvent("Update", "Update metadata failed validation", "W");
       return { kind: "failed" };
     }
     clearCache();
+    recordDiagnosticEvent("Update", `Application update is available; version=${info.version}`);
     return { kind: "available", info };
   } catch (e) {
     console.warn("[updateStore] check failed:", e);
+    recordDiagnosticEvent("Update", `Application update check failed: ${String(e)}`, "W");
     return { kind: "failed" };
   }
 }
@@ -384,6 +390,10 @@ export async function startUpdateDownload(): Promise<void> {
   if (current.kind !== "available") return;
   const generation = ++operationGeneration;
   const info = current.info;
+  recordDiagnosticEvent(
+    "Update",
+    `Application update installation started; version=${info.version}, platform=${isLinuxDesktop() ? "linux" : "windows"}`,
+  );
   setState({
     kind: "downloading",
     info,
@@ -401,10 +411,12 @@ export async function startUpdateDownload(): Promise<void> {
       if (generation !== operationGeneration) return;
       clearDismiss();
       setState({ kind: "ready", info });
+      recordDiagnosticEvent("Update", "Linux package update installed; relaunch requested");
       await relaunch();
     } catch (e) {
       if (generation !== operationGeneration) return;
       console.warn("[updateStore] Linux update install failed:", e);
+      recordDiagnosticEvent("Update", `Linux package update failed: ${String(e)}`, "E");
       setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
     }
     return;
@@ -416,6 +428,7 @@ export async function startUpdateDownload(): Promise<void> {
       update = await check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
     } catch (e) {
       console.warn("[updateStore] update re-check failed:", e);
+      recordDiagnosticEvent("Update", `Update metadata re-check failed: ${String(e)}`, "E");
       setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
       return;
     }
@@ -472,6 +485,10 @@ export async function startUpdateDownload(): Promise<void> {
       switch (event.event) {
         case "Started":
           total = event.data.contentLength ?? 0;
+          recordDiagnosticEvent(
+            "Update",
+            `Update download started; total_mib=${(total / (1024 * 1024)).toFixed(2)}`,
+          );
           if (
             generation === operationGeneration &&
             snapshot.state.kind === "downloading"
@@ -490,6 +507,10 @@ export async function startUpdateDownload(): Promise<void> {
         case "Finished":
           downloadFinished = true;
           downloaded = total > 0 ? total : downloaded;
+          recordDiagnosticEvent(
+            "Update",
+            `Update download completed; downloaded_mib=${(downloaded / (1024 * 1024)).toFixed(2)}`,
+          );
           if (
             generation === operationGeneration &&
             snapshot.state.kind === "downloading"
@@ -511,10 +532,12 @@ export async function startUpdateDownload(): Promise<void> {
     if (generation !== operationGeneration) return;
     clearDismiss();
     setState({ kind: "ready", info });
+    recordDiagnosticEvent("Update", "Application update installed; relaunch requested");
     await relaunch();
   } catch (e) {
     if (generation !== operationGeneration) return;
     console.warn("[updateStore] update download/install failed:", e);
+    recordDiagnosticEvent("Update", `Application update install failed: ${String(e)}`, "E");
     setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
   }
 }

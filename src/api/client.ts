@@ -29,6 +29,9 @@ import type {
   PanelNodeDto,
   PanelResponse,
   PanelUserDto,
+  PromocodeActivateRequestDto,
+  PromocodeActivationResultDto,
+  PromocodeHistoryDto,
   PurchasePlansDto,
   ReferralsDto,
   RefreshRequestDto,
@@ -753,6 +756,24 @@ export function setReferrer(
   req: SetReferrerRequestDto,
 ): Promise<ApiResponse<SetReferrerResponseDto>> {
   return request("api/device/referrer", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+// --- Promocodes ---
+
+export function getAppliedPromocodes(
+  limit = 20,
+  offset = 0,
+): Promise<ApiResponse<PromocodeHistoryDto>> {
+  return request("api/user/promocodes", { method: "GET" }, { limit, offset });
+}
+
+export function activatePromocode(
+  req: PromocodeActivateRequestDto,
+): Promise<ApiResponse<PromocodeActivationResultDto>> {
+  return request("api/user/promocodes/activate", {
     method: "POST",
     body: JSON.stringify(req),
   });

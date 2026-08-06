@@ -23,13 +23,14 @@ import CopyNotification, {
 import MaterialIcon from "../components/MaterialIcon";
 import Spinner from "../components/Spinner";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
+import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import { getSavedLang, t, tf, type StringKey } from "../i18n";
 import { useSession } from "../session/store";
 import "./ReferralsScreen.css";
 
 const PAGE_SIZE = 20;
 const MIN_REFRESH_FEEDBACK_MS = 900;
-const SHEET_EXIT_MS = 240;
+const SHEET_EXIT_MS = 300;
 const MAX_TELEGRAM_ID_DIGITS = 19;
 
 type ReferralData = {
@@ -228,6 +229,26 @@ function invitedCountText(total: number): string {
   return tf(key, total);
 }
 
+function invitedCountLabel(total: number): string {
+  if (getSavedLang() !== "ru") {
+    return t(
+      total === 1
+        ? "referrals_invited_label_one"
+        : "referrals_invited_label_other",
+    );
+  }
+
+  const mod10 = total % 10;
+  const mod100 = total % 100;
+  const key: StringKey =
+    mod10 === 1 && mod100 !== 11
+      ? "referrals_invited_label_one"
+      : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)
+        ? "referrals_invited_label_few"
+        : "referrals_invited_label_many";
+  return t(key);
+}
+
 function formatReferralDate(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const date = new Date(raw);
@@ -276,6 +297,9 @@ export default function ReferralsScreen({
   );
   const [listOpen, setListOpen] = useState(
     previewParams?.get("sheet") === "1",
+  );
+  const [rewardsOpen, setRewardsOpen] = useState(
+    previewParams?.get("rewards") === "1",
   );
   const { notice: copyNotice, copyWithNotification } = useCopyNotification();
   const closeList = useCallback(() => setListOpen(false), []);
@@ -631,14 +655,25 @@ export default function ReferralsScreen({
               <ReferralSummarySkeleton />
             ) : (
               <section className="referrals-card referrals-summary">
-                <div className="referrals-summary__row">
-                  <span className="referrals-icon referrals-icon--blue" aria-hidden="true">
-                    <MaterialIcon name="groups" size={26} />
-                  </span>
-                  <div>
-                    <strong>{data.total}</strong>
-                    <span>{invitedCountText(data.total)}</span>
+                <div className="referrals-summary__header">
+                  <div className="referrals-summary__row">
+                    <span className="referrals-icon referrals-icon--blue" aria-hidden="true">
+                      <MaterialIcon name="groups" size={26} />
+                    </span>
+                    <div>
+                      <strong>{data.total}</strong>
+                      <span>{invitedCountLabel(data.total)}</span>
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    className="referrals-summary__info"
+                    onClick={() => setRewardsOpen(true)}
+                    aria-label={t("referrals_rewards_info_button")}
+                    title={t("referrals_rewards_info_button")}
+                  >
+                    <MaterialIcon name="info" size={22} />
+                  </button>
                 </div>
                 <button
                   type="button"
@@ -671,6 +706,10 @@ export default function ReferralsScreen({
           onLoadMore={() => void loadPage(false)}
           onDismiss={closeList}
         />
+      )}
+
+      {rewardsOpen && (
+        <ReferralRewardsDialog onDismiss={() => setRewardsOpen(false)} />
       )}
 
       {pendingReferrerId !== null && (
@@ -907,12 +946,13 @@ function ReferrerConfirmationDialog({
   onDismiss: () => void;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const { closing, requestClose } = useAnimatedDialogClose(onDismiss);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onDismiss();
+        requestClose();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -920,17 +960,17 @@ function ReferrerConfirmationDialog({
       dialogRef.current?.querySelector<HTMLButtonElement>("button")?.focus(),
     );
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onDismiss]);
+  }, [requestClose]);
 
   const target = document.getElementById("overlay-root") ?? document.body;
   return createPortal(
     <div
-      className="referrals-confirm-overlay"
-      onClick={(event) => event.target === event.currentTarget && onDismiss()}
+      className={`referrals-confirm-overlay ${closing ? "referrals-confirm-overlay--closing" : ""}`}
+      onClick={(event) => event.target === event.currentTarget && requestClose()}
     >
       <div
         ref={dialogRef}
-        className="referrals-confirm"
+        className={`referrals-confirm ${closing ? "referrals-confirm--closing" : ""}`}
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="referrals-confirm-title"
@@ -950,18 +990,112 @@ function ReferrerConfirmationDialog({
           <button
             type="button"
             className="referrals-secondary-button"
-            onClick={onDismiss}
+            onClick={() => requestClose()}
           >
             {t("cancel")}
           </button>
           <button
             type="button"
             className="referrals-primary-button"
-            onClick={onConfirm}
+            onClick={() => requestClose(onConfirm)}
           >
             {t("referrals_referrer_confirm")}
           </button>
         </div>
+      </div>
+    </div>,
+    target,
+  );
+}
+
+function ReferralRewardsDetails() {
+  return (
+    <div className="referrals-rewards">
+      <div className="referrals-rewards__hero" aria-hidden="true">
+        <MaterialIcon name="autoAwesome" size={30} />
+      </div>
+      <h2 id="referrals-rewards-dialog-title">
+        {t("referrals_rewards_dialog_title")}
+      </h2>
+      <p className="referrals-rewards__description">
+        {t("referrals_rewards_description")}
+      </p>
+      <div className="referrals-rewards__tiers">
+        <div className="referrals-rewards__tier">
+          <span
+            className="referrals-rewards__tier-icon referrals-rewards__tier-icon--direct"
+            aria-hidden="true"
+          >
+            <MaterialIcon name="groups" size={18} />
+          </span>
+          <span className="referrals-rewards__label">
+            {t("referrals_rewards_direct")}
+          </span>
+          <strong>{t("referrals_rewards_direct_value")}</strong>
+        </div>
+        <div className="referrals-rewards__tier">
+          <span
+            className="referrals-rewards__tier-icon referrals-rewards__tier-icon--indirect"
+            aria-hidden="true"
+          >
+            <MaterialIcon name="groupAdd" size={18} />
+          </span>
+          <span className="referrals-rewards__label">
+            {t("referrals_rewards_indirect")}
+          </span>
+          <strong>{t("referrals_rewards_indirect_value")}</strong>
+        </div>
+      </div>
+      <p className="referrals-rewards__note">
+        {t("referrals_rewards_note")}
+      </p>
+    </div>
+  );
+}
+
+function ReferralRewardsDialog({
+  onDismiss,
+}: {
+  onDismiss: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const { closing, requestClose } = useAnimatedDialogClose(onDismiss);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        requestClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    requestAnimationFrame(() =>
+      dialogRef.current?.querySelector<HTMLButtonElement>("button")?.focus(),
+    );
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [requestClose]);
+
+  const target = document.getElementById("overlay-root") ?? document.body;
+  return createPortal(
+    <div
+      className={`referrals-confirm-overlay ${closing ? "referrals-confirm-overlay--closing" : ""}`}
+      onClick={(event) => event.target === event.currentTarget && requestClose()}
+    >
+      <div
+        ref={dialogRef}
+        className={`referrals-rewards-dialog ${closing ? "referrals-rewards-dialog--closing" : ""}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="referrals-rewards-dialog-title"
+      >
+        <ReferralRewardsDetails />
+        <button
+          type="button"
+          className="referrals-primary-button referrals-rewards-dialog__close"
+          onClick={() => requestClose()}
+        >
+          {t("referrals_rewards_close")}
+        </button>
       </div>
     </div>,
     target,

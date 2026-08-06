@@ -80,7 +80,7 @@ const PURCHASE_PLANS_CACHE_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 
 const PREVIEW_PURCHASE_PLANS: PurchasePlansDto = {
   telegram_id: 100000001,
-  effective_discount_percent: 0,
+  effective_discount_percent: 10,
   plans: [
     createPreviewPlan(1, "Стандарт", 100, 3, 1),
     createPreviewPlan(2, "Оптимальный", 250, 5, 2),
@@ -95,6 +95,8 @@ interface PlanRow {
   title: string;
   description: string;
   priceDisplay: string;
+  originalPriceDisplay: string | null;
+  discountPercent: number;
   paymentUrl: string | null;
 }
 
@@ -147,7 +149,22 @@ function createPreviewPlan(
           { currency: "USD", amount: (rub / 95).toFixed(2) },
           { currency: "XTR", amount: String(Math.round(rub / 1.3)) },
         ],
-        payment_methods: [],
+        payment_methods: [
+          {
+            gateway_type: "CRYPTOMUS",
+            currency: "RUB",
+            original_amount: String(rub),
+            final_amount: String(Math.round(rub * 0.9)),
+            discount_percent: 10,
+          },
+          {
+            gateway_type: "TELEGRAM_STARS",
+            currency: "XTR",
+            original_amount: String(Math.round(rub / 1.3)),
+            final_amount: String(Math.round((rub / 1.3) * 0.9)),
+            discount_percent: 10,
+          },
+        ],
       };
     }),
   };
@@ -306,24 +323,77 @@ function formatFallbackPrice(rubPrice: number, isRu: boolean): string {
   return formatStars(String(Math.round(rubPrice / 1.3)));
 }
 
-function formatDurationPrice(duration: PurchaseDurationDto, isRu: boolean): string {
-  const map = new Map(duration.prices.map((p) => [p.currency, p.amount] as const));
-  if (isRu) {
-    const rub = map.get("RUB");
-    if (rub) return formatRub(rub);
-    const usd = map.get("USD");
-    if (usd) return formatUsd(usd);
-    const xtr = map.get("XTR");
-    if (xtr) return formatStars(xtr);
-    return t("plan_unknown_name");
+function formatCurrency(amount: string, currency: string): string {
+  switch (currency.trim().toLocaleUpperCase("en-US")) {
+    case "RUB": return formatRub(amount);
+    case "USD": return formatUsd(amount);
+    case "XTR": return formatStars(amount);
+    default: return `${amount} ${currency}`.trim();
   }
-  const usd = map.get("USD");
-  if (usd) return formatUsd(usd);
-  const rub = map.get("RUB");
-  if (rub) return formatRub(rub);
-  const xtr = map.get("XTR");
-  if (xtr) return formatStars(xtr);
-  return t("plan_unknown_name");
+}
+
+interface ResolvedDurationPrice {
+  priceDisplay: string;
+  originalPriceDisplay: string | null;
+  discountPercent: number;
+}
+
+function resolveDurationPrice(
+  duration: PurchaseDurationDto,
+  isRu: boolean,
+): ResolvedDurationPrice {
+  // Keep the same server-price priority as Android. The amount itself is
+  // always taken from payment_methods[].final_amount; the client never
+  // recalculates a discount or its currency conversion.
+  const preferredCurrencies = isRu ? ["RUB", "USD", "XTR"] : ["USD", "RUB", "XTR"];
+  const methods = duration.payment_methods.filter(
+    (method) =>
+      method.currency.trim() &&
+      method.original_amount.trim() &&
+      method.final_amount.trim(),
+  );
+  const method = preferredCurrencies
+    .map((currency) =>
+      methods.find((candidate) => candidate.currency.toLocaleUpperCase("en-US") === currency),
+    )
+    .find((candidate) => candidate !== undefined) ?? methods[0];
+  if (method) {
+    const original = Number(method.original_amount);
+    const final = Number(method.final_amount);
+    const discountPercent = Math.min(100, Math.max(0, Math.trunc(method.discount_percent)));
+    const hasDiscount =
+      discountPercent > 0 &&
+      Number.isFinite(original) &&
+      Number.isFinite(final) &&
+      final < original;
+    return {
+      priceDisplay: formatCurrency(method.final_amount, method.currency),
+      originalPriceDisplay: hasDiscount
+        ? formatCurrency(method.original_amount, method.currency)
+        : null,
+      discountPercent: hasDiscount ? discountPercent : 0,
+    };
+  }
+
+  const prices = duration.prices.filter(
+    (price) => price.currency.trim() && price.amount.trim(),
+  );
+  const price = preferredCurrencies
+    .map((currency) =>
+      prices.find((candidate) => candidate.currency.toLocaleUpperCase("en-US") === currency),
+    )
+    .find((candidate) => candidate !== undefined) ?? prices[0];
+  return price
+    ? {
+        priceDisplay: formatCurrency(price.amount, price.currency),
+        originalPriceDisplay: null,
+        discountPercent: 0,
+      }
+    : {
+        priceDisplay: t("plan_unknown_name"),
+        originalPriceDisplay: null,
+        discountPercent: 0,
+      };
 }
 
 function planDescription(plan: PurchasePlanDto | null, masked = false): string {
@@ -360,6 +430,8 @@ function buildTabs(data: PurchasePlansDto | null, isRu: boolean, masked = false)
           title: planTitle(d.days),
           description: desc,
           priceDisplay: masked ? t("plan_unknown_name") : formatFallbackPrice(d.rubPrice, isRu),
+          originalPriceDisplay: null,
+          discountPercent: 0,
           paymentUrl: null,
         })),
       },
@@ -373,13 +445,22 @@ function buildTabs(data: PurchasePlansDto | null, isRu: boolean, masked = false)
       periods: [...sourcePlan.durations]
         .filter((d) => d.days > 0)
         .sort((a, b) => a.order_index - b.order_index)
-        .map((d) => ({
-          key: `${sourcePlan.id}:${planKey(d.days)}`,
-          title: planTitle(d.days),
-          description: desc,
-          priceDisplay: masked ? t("plan_unknown_name") : formatDurationPrice(d, isRu),
-          paymentUrl: masked ? null : safePaymentUrl(d.bot_payment_url),
-        })),
+        .map((d) => {
+          const price = masked
+            ? {
+                priceDisplay: t("plan_unknown_name"),
+                originalPriceDisplay: null,
+                discountPercent: 0,
+              }
+            : resolveDurationPrice(d, isRu);
+          return {
+            key: `${sourcePlan.id}:${planKey(d.days)}`,
+            title: planTitle(d.days),
+            description: desc,
+            ...price,
+            paymentUrl: masked ? null : safePaymentUrl(d.bot_payment_url),
+          };
+        }),
     };
   });
 }
@@ -484,7 +565,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       setOpenError(null);
       qrClosingRef.current = false;
       qrCloseTimerRef.current = null;
-    }, 200);
+    }, 180);
   };
 
   useEffect(() => {
@@ -745,7 +826,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     purchaseAttemptRef.current += 1;
     purchaseOpeningRef.current = false;
     setClosing(true);
-    dismissTimerRef.current = window.setTimeout(() => onDismiss(), 240);
+    dismissTimerRef.current = window.setTimeout(() => onDismiss(), 300);
   };
 
   useEffect(() => {
@@ -819,7 +900,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           purchaseAttemptRef.current += 1;
           purchaseOpeningRef.current = false;
           setPurchaseOpening(false);
-          onDismiss();
+          handleClose();
         }
         return;
       }
@@ -944,7 +1025,15 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
         <div className="sub-plan__title">{row.title}</div>
         <div className="sub-plan__desc">{row.description}</div>
       </div>
-      <div className="sub-plan__price">{row.priceDisplay}</div>
+      <div className="sub-plan__price-column">
+        {row.originalPriceDisplay && row.discountPercent > 0 && (
+          <div className="sub-plan__discount">
+            <span className="sub-plan__original-price">{row.originalPriceDisplay}</span>
+            <span className="sub-plan__discount-percent">−{row.discountPercent}%</span>
+          </div>
+        )}
+        <div className="sub-plan__price">{row.priceDisplay}</div>
+      </div>
     </div>
   ));
 
@@ -997,6 +1086,19 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           <div className="sub-sheet__divider" />
 
           <div className="sub-sheet__section-title">{t("available_plans")}</div>
+
+          {!plansLoading &&
+            !plansFromCache &&
+            plansData &&
+            plansData.effective_discount_percent > 0 && (
+              <div className="sub-discount-banner">
+                <span aria-hidden="true">%</span>
+                {tf(
+                  "purchase_discount_applied",
+                  Math.min(100, Math.max(0, Math.trunc(plansData.effective_discount_percent))),
+                )}
+              </div>
+            )}
 
           {plansLoading ? (
             <div className="sub-sheet__loading">

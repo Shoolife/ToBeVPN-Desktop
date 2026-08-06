@@ -1,0 +1,11 @@
+{
+  "version": "v26.7.28",
+  "linux": {
+    "asset": "Xray-linux-64.zip",
+    "sha256": "8195d909f1109b8f3d99eefe401a3c451d7bf4af71f24d3815420f77e5dd2a40"
+  },
+  "windows": {
+    "asset": "Xray-windows-64.zip",
+    "sha256": "c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1"
+  }
+}

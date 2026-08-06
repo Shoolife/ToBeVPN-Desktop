@@ -22,11 +22,7 @@ export function useCopyNotification() {
     [],
   );
 
-  const copyWithNotification = useCallback(
-    async (value: string, message: string): Promise<boolean> => {
-      const copied = await copyText(value);
-      if (!copied) return false;
-
+  const showNotification = useCallback((message: string) => {
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
       const nextNotice = {
         id: ++noticeIdRef.current,
@@ -39,12 +35,19 @@ export function useCopyNotification() {
         );
         timerRef.current = null;
       }, NOTICE_DURATION_MS);
+  }, []);
+
+  const copyWithNotification = useCallback(
+    async (value: string, message: string): Promise<boolean> => {
+      const copied = await copyText(value);
+      if (!copied) return false;
+      showNotification(message);
       return true;
     },
-    [],
+    [showNotification],
   );
 
-  return { notice, copyWithNotification };
+  return { notice, copyWithNotification, showNotification };
 }
 
 export default function CopyNotification({

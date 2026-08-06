@@ -13,6 +13,7 @@ import SpeedTestScreen from "./screens/SpeedTestScreen";
 import DevicesScreen from "./screens/DevicesScreen";
 import RoutingScreen from "./screens/RoutingScreen";
 import ReferralsScreen from "./screens/ReferralsScreen";
+import PromocodesScreen from "./screens/PromocodesScreen";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import UpdateBanner from "./components/UpdateBanner";
 import brandLogo from "./assets/onboarding_logo.svg";
@@ -42,9 +43,13 @@ import {
   subscribeServerSelection,
 } from "./session/lastServer";
 import { selectBestVpnServer } from "./session/serverQuality";
+import {
+  initializeDiagnostics,
+  recordDiagnosticEvent,
+} from "./session/diagnostics";
 import "./App.css";
 
-export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing" | "referrals";
+export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing" | "referrals" | "promocodes";
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
 
@@ -188,6 +193,42 @@ export default function App({
     if (useWindowsFrame) document.documentElement.dataset.windowFrame = "windows";
     else delete document.documentElement.dataset.windowFrame;
   }, [useWindowsFrame]);
+
+  useEffect(() => {
+    if (browserPreview) return;
+    void initializeDiagnostics()
+      .then(() => recordDiagnosticEvent("App", "Desktop user interface initialized"))
+      .catch(() => {});
+    const onOnline = () => recordDiagnosticEvent("Network", "Operating system reports network online");
+    const onOffline = () => recordDiagnosticEvent("Network", "Operating system reports network offline", "W");
+    const onVisibility = () => recordDiagnosticEvent(
+      "App",
+      `User interface visibility changed to ${document.visibilityState}`,
+      "D",
+    );
+    const onUnhandledError = (event: ErrorEvent) => recordDiagnosticEvent(
+      "App-Error",
+      `Unhandled user interface error: ${event.message || "unknown error"}`,
+      "E",
+    );
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => recordDiagnosticEvent(
+      "App-Error",
+      `Unhandled asynchronous error: ${String(event.reason)}`,
+      "E",
+    );
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("error", onUnhandledError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("error", onUnhandledError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    };
+  }, [browserPreview]);
 
   useEffect(() => {
     if (browserPreview) return;
@@ -538,6 +579,19 @@ export default function App({
             onDevices={() => goForward("devices")}
             onRouting={() => goForward("routing")}
             onReferrals={() => goForward("referrals")}
+            onPromocodes={() => goForward("promocodes")}
+            initialSection={
+              browserPreview && ["main", "personalization", "advanced", "support", "about"].includes(
+                new URLSearchParams(window.location.search).get("settingsSection") ?? "",
+              )
+                ? (new URLSearchParams(window.location.search).get("settingsSection") as
+                    | "main"
+                    | "personalization"
+                    | "advanced"
+                    | "support"
+                    | "about")
+                : undefined
+            }
           />
         );
       case "devices":
@@ -547,6 +601,13 @@ export default function App({
       case "referrals":
         return (
           <ReferralsScreen
+            onBack={() => goBack("settings")}
+            browserPreview={browserPreview}
+          />
+        );
+      case "promocodes":
+        return (
+          <PromocodesScreen
             onBack={() => goBack("settings")}
             browserPreview={browserPreview}
           />

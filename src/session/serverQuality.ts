@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { VpnServer } from "./auth";
 import { preparePingBypass } from "./vpn";
 import { isBrowserPreviewRuntime } from "./browserPreview";
+import { recordDiagnosticEvent } from "./diagnostics";
 
 const STORAGE_KEY = "tobevpn_server_quality_v1";
 const PING_TIMEOUT_MS = 3_000;
@@ -273,6 +274,12 @@ export async function measureVpnServerPings(
   }
   if (pending.length === 0) return result;
 
+  recordDiagnosticEvent(
+    "Servers-Ping",
+    `TCP latency measurement started; targets=${pending.length}, cached=${result.size}`,
+    "D",
+  );
+
   const targets = await preparePingBypass(pending.map((server) => server.address))
     .catch(() => new Map<string, string>());
   let nextServerIndex = 0;
@@ -300,6 +307,14 @@ export async function measureVpnServerPings(
       { length: Math.min(MAX_CONCURRENT_PINGS, pending.length) },
       () => worker(),
     ),
+  );
+  const successfulPings = Array.from(result.values()).filter((ping) => ping >= 0);
+  recordDiagnosticEvent(
+    "Servers-Ping",
+    successfulPings.length > 0
+      ? `TCP latency measurement completed; reachable=${successfulPings.length}, unavailable=${result.size - successfulPings.length}, min_ms=${Math.min(...successfulPings)}, max_ms=${Math.max(...successfulPings)}, avg_ms=${Math.round(successfulPings.reduce((sum, ping) => sum + ping, 0) / successfulPings.length)}`
+      : `TCP latency measurement completed; reachable=0, unavailable=${result.size}`,
+    successfulPings.length > 0 ? "D" : "W",
   );
   return result;
 }
@@ -351,7 +366,7 @@ export async function selectBestVpnServer(
   };
   const onlineCandidates = preferPanelOnline(available);
   const preferredOnlineCandidates = preferPanelOnline(candidates);
-  return (
+  const selected = (
     rank(preferredOnlineCandidates) ??
     rank(candidates) ??
     rank(onlineCandidates) ??
@@ -363,6 +378,14 @@ export async function selectBestVpnServer(
         }
       : null)
   );
+  recordDiagnosticEvent(
+    "Servers-Auto",
+    selected
+      ? `Automatic server selection completed; candidates=${available.length}, selected_ping_ms=${selected.ping}`
+      : `Automatic server selection failed; candidates=${available.length}`,
+    selected ? "D" : "W",
+  );
+  return selected;
 }
 
 export function recordServerConnectionSuccess(server: ServerQualityIdentity): Promise<void> {

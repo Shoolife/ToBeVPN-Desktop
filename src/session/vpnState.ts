@@ -39,6 +39,7 @@ import {
   recordServerTunnelHealthy,
   selectBestVpnServer,
 } from "./serverQuality";
+import { recordDiagnosticEvent } from "./diagnostics";
 
 // Poll access blocking frequently while keeping the device `last_seen_at`
 // heartbeat at its normal cadence. /api/device/register is the only
@@ -50,9 +51,13 @@ const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
 const TUNNEL_HEALTH_RETRY_MS = 3_000;
 const TUNNEL_HEALTH_ATTEMPTS = 4;
 const TUNNEL_HEALTH_TIMEOUT_MS = 7_000;
-const TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY = 2;
+const TUNNEL_STARTUP_VALIDATION_DELAY_MS = 500;
+const TUNNEL_STARTUP_VALIDATION_RETRY_MS = 750;
+const TUNNEL_STARTUP_VALIDATION_ATTEMPTS = 2;
+const TUNNEL_STARTUP_PROBE_TIMEOUT_MS = 2_500;
 const TUNNEL_RECOVERY_RESTART_DELAY_MS = 700;
-const MAX_TUNNEL_RECOVERY_ATTEMPTS = 2;
+const MANUAL_TUNNEL_RECOVERY_ATTEMPTS = 1;
+const AUTOMATIC_TUNNEL_RECOVERY_ATTEMPTS = 2;
 const RECENT_TUNNEL_TRAFFIC_GRACE_MS = 60_000;
 const QUALITY_TRAFFIC_CONFIRM_BYTES = 64 * 1024;
 const NATIVE_CONNECT_TIMEOUT_MS = 45_000;
@@ -64,6 +69,7 @@ const SYSTEM_RESUME_GAP_MS = 60_000;
 const SYSTEM_RESUME_NETWORK_SETTLE_MS = 3_000;
 const SYSTEM_RESUME_ONLINE_WAIT_MS = 15_000;
 const SYSTEM_RESUME_ONLINE_POLL_MS = 500;
+const NETWORK_CHANGE_SETTLE_MS = 1_500;
 
 export interface VpnRuntimeState {
   connected: boolean;
@@ -116,7 +122,26 @@ let tunnelHealthFailedCycles = 0;
 let lastTunnelTrafficAt: number | null = null;
 let currentServerForRecovery: ServerVpnConfig | null = null;
 let resumeRecoveryInFlight = false;
+let tunnelRecoveryInFlight = false;
 let trafficQualityConfirmed = false;
+let lastDiagnosticTrafficAt = 0;
+let nextTunnelProbeId = 0;
+
+interface ActiveTunnelProbe {
+  id: number;
+  controllers: Set<AbortController>;
+  cancelled: boolean;
+  promise: Promise<boolean>;
+}
+
+let activeTunnelProbe: ActiveTunnelProbe | null = null;
+
+class TunnelValidationError extends Error {
+  constructor() {
+    super("VPN tunnel startup validation failed");
+    this.name = "TunnelValidationError";
+  }
+}
 
 function toServerVpnConfig(server: Awaited<ReturnType<typeof fetchVpnServers>>[number]): ServerVpnConfig {
   return {
@@ -156,11 +181,20 @@ async function refreshServerConfigAfterAccessCheck(
   let servers: VpnServer[];
   try {
     servers = await fetchVpnServers({ skipAccessPing: true });
-  } catch {
+  } catch (error) {
+    recordDiagnosticEvent(
+      "Servers",
+      `Server configuration refresh failed; stale fallback ${canFallbackToStale() ? "allowed" : "forbidden"}: ${String(error)}`,
+      "W",
+    );
     if (canFallbackToStale()) return server;
     throw new Error(t("servers_empty"));
   }
   const availableServers = servers.filter(isAvailableVpnServer);
+  recordDiagnosticEvent(
+    "Servers",
+    `Server configuration refreshed; total=${servers.length}, available=${availableServers.length}`,
+  );
   if (availableServers.length === 0) {
     // A successful empty response is authoritative: stale endpoints are only
     // an offline fallback, never a fallback after revocation/removal.
@@ -228,6 +262,14 @@ function startPolling() {
       sessionBytes: nextSessionBytes,
       tick: state.tick + 1,
     });
+    if (now - lastDiagnosticTrafficAt >= 10_000) {
+      lastDiagnosticTrafficAt = now;
+      recordDiagnosticEvent(
+        "VPN-Traffic",
+        `Session traffic sample: transfer_kib_s=${(delta / 1024).toFixed(1)}, session_mib=${(nextSessionBytes / (1024 * 1024)).toFixed(2)}`,
+        "D",
+      );
+    }
     if (
       !trafficQualityConfirmed &&
       nextSessionBytes >= QUALITY_TRAFFIC_CONFIRM_BYTES &&
@@ -249,6 +291,7 @@ function startPolling() {
           checkedOwner === getSession().shortUuid &&
           state.connected
         ) {
+          recordDiagnosticEvent("Access", "Server confirmed that VPN access is blocked", "W");
           await stopVpnWithError(t("usage_blocked"));
           return;
         }
@@ -261,7 +304,13 @@ function startPolling() {
       heartbeatCounter = 0;
       const { isLinked } = getSession();
       if (isLinked) {
-        registerCurrentDevice().catch(() => {});
+        registerCurrentDevice()
+          .then(() => recordDiagnosticEvent("Device", "Background device heartbeat completed", "D"))
+          .catch((error) => recordDiagnosticEvent(
+            "Device",
+            `Background device heartbeat failed: ${String(error)}`,
+            "W",
+          ));
       }
     }
   }, 1000);
@@ -297,6 +346,9 @@ function isTechnicalVpnErrorMessage(message: string): boolean {
 }
 
 function userFacingVpnError(error: unknown, fallback = t("vpn_error_connect")): string {
+  if (error instanceof TunnelValidationError) {
+    return t("vpn_error_tunnel_unhealthy");
+  }
   const raw = error instanceof Error ? error.message : String(error ?? "");
   const message = raw.replace(/[\n\r\t]+/g, " ").trim();
   if (!message) return fallback;
@@ -364,6 +416,11 @@ async function connectVpnInternal(
     server.address === "0.0.0.0"
   ) {
     const msg = t("subscription_expired_connect");
+    recordDiagnosticEvent(
+      "VPN",
+      "Connection rejected because the server configuration is unavailable",
+      "W",
+    );
     setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
     throw new Error(msg);
   }
@@ -373,20 +430,30 @@ async function connectVpnInternal(
   // won't authorize the session — fail fast with a friendly error.
   if (getSession().userPlan === "EXPIRED") {
     const msg = t("subscription_expired_connect");
+    recordDiagnosticEvent("VPN", "Connection rejected because the subscription is expired", "W");
     setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
     throw new Error(msg);
   }
+  // A manual connect/switch supersedes any background probe. The native
+  // start pipeline is already serialized in Rust; cancelling the old fetches
+  // here also prevents an obsolete health result from scheduling recovery.
+  stopTunnelHealthCheck();
   const cancelInFlightStart = state.connecting && !state.connected;
   const hadConnectedTunnel = state.connected;
   const previousServerForRecovery = currentServerForRecovery;
   const gen = ++connectionGeneration;
   let serverToStart = server;
   let serverStartAttempted = false;
+  let nativeStartCompleted = false;
   currentServerForRecovery = serverToStart;
   if (resetWatchdogRecovery) {
     watchdogRecoveryAttempts = 0;
   }
   setState({ connecting: true, disconnecting: false, lastError: null });
+  recordDiagnosticEvent(
+    "VPN",
+    `Connection requested; reconnect=${hadConnectedTunnel}, recovery=${!resetWatchdogRecovery}, routing=${server.routing_mode ?? "default"}`,
+  );
   // The subscription response may carry a server-side access block, so this
   // check has to finish before any new tunnel starts.
   try {
@@ -394,6 +461,7 @@ async function connectVpnInternal(
     // resolving DNS or creating TUN routes. Cancel that obsolete attempt
     // before doing any preparation for the newly selected server.
     if (cancelInFlightStart) {
+      recordDiagnosticEvent("VPN", "Cancelling an obsolete native connection attempt", "D");
       await engineStop().catch(() => {});
       if (gen !== connectionGeneration) return;
     }
@@ -422,8 +490,28 @@ async function connectVpnInternal(
     if (gen !== connectionGeneration) return;
     currentServerForRecovery = serverToStart;
     serverStartAttempted = true;
+    recordDiagnosticEvent("VPN", "Starting native VPN core and tunnel");
     await startNativeVpnWithTimeout(serverToStart, gen);
     if (gen !== connectionGeneration) return;
+    nativeStartCompleted = true;
+    recordDiagnosticEvent(
+      "VPN-Health",
+      "Native tunnel started; validating real traffic before Connected state",
+    );
+    await sleepMs(TUNNEL_STARTUP_VALIDATION_DELAY_MS);
+    if (gen !== connectionGeneration) return;
+    const startupHealthy = await probeTunnelWithRetries(
+      TUNNEL_STARTUP_VALIDATION_ATTEMPTS,
+      TUNNEL_STARTUP_VALIDATION_RETRY_MS,
+      TUNNEL_STARTUP_PROBE_TIMEOUT_MS,
+    );
+    if (gen !== connectionGeneration) return;
+    if (!startupHealthy) {
+      throw new TunnelValidationError();
+    }
+    // Xray stats queries reset counters. Drain the validation request so it
+    // is not counted as user traffic in the freshly started session.
+    await getTrafficStats().catch(() => ({ uplink: 0, downlink: 0 }));
     if (hadConnectedTunnel) statsSessionEnd();
     statsSessionStart();
     setState({
@@ -434,31 +522,83 @@ async function connectVpnInternal(
       sessionBytes: 0,
     });
     tunnelHealthFailedCycles = 0;
+    watchdogRecoveryAttempts = 0;
     lastTunnelTrafficAt = null;
     trafficQualityConfirmed = false;
     void recordServerConnectionSuccess(serverToStart);
+    void recordServerTunnelHealthy(serverToStart);
+    recordDiagnosticEvent(
+      "VPN",
+      "VPN connection established and real traffic validation passed",
+    );
     startPolling();
-    startTunnelHealthCheck(gen);
+    startTunnelHealthCheck(gen, TUNNEL_HEALTH_INTERVAL_MS);
   } catch (e) {
+    if (gen !== connectionGeneration) return;
     const msg = userFacingVpnError(e);
-    if (gen === connectionGeneration) {
-      if (serverStartAttempted) {
-        await recordServerConnectionFailure(serverToStart);
+    recordDiagnosticEvent("VPN", `Connection attempt failed: ${String(e)}`, "E");
+    const validationFailed = e instanceof TunnelValidationError;
+    if (validationFailed) {
+      await recordServerTunnelFailure(serverToStart);
+    } else if (serverStartAttempted) {
+      await recordServerConnectionFailure(serverToStart);
+    }
+    const nativeState = await engineGetState().catch(() => null);
+    const oldTunnelPreserved =
+      hadConnectedTunnel &&
+      !nativeStartCompleted &&
+      nativeState?.status === "Connected";
+    if (oldTunnelPreserved) {
+      recordDiagnosticEvent(
+        "VPN",
+        "Previous tunnel remained active after a failed server switch",
+        "W",
+      );
+      currentServerForRecovery = previousServerForRecovery;
+      setState({ connecting: false, disconnecting: false, connected: true, lastError: msg });
+      startTunnelHealthCheck(gen);
+    } else {
+      if (nativeStartCompleted) {
+        await engineStop().catch(() => {});
       }
-      const nativeState = await engineGetState().catch(() => null);
-      const oldTunnelPreserved =
-        hadConnectedTunnel && nativeState?.status === "Connected";
-      if (oldTunnelPreserved) {
-        currentServerForRecovery = previousServerForRecovery;
-        setState({ connecting: false, disconnecting: false, connected: true, lastError: msg });
-        startTunnelHealthCheck(gen);
-      } else {
-        currentServerForRecovery = null;
-        stopTunnelHealthCheck();
-        stopPolling();
-        if (hadConnectedTunnel) statsSessionEnd();
-        setState({ connecting: false, disconnecting: false, connected: false, lastError: msg });
+      stopTunnelHealthCheck();
+      stopPolling();
+      if (hadConnectedTunnel) statsSessionEnd();
+
+      const maxRecoveryAttempts = loadAutomaticServerSelection()
+        ? AUTOMATIC_TUNNEL_RECOVERY_ATTEMPTS
+        : MANUAL_TUNNEL_RECOVERY_ATTEMPTS;
+      if (validationFailed && watchdogRecoveryAttempts < maxRecoveryAttempts) {
+        watchdogRecoveryAttempts++;
+        currentServerForRecovery = serverToStart;
+        setState({
+          connecting: true,
+          disconnecting: false,
+          connected: false,
+          sessionStartTime: null,
+          sessionBytes: 0,
+          lastError: null,
+        });
+        recordDiagnosticEvent(
+          "VPN-Recovery",
+          `Startup validation recovery scheduled; attempt=${watchdogRecoveryAttempts}, max_attempts=${maxRecoveryAttempts}, automatic=${loadAutomaticServerSelection()}`,
+          "W",
+        );
+        await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
+        if (gen !== connectionGeneration) return;
+        return await connectVpnInternal(serverToStart, false, true);
       }
+
+      currentServerForRecovery = null;
+      const finalMessage = validationFailed ? t("vpn_error_tunnel_unhealthy") : msg;
+      setState({
+        connecting: false,
+        disconnecting: false,
+        connected: false,
+        sessionStartTime: null,
+        sessionBytes: 0,
+        lastError: finalMessage,
+      });
     }
     throw e;
   }
@@ -482,6 +622,7 @@ export async function disconnectVpn(): Promise<void> {
     sessionStartTime: null,
     sessionBytes: 0,
   });
+  recordDiagnosticEvent("VPN", "User or application requested VPN disconnect");
   try {
     await engineStop();
   } finally {
@@ -492,6 +633,7 @@ export async function disconnectVpn(): Promise<void> {
       sessionStartTime: null,
       sessionBytes: 0,
     });
+    recordDiagnosticEvent("VPN", "VPN disconnected and session counters stopped");
   }
 }
 
@@ -527,11 +669,16 @@ export async function reapplyRoutingSettings(): Promise<void> {
   await connectVpnInternal(server, true);
 }
 
-function startTunnelHealthCheck(gen: number) {
+function startTunnelHealthCheck(
+  gen: number,
+  initialDelayMs = TUNNEL_HEALTH_INITIAL_DELAY_MS,
+  source = "PERIODIC",
+) {
   stopTunnelHealthCheck();
   healthTimer = window.setTimeout(() => {
-    void runTunnelHealthLoop(gen);
-  }, TUNNEL_HEALTH_INITIAL_DELAY_MS);
+    healthTimer = null;
+    void runTunnelHealthLoop(gen, source);
+  }, initialDelayMs);
 }
 
 function stopTunnelHealthCheck() {
@@ -539,71 +686,131 @@ function stopTunnelHealthCheck() {
     clearTimeout(healthTimer);
     healthTimer = null;
   }
+  cancelActiveTunnelProbe();
 }
 
-async function runTunnelHealthLoop(gen: number): Promise<void> {
+async function runTunnelHealthLoop(gen: number, source = "PERIODIC"): Promise<void> {
   if (gen !== connectionGeneration || !state.connected) return;
 
   if (navigator.onLine !== false) {
     const healthy = await probeTunnelWithRetries(TUNNEL_HEALTH_ATTEMPTS);
     if (gen !== connectionGeneration || !state.connected) return;
     if (healthy) {
+      if (tunnelHealthFailedCycles > 0 || watchdogRecoveryAttempts > 0) {
+        recordDiagnosticEvent("VPN-Health", `Tunnel health recovered; source=${source}`);
+      } else {
+        recordDiagnosticEvent(
+          "VPN-Health",
+          `Background tunnel health probe passed; source=${source}`,
+          "D",
+        );
+      }
       watchdogRecoveryAttempts = 0;
       tunnelHealthFailedCycles = 0;
       if (currentServerForRecovery) {
         void recordServerTunnelHealthy(currentServerForRecovery);
       }
     } else if (hasRecentTunnelTraffic()) {
+      recordDiagnosticEvent(
+        "VPN-Health",
+        "Health probe failed but recent tunnel traffic confirms connectivity",
+        "W",
+      );
       tunnelHealthFailedCycles = 0;
       if (currentServerForRecovery) {
         void recordServerTunnelHealthy(currentServerForRecovery);
       }
     } else {
       tunnelHealthFailedCycles++;
-      if (tunnelHealthFailedCycles < TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY) {
-        console.warn("[VPN] tunnel health probe failed; waiting for a second failed cycle");
-      } else {
-        tunnelHealthFailedCycles = 0;
-        if (currentServerForRecovery) {
-          await recordServerTunnelFailure(currentServerForRecovery);
-        }
-        await recoverTunnelAfterHealthFailure(gen);
-        return;
+      recordDiagnosticEvent(
+        "VPN-Health",
+        `Tunnel health probe failed after all retries; source=${source}`,
+        "W",
+      );
+      tunnelHealthFailedCycles = 0;
+      if (currentServerForRecovery) {
+        await recordServerTunnelFailure(currentServerForRecovery);
       }
+      await recoverTunnelAfterHealthFailure(gen);
+      return;
     }
   }
 
   if (gen !== connectionGeneration || !state.connected) return;
   healthTimer = window.setTimeout(() => {
-    void runTunnelHealthLoop(gen);
+    healthTimer = null;
+    void runTunnelHealthLoop(gen, "PERIODIC");
   }, TUNNEL_HEALTH_INTERVAL_MS);
 }
 
 async function recoverTunnelAfterHealthFailure(gen: number): Promise<void> {
   if (gen !== connectionGeneration || !state.connected) return;
+  if (tunnelRecoveryInFlight) {
+    recordDiagnosticEvent(
+      "VPN-Recovery",
+      "Recovery request coalesced with an active recovery",
+      "D",
+    );
+    return;
+  }
   const server = currentServerForRecovery;
-  if (!server || watchdogRecoveryAttempts >= MAX_TUNNEL_RECOVERY_ATTEMPTS) {
-    await stopVpnWithError(t("vpn_error_tunnel_stopped"));
+  const maxRecoveryAttempts = loadAutomaticServerSelection()
+    ? AUTOMATIC_TUNNEL_RECOVERY_ATTEMPTS
+    : MANUAL_TUNNEL_RECOVERY_ATTEMPTS;
+  if (!server || watchdogRecoveryAttempts >= maxRecoveryAttempts) {
+    recordDiagnosticEvent(
+      "VPN-Recovery",
+      "Automatic tunnel recovery limit reached; stopping VPN",
+      "E",
+    );
+    await stopVpnWithError(t("vpn_error_tunnel_unhealthy"));
     return;
   }
 
+  tunnelRecoveryInFlight = true;
   watchdogRecoveryAttempts++;
-  await disconnectVpn().catch(() => {});
-  await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
-  if (!state.connected && !state.connecting) {
+  recordDiagnosticEvent(
+    "VPN-Recovery",
+    `Restarting tunnel after failed health checks; attempt=${watchdogRecoveryAttempts}, max_attempts=${maxRecoveryAttempts}, automatic=${loadAutomaticServerSelection()}`,
+    "W",
+  );
+  stopTunnelHealthCheck();
+  stopPolling();
+  statsSessionEnd();
+  setState({
+    connected: false,
+    connecting: true,
+    disconnecting: false,
+    sessionStartTime: null,
+    sessionBytes: 0,
+    lastError: null,
+  });
+  try {
+    await engineStop().catch(() => {});
+    if (gen !== connectionGeneration) return;
+    await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
+    if (gen !== connectionGeneration) return;
     await connectVpnInternal(server, false, true).catch(() => {});
+  } finally {
+    tunnelRecoveryInFlight = false;
   }
 }
 
 async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
-  if (resumeRecoveryInFlight) return;
+  if (resumeRecoveryInFlight || tunnelRecoveryInFlight) return;
   const server = currentServerForRecovery;
   if (!server || (!state.connected && !state.connecting)) return;
 
   resumeRecoveryInFlight = true;
+  tunnelRecoveryInFlight = true;
   tunnelHealthFailedCycles = 0;
   const gen = ++connectionGeneration;
   console.info(`[VPN] system resume detected after ${Math.round(gapMs / 1000)}s, restarting tunnel`);
+  recordDiagnosticEvent(
+    "VPN-Recovery",
+    `System resume detected after ${Math.round(gapMs / 1000)} seconds; restarting tunnel`,
+    "W",
+  );
   stopTunnelHealthCheck();
   stopPolling();
   setState({ connected: false, connecting: true, disconnecting: false, lastError: null });
@@ -618,11 +825,13 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
     await connectVpnInternal(server, true);
   } catch (e) {
     const msg = userFacingVpnError(e);
+    recordDiagnosticEvent("VPN-Recovery", `Resume recovery failed: ${String(e)}`, "E");
     if (gen === connectionGeneration) {
       setState({ connected: false, connecting: false, disconnecting: false, lastError: msg });
     }
   } finally {
     resumeRecoveryInFlight = false;
+    tunnelRecoveryInFlight = false;
   }
 }
 
@@ -643,6 +852,7 @@ async function stopVpnWithError(message: string): Promise<void> {
   trafficQualityConfirmed = false;
   stopTunnelHealthCheck();
   stopPolling();
+  recordDiagnosticEvent("VPN", `Stopping VPN because of a runtime error: ${message}`, "E");
   try {
     await engineStop();
   } finally {
@@ -658,19 +868,62 @@ async function stopVpnWithError(message: string): Promise<void> {
   }
 }
 
-async function probeTunnelWithRetries(attempts: number): Promise<boolean> {
+async function probeTunnelWithRetries(
+  attempts: number,
+  retryDelayMs = TUNNEL_HEALTH_RETRY_MS,
+  attemptTimeoutMs = TUNNEL_HEALTH_TIMEOUT_MS,
+): Promise<boolean> {
+  if (activeTunnelProbe !== null) {
+    return activeTunnelProbe.promise;
+  }
+
+  const probe: ActiveTunnelProbe = {
+    id: ++nextTunnelProbeId,
+    controllers: new Set(),
+    cancelled: false,
+    promise: Promise.resolve(false),
+  };
+  probe.promise = runTunnelProbeAttempts(
+    probe,
+    attempts,
+    retryDelayMs,
+    attemptTimeoutMs,
+  );
+  activeTunnelProbe = probe;
+  try {
+    return await probe.promise;
+  } finally {
+    if (activeTunnelProbe?.id === probe.id) {
+      activeTunnelProbe = null;
+    }
+  }
+}
+
+async function runTunnelProbeAttempts(
+  probe: ActiveTunnelProbe,
+  attempts: number,
+  retryDelayMs: number,
+  attemptTimeoutMs: number,
+): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
-    if (await probeTunnelOnce()) return true;
-    if (i < attempts - 1) await sleepMs(TUNNEL_HEALTH_RETRY_MS);
+    if (probe.cancelled) return false;
+    if (await probeTunnelOnce(probe, attemptTimeoutMs)) return true;
+    if (probe.cancelled) return false;
+    if (i < attempts - 1) await sleepMs(retryDelayMs);
   }
   return false;
 }
 
-async function probeTunnelOnce(): Promise<boolean> {
+async function probeTunnelOnce(
+  probe: ActiveTunnelProbe,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (probe.cancelled) return false;
   const controllers = TUNNEL_PROBE_URLS.map(() => new AbortController());
+  controllers.forEach((controller) => probe.controllers.add(controller));
   const timeoutId = window.setTimeout(() => {
     controllers.forEach((controller) => controller.abort());
-  }, TUNNEL_HEALTH_TIMEOUT_MS);
+  }, timeoutMs);
   try {
     return await new Promise<boolean>((resolve) => {
       let pending = TUNNEL_PROBE_URLS.length;
@@ -700,7 +953,17 @@ async function probeTunnelOnce(): Promise<boolean> {
     return false;
   } finally {
     clearTimeout(timeoutId);
+    controllers.forEach((controller) => probe.controllers.delete(controller));
   }
+}
+
+function cancelActiveTunnelProbe() {
+  const probe = activeTunnelProbe;
+  if (!probe) return;
+  activeTunnelProbe = null;
+  probe.cancelled = true;
+  probe.controllers.forEach((controller) => controller.abort());
+  probe.controllers.clear();
 }
 
 function hasRecentTunnelTraffic(): boolean {
@@ -726,6 +989,11 @@ function ensureVpnDiedListener() {
     if (event.payload) {
       console.warn("[VPN] process stopped unexpectedly:", event.payload);
     }
+    recordDiagnosticEvent(
+      "VPN-Watchdog",
+      `Native watchdog reported an unexpected process stop: ${event.payload || "no details"}`,
+      "E",
+    );
     const failedServer = currentServerForRecovery;
     connectionGeneration++;
     currentServerForRecovery = null;
@@ -753,6 +1021,45 @@ function ensureVpnDiedListener() {
 }
 ensureVpnDiedListener();
 
+let networkChangeListenersRegistered = false;
+function ensureNetworkChangeListeners() {
+  if (networkChangeListenersRegistered) return;
+  networkChangeListenersRegistered = true;
+
+  const scheduleRecheck = (source: string) => {
+    if (!state.connected) return;
+    recordDiagnosticEvent(
+      "VPN-Health",
+      `Underlying network change reported; scheduling one tunnel recheck; source=${source}`,
+      "W",
+    );
+    startTunnelHealthCheck(
+      connectionGeneration,
+      NETWORK_CHANGE_SETTLE_MS,
+      source,
+    );
+  };
+
+  window.addEventListener("offline", () => {
+    if (!state.connected) return;
+    recordDiagnosticEvent(
+      "VPN-Health",
+      "Operating system reported no underlying internet; pausing tunnel probes",
+      "W",
+    );
+    stopTunnelHealthCheck();
+  });
+  window.addEventListener("online", () => scheduleRecheck("NETWORK_ONLINE"));
+
+  const networkInformation = (
+    navigator as Navigator & { connection?: EventTarget }
+  ).connection;
+  networkInformation?.addEventListener("change", () => {
+    scheduleRecheck("NETWORK_CHANGE");
+  });
+}
+ensureNetworkChangeListeners();
+
 // Auto-stop the tunnel the moment the user's plan transitions to
 // EXPIRED. Without this the green "Connected" badge stays on the
 // screen indefinitely (the panel told us we're expired but the local
@@ -762,6 +1069,11 @@ ensureVpnDiedListener();
 subscribeSession((session) => {
   if (session.userPlan !== "EXPIRED") return;
   if (!state.connected && !state.connecting) return;
+  recordDiagnosticEvent(
+    "Access",
+    "Active VPN is being stopped because the subscription expired",
+    "W",
+  );
   void disconnectVpn().catch(() => {});
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, getSavedLang, saveLang, type Lang, type StringKey } from "../i18n";
 import { logout, saveEmail } from "../session/auth";
@@ -28,6 +28,13 @@ import CopyNotification, {
 import MaterialIcon, {
   type MaterialIconName,
 } from "../components/MaterialIcon";
+import DiagnosticsPanel from "../components/DiagnosticsPanel";
+import {
+  getDiagnosticStateSnapshot,
+  initializeDiagnostics,
+  setDiagnosticMode,
+  subscribeDiagnosticState,
+} from "../session/diagnostics";
 import brandLogo from "../assets/onboarding_logo.svg";
 import "./SettingsScreen.css";
 
@@ -51,15 +58,19 @@ const NAME_MODES: { mode: ProfileNameDisplay; key: StringKey }[] = [
 // FAQ entries shown on the Support sub-screen, mirroring the Android list.
 const FAQ: { q: StringKey; a: StringKey }[] = [
   { q: "faq_q_connect", a: "faq_a_connect" },
+  { q: "faq_q_connecting_check", a: "faq_a_connecting_check" },
   { q: "faq_q_slow", a: "faq_a_slow" },
   { q: "faq_q_server", a: "faq_a_server" },
+  { q: "faq_q_stats", a: "faq_a_stats" },
   { q: "faq_q_pay", a: "faq_a_pay" },
   { q: "faq_q_activate", a: "faq_a_activate" },
-  { q: "faq_q_traffic", a: "faq_a_traffic" },
+  { q: "faq_q_discount", a: "faq_a_discount" },
   { q: "faq_q_devices", a: "faq_a_devices" },
+  { q: "faq_q_referrals", a: "faq_a_referrals" },
+  { q: "faq_q_updates", a: "faq_a_updates" },
+  { q: "faq_q_diagnostics", a: "faq_a_diagnostics" },
   { q: "faq_q_privacy", a: "faq_a_privacy" },
-  { q: "faq_q_platforms", a: "faq_a_platforms" },
-  { q: "faq_q_stores", a: "faq_a_stores" },
+  { q: "faq_q_support_details", a: "faq_a_support_details" },
 ];
 
 type AccentTier = "green" | "orange" | "red";
@@ -112,17 +123,26 @@ export default function SettingsScreen({
   onDevices,
   onRouting,
   onReferrals,
+  onPromocodes,
+  initialSection = "main",
 }: {
   onBack: () => void;
   onLoggedOut: () => void;
   onDevices: () => void;
   onRouting: () => void;
   onReferrals: () => void;
+  onPromocodes: () => void;
+  initialSection?: Section;
 }) {
   const session = useSession();
   const currentLang = getSavedLang();
-  const { notice: copyNotice, copyWithNotification } = useCopyNotification();
-  const [section, setSection] = useState<Section>("main");
+  const { notice: copyNotice, copyWithNotification, showNotification } = useCopyNotification();
+  const diagnosticState = useSyncExternalStore(
+    subscribeDiagnosticState,
+    getDiagnosticStateSnapshot,
+    getDiagnosticStateSnapshot,
+  );
+  const [section, setSection] = useState<Section>(initialSection);
   // During a section change we keep the previous section mounted for one
   // animation cycle so the two cross-fade (old fades/scales out, new fades in),
   // matching the app's screen transitions (e.g. opening the servers list).
@@ -144,7 +164,9 @@ export default function SettingsScreen({
   const [languageDialogClosing, setLanguageDialogClosing] = useState(false);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [logoutClosing, setLogoutClosing] = useState(false);
-  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
+  const [whatsNewOpen, setWhatsNewOpen] = useState(
+    () => import.meta.env.DEV && new URLSearchParams(window.location.search).get("whatsNew") === "1",
+  );
   const [loggingOut, setLoggingOut] = useState(false);
   const [xrayVersion, setXrayVersion] = useState("Xray-core ...");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -160,13 +182,17 @@ export default function SettingsScreen({
   const [autoUpdateEnabled, setAutoUpdateState] = useState(() => getAutoUpdateEnabled());
 
   // Email editing
-  const [editingEmail, setEditingEmail] = useState(false);
+  const [editingEmail, setEditingEmail] = useState(
+    () => import.meta.env.DEV && new URLSearchParams(window.location.search).get("editEmail") === "1",
+  );
   const [emailDraft, setEmailDraft] = useState("");
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
   const emailInputRef = useRef<HTMLInputElement>(null);
   const languageDialogTimerRef = useRef<number | null>(null);
   const logoutDialogTimerRef = useRef<number | null>(null);
+  const diagnosticHoldTimerRef = useRef<number | null>(null);
+  const diagnosticModeChangingRef = useRef(false);
 
   // Support FAQ scroll affordances (fading edges + ↑/↓ arrows), mirroring the
   // Android SupportScreen.
@@ -327,6 +353,35 @@ export default function SettingsScreen({
     void openUrl(url).catch(() => {});
   };
 
+  const clearDiagnosticHold = () => {
+    if (diagnosticHoldTimerRef.current !== null) {
+      window.clearTimeout(diagnosticHoldTimerRef.current);
+      diagnosticHoldTimerRef.current = null;
+    }
+  };
+
+  const startDiagnosticHold = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0 || diagnosticModeChangingRef.current) return;
+    clearDiagnosticHold();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    diagnosticHoldTimerRef.current = window.setTimeout(() => {
+      diagnosticHoldTimerRef.current = null;
+      diagnosticModeChangingRef.current = true;
+      void setDiagnosticMode(!getDiagnosticStateSnapshot().debugModeEnabled)
+        .then((next) => {
+          showNotification(
+            next.debugModeEnabled
+              ? t("diagnostics_mode_enabled")
+              : t("diagnostics_mode_disabled"),
+          );
+        })
+        .catch(() => showNotification(t("diagnostics_operation_failed")))
+        .finally(() => {
+          diagnosticModeChangingRef.current = false;
+        });
+    }, 1000);
+  };
+
   useEffect(() => {
     let cancelled = false;
     getXrayVersion()
@@ -339,6 +394,11 @@ export default function SettingsScreen({
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    void initializeDiagnostics().catch(() => {});
+    return clearDiagnosticHold;
   }, []);
 
   useEffect(() => {
@@ -552,8 +612,8 @@ export default function SettingsScreen({
               </div>
             </div>
 
-            {/* Category grid: Support + Referrals share a row, while About
-                stays as the full-width final card, matching Android. */}
+            {/* Category grid mirrors Android: Promocodes and About share the
+                final row so both stay easy to reach. */}
             <div className="settings-tiles">
               <CategoryTile
                 accent="#8B7CF6"
@@ -585,13 +645,19 @@ export default function SettingsScreen({
                 iconName="groupAdd"
               />
               <CategoryTile
+                accent="#E57373"
+                label={t("settings_promocodes")}
+                desc={t("settings_promocodes_desc")}
+                onClick={onPromocodes}
+                iconPath="M21.41 11.58l-9-9A1.98 1.98 0 0 0 11 2H4c-1.1 0-2 .9-2 2v7c0 .53.21 1.04.59 1.41l9 9c.78.78 2.05.78 2.83 0l7-7c.78-.78.78-2.05-.01-2.83zM6.5 8C5.67 8 5 7.33 5 6.5S5.67 5 6.5 5 8 5.67 8 6.5 7.33 8 6.5 8z"
+              />
+              <CategoryTile
                 accent="#FF9800"
                 label={t("about")}
                 desc={t("settings_about_desc")}
                 onClick={() => goToSection("about")}
                 iconPath="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
                 iconEvenOdd
-                wide
               />
             </div>
           </>
@@ -752,19 +818,27 @@ export default function SettingsScreen({
               <div className="settings-card__header">{t("email_title")}</div>
               {editingEmail ? (
                 <div className="settings-email-edit">
-                  <input
-                    ref={emailInputRef}
-                    className="settings-email-edit__input"
-                    type="email"
-                    placeholder={t("email_placeholder")}
-                    value={emailDraft}
-                    onChange={(e) => setEmailDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleSaveEmail();
-                      if (e.key === "Escape") setEditingEmail(false);
-                    }}
-                    disabled={emailSaving}
-                  />
+                  <div className="settings-email-edit__field">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M3 6h18v12H3V6zm1 1 8 6 8-6" />
+                    </svg>
+                    <input
+                      ref={emailInputRef}
+                      className="settings-email-edit__input"
+                      type="email"
+                      placeholder={t("email_placeholder")}
+                      value={emailDraft}
+                      onChange={(e) => {
+                        setEmailDraft(e.target.value.slice(0, 254));
+                        setEmailError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleSaveEmail();
+                        if (e.key === "Escape") setEditingEmail(false);
+                      }}
+                      disabled={emailSaving}
+                    />
+                  </div>
                   {emailError && <div className="settings-email-edit__error">{emailError}</div>}
                   <div className="settings-email-edit__actions">
                     <button
@@ -777,7 +851,10 @@ export default function SettingsScreen({
                     <button
                       className="dialog__btn dialog__btn--primary"
                       onClick={handleSaveEmail}
-                      disabled={emailSaving}
+                      disabled={
+                        emailSaving ||
+                        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailDraft.trim())
+                      }
                     >
                       {t("email_save")}
                     </button>
@@ -847,7 +924,17 @@ export default function SettingsScreen({
         {s === "about" && (
           <div className="about-zoom">
             <div className="about-header">
-              <img src={brandLogo} alt="" className="about-logo" draggable={false} />
+              <button
+                type="button"
+                className="about-logo-button"
+                onPointerDown={startDiagnosticHold}
+                onPointerUp={clearDiagnosticHold}
+                onPointerCancel={clearDiagnosticHold}
+                onContextMenu={(event) => event.preventDefault()}
+                aria-label="ToBeVPN"
+              >
+                <img src={brandLogo} alt="" className="about-logo" draggable={false} />
+              </button>
               <div className="about-name">ToBeVPN</div>
               <div className="about-slogan">{t("about_slogan")}</div>
             </div>
@@ -878,6 +965,10 @@ export default function SettingsScreen({
                 iconPath="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"
               />
             </div>
+
+            {diagnosticState.debugModeEnabled && (
+              <DiagnosticsPanel state={diagnosticState} onNotice={showNotification} />
+            )}
 
             <div className="about-copyright">{t("about_copyright")}</div>
           </div>
@@ -1072,20 +1163,56 @@ function FaqItem({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const answerRef = useRef<HTMLDivElement>(null);
+  const centerTimerRef = useRef<number | null>(null);
+  const [answerHeight, setAnswerHeight] = useState(0);
+
+  useEffect(() => {
+    const answer = answerRef.current;
+    if (!answer) return;
+
+    if (!open) {
+      setAnswerHeight(0);
+      return;
+    }
+
+    const updateHeight = () => setAnswerHeight(answer.scrollHeight);
+    updateHeight();
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(answer);
+    return () => observer.disconnect();
+  }, [open, answer]);
+
+  useEffect(() => () => {
+    if (centerTimerRef.current !== null) {
+      window.clearTimeout(centerTimerRef.current);
+    }
+  }, []);
 
   const toggle = () => {
     const next = !open;
     setOpen(next);
-    // Wait for the height animation to settle, then centre the expanded card.
+
+    if (centerTimerRef.current !== null) {
+      window.clearTimeout(centerTimerRef.current);
+      centerTimerRef.current = null;
+    }
+
+    // Match Android: wait for the expanded answer to lay out, then centre the
+    // touched card in the remaining FAQ viewport.
     if (next && ref.current) {
       const el = ref.current;
-      window.setTimeout(() => onExpand(el), 260);
+      centerTimerRef.current = window.setTimeout(() => {
+        centerTimerRef.current = null;
+        onExpand(el);
+      }, 240);
     }
   };
 
   return (
     <div ref={ref} className={`faq-item ${open ? "faq-item--open" : ""}`}>
-      <button className="faq-item__q" onClick={toggle}>
+      <button className="faq-item__q" onClick={toggle} aria-expanded={open}>
         <span className="faq-item__q-text">{question}</span>
         <span className="faq-item__chevron">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -1093,8 +1220,8 @@ function FaqItem({
           </svg>
         </span>
       </button>
-      <div className="faq-item__a-wrap">
-        <div className="faq-item__a">{answer}</div>
+      <div className="faq-item__a-wrap" style={{ height: `${answerHeight}px` }}>
+        <div ref={answerRef} className="faq-item__a">{answer}</div>
       </div>
     </div>
   );

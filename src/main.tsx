@@ -12,12 +12,20 @@ import { isBrowserPreviewRuntime } from "./session/browserPreview";
 import { updateSession } from "./session/store";
 import { applyTheme, type ThemeMode } from "./session/theme";
 import { saveLang } from "./i18n";
+import {
+  initializeDiagnostics,
+  setDiagnosticCollection,
+  setDiagnosticMode,
+} from "./session/diagnostics";
 // Twemoji Country Flags font is registered via @font-face in App.css so the
 // flag glyphs are guaranteed available before any first paint, including
 // when the WebView has no outbound network yet (jsDelivr is unreachable
 // before the VPN tunnel is up).
 
 const browserPreview = isBrowserPreviewRuntime();
+if (!browserPreview) {
+  void initializeDiagnostics().catch(() => {});
+}
 const searchParams = browserPreview
   ? new URLSearchParams(window.location.search)
   : null;
@@ -42,6 +50,13 @@ applyTheme(previewTheme ?? undefined);
 if (requestedLanguage === "ru" || requestedLanguage === "en") {
   saveLang(requestedLanguage);
 }
+if (browserPreview && searchParams?.get("diagnostics") === "1") {
+  void setDiagnosticMode(true).then(() => {
+    if (searchParams.get("collecting") !== "0") {
+      return setDiagnosticCollection(true);
+    }
+  });
+}
 const routingModes = new Set<RoutingMode>(["blocked_only", "selective", "all_vpn"]);
 if (requestedRoutingMode && routingModes.has(requestedRoutingMode as RoutingMode)) {
   saveRoutingSettings({
@@ -56,6 +71,7 @@ const previewScreens = new Set<Screen>([
   "servers",
   "routing",
   "referrals",
+  "promocodes",
 ]);
 const initialScreen: Screen =
   requestedPreviewScreen && previewScreens.has(requestedPreviewScreen as Screen)
