@@ -18,9 +18,9 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
-      icon: "autoAwesome",
-      titleKey: "whats_new_connection_title",
-      descriptionKey: "whats_new_connection_description",
+      icon: "refresh",
+      titleKey: "whats_new_windows_update_title",
+      descriptionKey: "whats_new_windows_update_description",
     },
   ],
 };

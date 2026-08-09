@@ -36,6 +36,32 @@
 ; without having to right-click -> "Run as administrator".
 !macro NSIS_HOOK_POSTINSTALL
   nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$paths=@('$SMPROGRAMS\${PRODUCTNAME}.lnk','$DESKTOP\${PRODUCTNAME}.lnk'); foreach ($$p in $$paths) { if (Test-Path $$p) { $$b=[IO.File]::ReadAllBytes($$p); $$b[0x15]=$$b[0x15] -bor 0x20; [IO.File]::WriteAllBytes($$p,$$b) } }"`
+  ; tauri-plugin-updater starts a passive NSIS update with /P /R /UPDATE.
+  ; Tauri's default /R handler deliberately drops to Explorer's unelevated
+  ; token before starting the app. That is incompatible with our embedded
+  ; requireAdministrator manifest: process creation can appear successful,
+  ; then the Windows loader fails before main() with TaskDialogIndirect not
+  ; found. Start the installed binary through ShellExecute's elevation verb
+  ; instead. Clearing PassiveMode after a successful launch prevents Tauri's
+  ; .onInstSuccess callback from performing a second, broken RunAsUser launch.
+  ; SetAutoClose preserves the passive updater UX after clearing that flag.
+  ${If} $UpdateMode = 1
+  ${AndIf} $PassiveMode = 1
+    ${GetOptions} $CMDLINE "/R" $R0
+    ${IfNot} ${Errors}
+      ${GetOptions} $CMDLINE "/ARGS" $R0
+      ${If} ${Errors}
+        StrCpy $R0 ""
+      ${EndIf}
+
+      ClearErrors
+      ExecShell "runas" "$INSTDIR\${MAINBINARYNAME}.exe" "$R0" SW_SHOWNORMAL
+      ${IfNot} ${Errors}
+        SetAutoClose true
+        StrCpy $PassiveMode 0
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
