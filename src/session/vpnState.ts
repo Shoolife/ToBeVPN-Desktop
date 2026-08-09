@@ -51,11 +51,8 @@ const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
 const TUNNEL_HEALTH_RETRY_MS = 3_000;
 const TUNNEL_HEALTH_ATTEMPTS = 4;
 const TUNNEL_HEALTH_TIMEOUT_MS = 7_000;
-const TUNNEL_STARTUP_VALIDATION_DELAY_MS = 500;
-const TUNNEL_STARTUP_VALIDATION_RETRY_MS = 750;
-const TUNNEL_STARTUP_VALIDATION_ATTEMPTS = 2;
-const TUNNEL_STARTUP_PROBE_TIMEOUT_MS = 2_500;
-const TUNNEL_RECOVERY_RESTART_DELAY_MS = 700;
+const TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY = 2;
+const TUNNEL_RECOVERY_RESTART_DELAY_MS = 2_000;
 const MANUAL_TUNNEL_RECOVERY_ATTEMPTS = 1;
 const AUTOMATIC_TUNNEL_RECOVERY_ATTEMPTS = 2;
 const RECENT_TUNNEL_TRAFFIC_GRACE_MS = 60_000;
@@ -135,13 +132,6 @@ interface ActiveTunnelProbe {
 }
 
 let activeTunnelProbe: ActiveTunnelProbe | null = null;
-
-class TunnelValidationError extends Error {
-  constructor() {
-    super("VPN tunnel startup validation failed");
-    this.name = "TunnelValidationError";
-  }
-}
 
 function toServerVpnConfig(server: Awaited<ReturnType<typeof fetchVpnServers>>[number]): ServerVpnConfig {
   return {
@@ -246,6 +236,8 @@ function startPolling() {
       delta = Math.min(Number.MAX_SAFE_INTEGER, uplink + downlink);
       if (delta > 0) {
         lastTunnelTrafficAt = now;
+        watchdogRecoveryAttempts = 0;
+        tunnelHealthFailedCycles = 0;
       }
     } catch {
       // Stats API may still be warming up after connect.
@@ -346,9 +338,6 @@ function isTechnicalVpnErrorMessage(message: string): boolean {
 }
 
 function userFacingVpnError(error: unknown, fallback = t("vpn_error_connect")): string {
-  if (error instanceof TunnelValidationError) {
-    return t("vpn_error_tunnel_unhealthy");
-  }
   const raw = error instanceof Error ? error.message : String(error ?? "");
   const message = raw.replace(/[\n\r\t]+/g, " ").trim();
   if (!message) return fallback;
@@ -494,24 +483,11 @@ async function connectVpnInternal(
     await startNativeVpnWithTimeout(serverToStart, gen);
     if (gen !== connectionGeneration) return;
     nativeStartCompleted = true;
-    recordDiagnosticEvent(
-      "VPN-Health",
-      "Native tunnel started; validating real traffic before Connected state",
-    );
-    await sleepMs(TUNNEL_STARTUP_VALIDATION_DELAY_MS);
-    if (gen !== connectionGeneration) return;
-    const startupHealthy = await probeTunnelWithRetries(
-      TUNNEL_STARTUP_VALIDATION_ATTEMPTS,
-      TUNNEL_STARTUP_VALIDATION_RETRY_MS,
-      TUNNEL_STARTUP_PROBE_TIMEOUT_MS,
-    );
-    if (gen !== connectionGeneration) return;
-    if (!startupHealthy) {
-      throw new TunnelValidationError();
-    }
-    // Xray stats queries reset counters. Drain the validation request so it
-    // is not counted as user traffic in the freshly started session.
-    await getTrafficStats().catch(() => ({ uplink: 0, downlink: 0 }));
+    // Native start already proves that Xray, tun2socks, Wintun and the routes
+    // were created. A public HTTP endpoint is not an authoritative startup
+    // gate: WebView/CORS, DNS and a slowly settling Windows route can all make
+    // that request fail even though the tunnel itself is usable. Keep traffic
+    // validation in the background, as in the stable 1.0.78 connection path.
     if (hadConnectedTunnel) statsSessionEnd();
     statsSessionStart();
     setState({
@@ -522,25 +498,20 @@ async function connectVpnInternal(
       sessionBytes: 0,
     });
     tunnelHealthFailedCycles = 0;
-    watchdogRecoveryAttempts = 0;
     lastTunnelTrafficAt = null;
     trafficQualityConfirmed = false;
     void recordServerConnectionSuccess(serverToStart);
-    void recordServerTunnelHealthy(serverToStart);
     recordDiagnosticEvent(
       "VPN",
-      "VPN connection established and real traffic validation passed",
+      "Native VPN connection established; background traffic validation scheduled",
     );
     startPolling();
-    startTunnelHealthCheck(gen, TUNNEL_HEALTH_INTERVAL_MS);
+    startTunnelHealthCheck(gen);
   } catch (e) {
     if (gen !== connectionGeneration) return;
     const msg = userFacingVpnError(e);
     recordDiagnosticEvent("VPN", `Connection attempt failed: ${String(e)}`, "E");
-    const validationFailed = e instanceof TunnelValidationError;
-    if (validationFailed) {
-      await recordServerTunnelFailure(serverToStart);
-    } else if (serverStartAttempted) {
+    if (serverStartAttempted) {
       await recordServerConnectionFailure(serverToStart);
     }
     const nativeState = await engineGetState().catch(() => null);
@@ -564,40 +535,14 @@ async function connectVpnInternal(
       stopTunnelHealthCheck();
       stopPolling();
       if (hadConnectedTunnel) statsSessionEnd();
-
-      const maxRecoveryAttempts = loadAutomaticServerSelection()
-        ? AUTOMATIC_TUNNEL_RECOVERY_ATTEMPTS
-        : MANUAL_TUNNEL_RECOVERY_ATTEMPTS;
-      if (validationFailed && watchdogRecoveryAttempts < maxRecoveryAttempts) {
-        watchdogRecoveryAttempts++;
-        currentServerForRecovery = serverToStart;
-        setState({
-          connecting: true,
-          disconnecting: false,
-          connected: false,
-          sessionStartTime: null,
-          sessionBytes: 0,
-          lastError: null,
-        });
-        recordDiagnosticEvent(
-          "VPN-Recovery",
-          `Startup validation recovery scheduled; attempt=${watchdogRecoveryAttempts}, max_attempts=${maxRecoveryAttempts}, automatic=${loadAutomaticServerSelection()}`,
-          "W",
-        );
-        await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
-        if (gen !== connectionGeneration) return;
-        return await connectVpnInternal(serverToStart, false, true);
-      }
-
       currentServerForRecovery = null;
-      const finalMessage = validationFailed ? t("vpn_error_tunnel_unhealthy") : msg;
       setState({
         connecting: false,
         disconnecting: false,
         connected: false,
         sessionStartTime: null,
         sessionBytes: 0,
-        lastError: finalMessage,
+        lastError: msg,
       });
     }
     throw e;
@@ -695,6 +640,14 @@ async function runTunnelHealthLoop(gen: number, source = "PERIODIC"): Promise<vo
   if (navigator.onLine !== false) {
     const healthy = await probeTunnelWithRetries(TUNNEL_HEALTH_ATTEMPTS);
     if (gen !== connectionGeneration || !state.connected) return;
+    if (healthy === null) {
+      recordDiagnosticEvent(
+        "VPN-Health",
+        `Obsolete tunnel health probe cancelled; source=${source}`,
+        "D",
+      );
+      return;
+    }
     if (healthy) {
       if (tunnelHealthFailedCycles > 0 || watchdogRecoveryAttempts > 0) {
         recordDiagnosticEvent("VPN-Health", `Tunnel health recovered; source=${source}`);
@@ -716,6 +669,7 @@ async function runTunnelHealthLoop(gen: number, source = "PERIODIC"): Promise<vo
         "Health probe failed but recent tunnel traffic confirms connectivity",
         "W",
       );
+      watchdogRecoveryAttempts = 0;
       tunnelHealthFailedCycles = 0;
       if (currentServerForRecovery) {
         void recordServerTunnelHealthy(currentServerForRecovery);
@@ -724,15 +678,17 @@ async function runTunnelHealthLoop(gen: number, source = "PERIODIC"): Promise<vo
       tunnelHealthFailedCycles++;
       recordDiagnosticEvent(
         "VPN-Health",
-        `Tunnel health probe failed after all retries; source=${source}`,
+        `Tunnel health probe failed after all retries; source=${source}, failed_cycle=${tunnelHealthFailedCycles}/${TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY}`,
         "W",
       );
-      tunnelHealthFailedCycles = 0;
-      if (currentServerForRecovery) {
-        await recordServerTunnelFailure(currentServerForRecovery);
+      if (tunnelHealthFailedCycles >= TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY) {
+        tunnelHealthFailedCycles = 0;
+        if (currentServerForRecovery) {
+          await recordServerTunnelFailure(currentServerForRecovery);
+        }
+        await recoverTunnelAfterHealthFailure(gen);
+        return;
       }
-      await recoverTunnelAfterHealthFailure(gen);
-      return;
     }
   }
 
@@ -872,9 +828,13 @@ async function probeTunnelWithRetries(
   attempts: number,
   retryDelayMs = TUNNEL_HEALTH_RETRY_MS,
   attemptTimeoutMs = TUNNEL_HEALTH_TIMEOUT_MS,
-): Promise<boolean> {
+): Promise<boolean | null> {
   if (activeTunnelProbe !== null) {
-    return activeTunnelProbe.promise;
+    const probe = activeTunnelProbe;
+    const healthy = await probe.promise;
+    // Cancellation means this result belongs to an obsolete connection or
+    // network state. It must never be counted as a failed health check.
+    return probe.cancelled ? null : healthy;
   }
 
   const probe: ActiveTunnelProbe = {
@@ -891,7 +851,8 @@ async function probeTunnelWithRetries(
   );
   activeTunnelProbe = probe;
   try {
-    return await probe.promise;
+    const healthy = await probe.promise;
+    return probe.cancelled ? null : healthy;
   } finally {
     if (activeTunnelProbe?.id === probe.id) {
       activeTunnelProbe = null;
@@ -1050,13 +1011,6 @@ function ensureNetworkChangeListeners() {
     stopTunnelHealthCheck();
   });
   window.addEventListener("online", () => scheduleRecheck("NETWORK_ONLINE"));
-
-  const networkInformation = (
-    navigator as Navigator & { connection?: EventTarget }
-  ).connection;
-  networkInformation?.addEventListener("change", () => {
-    scheduleRecheck("NETWORK_CHANGE");
-  });
 }
 ensureNetworkChangeListeners();
 
