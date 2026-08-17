@@ -857,8 +857,8 @@ async fn stop_vpn(
 /// Get the current VPN connection state.
 #[tauri::command]
 async fn get_vpn_state(state: tauri::State<'_, AppVpn>) -> Result<VpnState, String> {
-    let guard = state.0.lock().await;
-    match guard.as_ref() {
+    let manager = state.0.lock().await.as_ref().cloned();
+    match manager.as_ref() {
         Some(mgr) => Ok(mgr.get_state().await),
         None => Ok(VpnState::Disconnected),
     }
@@ -867,8 +867,11 @@ async fn get_vpn_state(state: tauri::State<'_, AppVpn>) -> Result<VpnState, Stri
 /// Query current traffic stats (uplink/downlink bytes since last query).
 #[tauri::command]
 async fn get_traffic_stats(state: tauri::State<'_, AppVpn>) -> Result<TrafficStats, String> {
-    let guard = state.0.lock().await;
-    match guard.as_ref() {
+    // Do not hold the global manager slot while the two bounded Xray CLI
+    // queries run. On Windows they can take about a second; holding this lock
+    // made stop_vpn queue behind every pending stats poll after screen unlock.
+    let manager = state.0.lock().await.as_ref().cloned();
+    match manager.as_ref() {
         Some(mgr) => mgr.query_stats().await.ok_or("Stats unavailable".into()),
         None => Err("VPN manager not initialized".into()),
     }
@@ -877,8 +880,8 @@ async fn get_traffic_stats(state: tauri::State<'_, AppVpn>) -> Result<TrafficSta
 /// Read xray-core version from the bundled sidecar binary.
 #[tauri::command]
 async fn get_xray_version(state: tauri::State<'_, AppVpn>) -> Result<String, String> {
-    let guard = state.0.lock().await;
-    Ok(match guard.as_ref() {
+    let manager = state.0.lock().await.as_ref().cloned();
+    Ok(match manager.as_ref() {
         Some(mgr) => mgr.xray_version().await,
         None => "unknown".into(),
     })

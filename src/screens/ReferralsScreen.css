@@ -315,6 +315,13 @@
   -webkit-user-select: text;
 }
 
+.referrals-field__control input::placeholder {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 400;
+  opacity: 0.78;
+}
+
 .referrals-field__control input:disabled {
   opacity: 0.55;
 }

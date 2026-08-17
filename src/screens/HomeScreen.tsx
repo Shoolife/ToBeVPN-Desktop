@@ -3,6 +3,7 @@ import { exit } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
+import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import {
   forceCheckUpdate,
@@ -119,6 +120,65 @@ function planHint(plan: UserPlan, expiresAt: number | null): string {
   if (plan === "FREE_TRIAL") return t("free_tier_hint");
   if (plan === "EXPIRED") return t("plan_expired");
   return "";
+}
+
+export function SubscriptionSummaryCard({
+  plan,
+  planDisplayName,
+  planExpiresAt,
+  trafficUsedBytes,
+  trafficLimitBytes,
+  checking = false,
+  onClick,
+}: {
+  plan: UserPlan;
+  planDisplayName?: string | null;
+  planExpiresAt: number | null;
+  trafficUsedBytes: number;
+  trafficLimitBytes: number;
+  checking?: boolean;
+  onClick?: () => void;
+}) {
+  const usedBytes = Math.max(0, trafficUsedBytes);
+  const limitBytes = Math.max(0, trafficLimitBytes);
+  const hasTrafficLimit = limitBytes > 0;
+  const trafficProgress = hasTrafficLimit ? Math.min(usedBytes / limitBytes, 1) : 0;
+
+  return (
+    <div className="home-card home-card--clickable home-card--sub" onClick={onClick}>
+      <div className="home-card__row">
+        <div className="home-card__info">
+          <div className="home-sub__label">{t("subscription")}</div>
+          <div className={planBadgeClass(plan)}>{planLabel(plan, planDisplayName)}</div>
+          <div className="home-sub__hint">
+            {checking ? t("loading_data") : planHint(plan, planExpiresAt)}
+          </div>
+        </div>
+        {hasTrafficLimit && (
+          <div className="home-sub-usage" aria-label={t("traffic")}>
+            <div
+              className="home-sub-usage__value"
+              title={`${formatTrafficBytes(usedBytes)} / ${formatTrafficBytes(limitBytes)}`}
+            >
+              {formatTrafficBytes(usedBytes)} / {formatTrafficBytes(limitBytes)}
+            </div>
+            <div className="home-sub-usage__progress">
+              <div
+                className="home-sub-usage__fill"
+                style={{
+                  width: `${trafficProgress * 100}%`,
+                  background: trafficProgressColor(trafficProgress),
+                }}
+              />
+            </div>
+          </div>
+        )}
+        <svg className="home-card__arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </div>
+    </div>
+  );
 }
 
 const SUBSCRIPTION_REMINDER_DAY_MS = 86_400_000;
@@ -253,10 +313,6 @@ export default function HomeScreen({
     dismissedReminderKey !== reminderKey;
   const subscriptionTrafficUsedBytes = Math.max(0, session.trafficUsedBytes);
   const subscriptionTrafficLimitBytes = Math.max(0, session.trafficLimitBytes);
-  const hasSubscriptionTrafficLimit = subscriptionTrafficLimitBytes > 0;
-  const subscriptionTrafficProgress = hasSubscriptionTrafficLimit
-    ? Math.min(subscriptionTrafficUsedBytes / subscriptionTrafficLimitBytes, 1)
-    : 0;
 
   useEffect(() => {
     if (browserPreview) return;
@@ -544,7 +600,7 @@ export default function HomeScreen({
         </div>
       )}
 
-      <div className="home-content">
+      <ScrollEdgeAffordance className="home-content">
         <div className="home-connect-area">
           <button
             className={`home-power ${connected ? "home-power--on" : ""} ${activating ? "home-power--connecting" : ""} ${disconnecting ? "home-power--disconnecting" : ""} ${subscriptionUsageBlocked ? "home-power--blocked" : ""}`}
@@ -679,48 +735,17 @@ export default function HomeScreen({
             </div>
           </div>
         ) : (
-          <div
-            className="home-card home-card--clickable home-card--sub"
+          <SubscriptionSummaryCard
+            plan={session.userPlan}
+            planDisplayName={session.planDisplayName}
+            planExpiresAt={session.planExpiresAt}
+            trafficUsedBytes={subscriptionTrafficUsedBytes}
+            trafficLimitBytes={subscriptionTrafficLimitBytes}
+            checking={checkingSubscriptionAccess}
             onClick={() => void openSubscription()}
-          >
-            <div className="home-card__row">
-              <div className="home-card__info">
-                <div className="home-sub__label">{t("subscription")}</div>
-                <div className={planBadgeClass(session.userPlan)}>
-                  {planLabel(session.userPlan, session.planDisplayName)}
-                </div>
-                <div className="home-sub__hint">
-                  {checkingSubscriptionAccess
-                    ? t("loading_data")
-                    : planHint(session.userPlan, session.planExpiresAt)}
-                </div>
-              </div>
-              {hasSubscriptionTrafficLimit && (
-                <div className="home-sub-usage" aria-label={t("traffic")}>
-                  <div
-                    className="home-sub-usage__value"
-                    title={`${formatTrafficBytes(subscriptionTrafficUsedBytes)} / ${formatTrafficBytes(subscriptionTrafficLimitBytes)}`}
-                  >
-                    {formatTrafficBytes(subscriptionTrafficUsedBytes)} / {formatTrafficBytes(subscriptionTrafficLimitBytes)}
-                  </div>
-                  <div className="home-sub-usage__progress">
-                    <div
-                      className="home-sub-usage__fill"
-                      style={{
-                        width: `${subscriptionTrafficProgress * 100}%`,
-                        background: trafficProgressColor(subscriptionTrafficProgress),
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-              <svg className="home-card__arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="9 18 15 12 9 6"/>
-              </svg>
-            </div>
-          </div>
+          />
         )}
-      </div>
+      </ScrollEdgeAffordance>
 
       {showSubscription && !subscriptionUsageBlocked && (
         <SubscriptionSheet onDismiss={() => setShowSubscription(false)} />

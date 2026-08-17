@@ -9,6 +9,18 @@
   font-display: swap;
 }
 
+@property --app-font-scale {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 1;
+}
+
+@property --app-font-weight-boost {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
 :root {
   --bg: #0d0d0d;
   --surface: #2b2b2b;
@@ -62,6 +74,9 @@
   --speed-off-border: rgba(255, 255, 255, 0.12);
   --speed-off-text: rgba(255, 255, 255, 0.62);
   --window-frame-border: rgba(255, 255, 255, 0.1);
+  --app-font-scale: 1;
+  --app-font-weight-boost: 0;
+  --app-text-outline-shadow: none;
 
   color-scheme: dark;
   color: var(--text);
@@ -129,10 +144,31 @@
   color-scheme: light;
 }
 
+:root[data-app-outlined-text="true"] {
+  --app-text-outline-shadow: 0 0 3px #000000;
+}
+
+:root[data-theme="light"][data-app-outlined-text="true"] {
+  --app-text-outline-shadow: 0 0 3px #ffffff;
+}
+
+#root,
+#root * {
+  text-shadow: var(--app-text-outline-shadow, none);
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 html, body, #root {

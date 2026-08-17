@@ -11,6 +11,7 @@
     "core:window:allow-close",
     "core:window:allow-set-size",
     "core:window:allow-center",
+    "core:window:allow-current-monitor",
     "core:window:allow-primary-monitor",
     {
       "identifier": "opener:allow-open-url",
@@ -20,6 +21,7 @@
         { "url": "https://shoolife.github.io/tobevpn-legal/*" }
       ]
     },
+    "opener:allow-reveal-item-in-dir",
     {
       "identifier": "http:default",
       "allow": [

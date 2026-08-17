@@ -4,6 +4,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -155,6 +156,7 @@ async fn run_with_timeout_and_env(
 }
 
 // ── VPN Manager ───────────────────────────────────────────────────
+#[derive(Clone)]
 pub struct VpnManager {
     state: Arc<Mutex<VpnState>>,
     xray_process: Arc<Mutex<Option<Child>>>,
@@ -328,6 +330,7 @@ impl VpnManager {
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
+        let connect_started = Instant::now();
         eprintln!("══════════════════════════════════════════════════");
         eprintln!("[VPN] START called");
         eprintln!("[VPN] Server configuration loaded");
@@ -346,6 +349,7 @@ impl VpnManager {
         // Resolve the server endpoint and the direct-access (bypass) hosts
         // concurrently — independent DNS lookups, so overlapping them trims
         // connect/switch latency while the existing tunnel is still up.
+        let resolution_started = Instant::now();
         let (server_ip_res, bypass_res) = tokio::join!(
             Self::resolve_server_ip(&server.address, attempt),
             Self::resolve_bypass_ips(&server.bypass_hosts, attempt),
@@ -362,10 +366,16 @@ impl VpnManager {
             }
         };
         eprintln!("[VPN] Server address resolved");
-        diagnostic_linux!("Endpoint resolved successfully");
+        diagnostic_linux!(
+            "Endpoint resolved successfully; elapsed_ms={}",
+            resolution_started.elapsed().as_millis()
+        );
         let mut control_bypass_ips = match bypass_res {
             Ok(ips) => ips,
-            Err(e) => return Err(e),
+            Err(e) => {
+                diagnostic_linux!("Direct-access destination resolution failed: {e}");
+                return Err(e);
+            }
         };
         control_bypass_ips.retain(|ip| ip != &server_ip);
         eprintln!(
@@ -549,6 +559,7 @@ impl VpnManager {
 
         // 4. Start tun2socks + routing via pkexec helper
         eprintln!("[VPN] Starting TUN setup (pkexec) ...");
+        let tunnel_setup_started = Instant::now();
         if let Err(e) = self.start_tun(&server, &control_bypass_ips, attempt).await {
             eprintln!("[VPN] ERROR: TUN setup failed: {e}");
             diagnostic_linux!("TUN and route setup failed: {e}");
@@ -561,7 +572,10 @@ impl VpnManager {
             return Err(e);
         }
         eprintln!("[VPN] TUN setup OK");
-        diagnostic_linux!("TUN and routes configured successfully");
+        diagnostic_linux!(
+            "TUN and routes configured successfully; elapsed_ms={}",
+            tunnel_setup_started.elapsed().as_millis()
+        );
 
         if attempt.is_cancelled() {
             self.force_stop().await;
@@ -570,7 +584,10 @@ impl VpnManager {
         }
         self.set_state(VpnState::Connected).await;
         eprintln!("[VPN] State -> Connected");
-        diagnostic_linux!("Native state changed to Connected");
+        diagnostic_linux!(
+            "Native state changed to Connected; total_elapsed_ms={}",
+            connect_started.elapsed().as_millis()
+        );
 
         // Bump the session generation and spawn a watchdog so the UI doesn't
         // keep showing "Connected" if xray dies (OOM, killed, crashed). The
@@ -656,6 +673,7 @@ impl VpnManager {
 
     /// Stop VPN gracefully.
     pub async fn stop(&self) -> Result<(), String> {
+        let stop_started = Instant::now();
         eprintln!("[VPN] STOP called");
         diagnostic_linux!("VPN stop requested");
         // Bump generation so any running watchdog from the previous Connected
@@ -669,7 +687,10 @@ impl VpnManager {
         self.force_stop().await;
         self.set_state(VpnState::Disconnected).await;
         eprintln!("[VPN] State -> Disconnected");
-        diagnostic_linux!("Native state changed to Disconnected");
+        diagnostic_linux!(
+            "Native state changed to Disconnected; cleanup_elapsed_ms={}",
+            stop_started.elapsed().as_millis()
+        );
         Ok(())
     }
 

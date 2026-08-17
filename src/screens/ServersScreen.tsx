@@ -63,6 +63,89 @@ function serverListItemKey(server: VpnServer): string {
   ].join("|");
 }
 
+export function ServerListRow({
+  server,
+  flagsReady,
+  showEndpoint = false,
+  selected = false,
+  onSelect,
+}: {
+  server: ServerItem;
+  flagsReady: boolean;
+  showEndpoint?: boolean;
+  selected?: boolean;
+  onSelect?: (server: ServerItem) => void;
+}) {
+  const clickable = isAvailableVpnServer(server);
+  const unavailablePlaceholder = !clickable;
+  const showCountryLine = showEndpoint || unavailablePlaceholder;
+  const className = [
+    "server-item",
+    "server-item--server",
+    !showCountryLine && !showEndpoint ? "server-item--compact" : "",
+    showEndpoint ? "server-item--with-endpoint" : "",
+    selected && clickable ? "server-item--selected" : "",
+    !clickable ? "server-item--offline" : "",
+  ].filter(Boolean).join(" ");
+  const statusNode = unavailablePlaceholder ? (
+    <span className="server-item__offline-badge">{t("server_offline")}</span>
+  ) : server.ping < 0 ? (
+    <span className="server-item__ping-unavailable">{t("server_unavailable")}</span>
+  ) : server.ping > 0 ? (
+    <div className="server-item__ping">
+      <span className="server-item__ping-value" style={{ color: pingColor(server.ping) }}>
+        {server.ping}
+      </span>
+      <span className="server-item__ping-unit">ms</span>
+    </div>
+  ) : null;
+
+  return (
+    <div
+      className={className}
+      aria-current={selected && clickable ? "true" : undefined}
+      onClick={() => {
+        if (clickable) onSelect?.(server);
+      }}
+    >
+      <div className="server-item__main">
+        <span className="server-item__flag">
+          {flagsReady ? countryFlagForUi(server.country, server.name) : ""}
+        </span>
+        <div className="server-item__info">
+          <div className="server-item__name">
+            {serverDisplayName(server.name, server.country)}
+          </div>
+          {showCountryLine && (
+            <div className={`server-item__country ${unavailablePlaceholder ? "server-item__country--red" : ""}`}>
+              {unavailablePlaceholder
+                ? t("server_unavailable")
+                : countryName(serverCountryCodeForUi(server.country, server.name))}
+            </div>
+          )}
+        </div>
+        {statusNode}
+      </div>
+      {showEndpoint && (
+        <>
+          <div className="server-item__divider" aria-hidden="true" />
+          <div className="server-item__endpoint-row" aria-label="Server endpoint">
+            <span className="server-item__endpoint-marker" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <rect x="4" y="5" width="16" height="5" rx="1.6" stroke="currentColor" strokeWidth="1.8" />
+                <rect x="4" y="14" width="16" height="5" rx="1.6" stroke="currentColor" strokeWidth="1.8" />
+                <path d="M8 7.5h.01M8 16.5h.01" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+              </svg>
+            </span>
+            <span className="server-item__endpoint-domain">{server.address}</span>
+            <span className="server-item__endpoint-port">{server.port}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function ServersScreen({
   onBack,
   onSelect,
@@ -122,7 +205,7 @@ export default function ServersScreen({
     };
   }, [flagsReady]);
 
-  const showServers = useCallback((vpnServers: VpnServer[]) => {
+  const showServers = useCallback((vpnServers: VpnServer[], forcePing = false) => {
     if (!mountedRef.current) return;
     setError(null);
     const items: ServerItem[] = vpnServers.map((s) => ({
@@ -141,7 +224,7 @@ export default function ServersScreen({
       return;
     }
     setPingLoading(true);
-    void measureVpnServerPings(items, { force: true })
+    void measureVpnServerPings(items, { force: forcePing })
       .then((pings) => {
         if (!mountedRef.current || pingGenRef.current !== gen) return;
         setServers((current) =>
@@ -182,7 +265,7 @@ export default function ServersScreen({
     const isCurrent = () => mountedRef.current && generation === loadGenRef.current;
     if (previewServers) {
       if (!isCurrent()) return;
-      showServers(previewServers);
+      showServers(previewServers, opts.force === true);
       setServerLoading(false);
       setError(null);
       return;
@@ -207,7 +290,7 @@ export default function ServersScreen({
       }
       const vpnServers = await fetchVpnServers();
       if (!isCurrent()) return;
-      showServers(vpnServers);
+      showServers(vpnServers, opts.force === true);
     } catch (e) {
       if (isCurrent() && cachedServers.length === 0) {
         setError(loadErrorText(e));
@@ -304,105 +387,19 @@ export default function ServersScreen({
             </div>
           </div>
           {servers.map((server) => {
-            const clickable = isAvailableVpnServer(server);
-            const unavailablePlaceholder = !clickable;
             const selected =
               !automaticServerSelection &&
-              clickable &&
+              isAvailableVpnServer(server) &&
               isSameServerSelection(selectedServer, server);
-            const showCountryLine = showEndpoint || unavailablePlaceholder;
-            const className = [
-              "server-item",
-              "server-item--server",
-              !showCountryLine && !showEndpoint ? "server-item--compact" : "",
-              showEndpoint ? "server-item--with-endpoint" : "",
-              selected ? "server-item--selected" : "",
-              !clickable ? "server-item--offline" : "",
-            ].filter(Boolean).join(" ");
-            const statusNode = unavailablePlaceholder ? (
-              <span className="server-item__offline-badge">{t("server_offline")}</span>
-            ) : server.ping < 0 ? (
-              <span className="server-item__ping-unavailable">{t("server_unavailable")}</span>
-            ) : server.ping > 0 ? (
-              <div className="server-item__ping">
-                <span className="server-item__ping-value" style={{ color: pingColor(server.ping) }}>
-                  {server.ping}
-                </span>
-                <span className="server-item__ping-unit">ms</span>
-              </div>
-            ) : null;
-
             return (
-              <div
+              <ServerListRow
                 key={serverListItemKey(server)}
-                className={className}
-                aria-current={selected ? "true" : undefined}
-                onClick={() => {
-                  if (clickable) {
-                    onSelect(server);
-                  }
-                }}
-              >
-                <div className="server-item__main">
-                  <span className="server-item__flag">
-                    {flagsReady ? countryFlagForUi(server.country, server.name) : ""}
-                  </span>
-                  <div className="server-item__info">
-                    <div className="server-item__name">
-                      {serverDisplayName(server.name, server.country)}
-                    </div>
-                    {showCountryLine && (
-                      <div className={`server-item__country ${unavailablePlaceholder ? "server-item__country--red" : ""}`}>
-                        {unavailablePlaceholder
-                          ? t("server_unavailable")
-                          : countryName(serverCountryCodeForUi(server.country, server.name))}
-                      </div>
-                    )}
-                  </div>
-                  {statusNode}
-                </div>
-                {showEndpoint && (
-                  <>
-                    <div className="server-item__divider" aria-hidden="true" />
-                    <div className="server-item__endpoint-row" aria-label="Server endpoint">
-                      <span className="server-item__endpoint-marker" aria-hidden="true">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                          <rect
-                            x="4"
-                            y="5"
-                            width="16"
-                            height="5"
-                            rx="1.6"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                          />
-                          <rect
-                            x="4"
-                            y="14"
-                            width="16"
-                            height="5"
-                            rx="1.6"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                          />
-                          <path
-                            d="M8 7.5h.01M8 16.5h.01"
-                            stroke="currentColor"
-                            strokeWidth="2.4"
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                      </span>
-                      <span className="server-item__endpoint-domain">
-                        {server.address}
-                      </span>
-                      <span className="server-item__endpoint-port">
-                        {server.port}
-                      </span>
-                    </div>
-                  </>
-                )}
-              </div>
+                server={server}
+                flagsReady={flagsReady}
+                showEndpoint={showEndpoint}
+                selected={selected}
+                onSelect={onSelect}
+              />
             );
           })}
           </>

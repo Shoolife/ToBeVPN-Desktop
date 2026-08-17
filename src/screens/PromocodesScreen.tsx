@@ -17,6 +17,7 @@ import MaterialIcon, {
   type MaterialIconName,
 } from "../components/MaterialIcon";
 import Spinner from "../components/Spinner";
+import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import { getSavedLang, t, tf, type StringKey } from "../i18n";
@@ -514,7 +515,7 @@ export default function PromocodesScreen({
         />
       </header>
 
-      <main className="promocodes-content">
+      <ScrollEdgeAffordance as="main" className="promocodes-content">
         {!authenticated ? (
           <CenteredState
             title={t("promocodes_auth_title")}
@@ -669,7 +670,7 @@ export default function PromocodesScreen({
             )}
           </>
         )}
-      </main>
+      </ScrollEdgeAffordance>
 
       {activationResult && (
         <SuccessDialog result={activationResult} onDismiss={() => setActivationResult(null)} />

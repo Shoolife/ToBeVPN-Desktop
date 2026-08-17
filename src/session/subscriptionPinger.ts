@@ -6,6 +6,7 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { SUBSCRIPTION_BASE_URL, SUBS_FALLBACK_URL } from "../api/config";
 import { getDeviceFingerprint } from "./fingerprint";
 import { getSession } from "./store";
+import { recordDiagnosticEvent } from "./diagnostics";
 
 // Response access headers are not browser-safelisted. Use the Rust-side HTTP
 // plugin whenever the app runs inside Tauri, including development builds, so
@@ -59,33 +60,56 @@ export async function pingSubscriptionUrl(
   subscriptionUrl: string | null | undefined,
   subscriptionKey?: string | null,
 ): Promise<SubscriptionPingResult | null> {
+  const startedAt = performance.now();
+  const finish = (result: SubscriptionPingResult | null): SubscriptionPingResult | null => {
+    const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+    if (!result) {
+      recordDiagnosticEvent(
+        "Subscription-Network",
+        `Access request has no configured route; elapsed_ms=${elapsedMs}`,
+        "W",
+      );
+    } else if (result.isUsageBlocked || result.isUpdateRequired || elapsedMs >= 3_000) {
+      recordDiagnosticEvent(
+        "Subscription-Network",
+        `Access request completed; blocked=${result.isUsageBlocked}, update_required=${result.isUpdateRequired}, elapsed_ms=${elapsedMs}`,
+        result.isUsageBlocked ? "W" : "D",
+      );
+    }
+    return result;
+  };
   try {
     const { headers, minimumVersionHeader } = await buildSubscriptionRequestContext();
     if (!subscriptionUrl) {
       const primaryUrl = buildPrimaryUrlFromKey(subscriptionKey);
       const fallbackUrl = buildFallbackUrlFromKey(subscriptionKey);
       if (primaryUrl) {
-        return await primaryThenFallback(
+        return finish(await primaryThenFallback(
           primaryUrl,
           fallbackUrl,
           headers,
           minimumVersionHeader,
-        );
+        ));
       }
-      if (!fallbackUrl) return null;
+      if (!fallbackUrl) return finish(null);
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
-      if (await isProxyGatewayAuthError(response)) return null;
-      return readResult(response, minimumVersionHeader);
+      if (await isProxyGatewayAuthError(response)) return finish(null);
+      return finish(readResult(response, minimumVersionHeader));
     }
     const fallbackUrl = buildFallbackUrl(subscriptionUrl);
-    return await primaryThenFallback(
+    return finish(await primaryThenFallback(
       subscriptionUrl,
       fallbackUrl,
       headers,
       minimumVersionHeader,
-    );
-  } catch {
+    ));
+  } catch (error) {
     console.warn("[pingSubscriptionUrl] failed");
+    recordDiagnosticEvent(
+      "Subscription-Network",
+      `Access request failed; reason=${diagnosticNetworkFailure(error)}, elapsed_ms=${Math.max(0, Math.round(performance.now() - startedAt))}`,
+      "W",
+    );
     return null;
   }
 }
@@ -94,35 +118,59 @@ export async function fetchSubscriptionProfile(
   subscriptionUrl: string | null | undefined,
   subscriptionKey?: string | null,
 ): Promise<SubscriptionProfileResult | null> {
+  const startedAt = performance.now();
+  const finish = (result: SubscriptionProfileResult | null): SubscriptionProfileResult | null => {
+    const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+    recordDiagnosticEvent(
+      "Subscription-Profile",
+      result
+        ? `Profile request completed; successful=${result.isSuccessful}, links=${result.links.length}, blocked=${result.isUsageBlocked}, update_required=${result.isUpdateRequired}, elapsed_ms=${elapsedMs}`
+        : `Profile request has no configured route; elapsed_ms=${elapsedMs}`,
+      result?.isSuccessful ? "D" : "W",
+    );
+    return result;
+  };
   try {
     const { headers, minimumVersionHeader } = await buildSubscriptionRequestContext();
     if (!subscriptionUrl) {
       const primaryUrl = buildPrimaryUrlFromKey(subscriptionKey);
       const fallbackUrl = buildFallbackUrlFromKey(subscriptionKey);
       if (primaryUrl) {
-        return await primaryThenFallbackProfile(
+        return finish(await primaryThenFallbackProfile(
           primaryUrl,
           fallbackUrl,
           headers,
           minimumVersionHeader,
-        );
+        ));
       }
-      if (!fallbackUrl) return null;
+      if (!fallbackUrl) return finish(null);
       const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
-      if (await isProxyGatewayAuthError(response)) return null;
-      return await readProfileResult(response, minimumVersionHeader);
+      if (await isProxyGatewayAuthError(response)) return finish(null);
+      return finish(await readProfileResult(response, minimumVersionHeader));
     }
     const fallbackUrl = buildFallbackUrl(subscriptionUrl);
-    return await primaryThenFallbackProfile(
+    return finish(await primaryThenFallbackProfile(
       subscriptionUrl,
       fallbackUrl,
       headers,
       minimumVersionHeader,
-    );
-  } catch {
+    ));
+  } catch (error) {
     console.warn("[fetchSubscriptionProfile] failed");
+    recordDiagnosticEvent(
+      "Subscription-Profile",
+      `Profile request failed; reason=${diagnosticNetworkFailure(error)}, elapsed_ms=${Math.max(0, Math.round(performance.now() - startedAt))}`,
+      "W",
+    );
     return null;
   }
+}
+
+function diagnosticNetworkFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("abort") || message.includes("timeout")) return "timeout";
+  if (message.includes("reject") || message.includes("forbidden")) return "rejected";
+  return "network";
 }
 
 interface SubscriptionRequestContext {

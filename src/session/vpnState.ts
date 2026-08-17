@@ -66,6 +66,9 @@ const SYSTEM_RESUME_GAP_MS = 60_000;
 const SYSTEM_RESUME_NETWORK_SETTLE_MS = 3_000;
 const SYSTEM_RESUME_ONLINE_WAIT_MS = 15_000;
 const SYSTEM_RESUME_ONLINE_POLL_MS = 500;
+const SYSTEM_RESUME_HEALTH_ATTEMPTS = 3;
+const SYSTEM_RESUME_HEALTH_RETRY_MS = 2_000;
+const SYSTEM_RESUME_HEALTH_TIMEOUT_MS = 5_000;
 const NETWORK_CHANGE_SETTLE_MS = 1_500;
 
 export interface VpnRuntimeState {
@@ -109,6 +112,14 @@ export function getActiveVpnReconnectServer(): ServerVpnConfig | null {
 }
 
 let pollTimer: number | null = null;
+let pollGeneration = 0;
+let lastRuntimeTickAt = 0;
+// get_traffic_stats can take up to one second on Windows (two bounded Xray
+// stats queries). An async setInterval without a gate queues another native
+// command before the previous one finishes; after a long lock/sleep those
+// queued commands can keep stop_vpn waiting for minutes. There must never be
+// more than one traffic poll in flight.
+let trafficPollInFlight = false;
 let accessBlockCounter = 0;
 let accessBlockCheckInFlight = false;
 let heartbeatCounter = 0;
@@ -122,6 +133,8 @@ let resumeRecoveryInFlight = false;
 let tunnelRecoveryInFlight = false;
 let trafficQualityConfirmed = false;
 let lastDiagnosticTrafficAt = 0;
+let lastStatsDiagnosticFailureAt = 0;
+let statsDiagnosticsFailed = false;
 let nextTunnelProbeId = 0;
 
 interface ActiveTunnelProbe {
@@ -212,17 +225,23 @@ async function refreshServerConfigAfterAccessCheck(
 
 function startPolling() {
   if (pollTimer !== null) return;
+  const generation = ++pollGeneration;
   accessBlockCounter = 0;
   heartbeatCounter = 0;
-  let lastPollAt = Date.now();
+  lastRuntimeTickAt = Date.now();
+  lastStatsDiagnosticFailureAt = 0;
+  statsDiagnosticsFailed = false;
   pollTimer = window.setInterval(async () => {
     const now = Date.now();
-    const gapMs = now - lastPollAt;
-    lastPollAt = now;
+    const gapMs = now - lastRuntimeTickAt;
+    lastRuntimeTickAt = now;
     if (gapMs >= SYSTEM_RESUME_GAP_MS) {
       void recoverTunnelAfterSystemResume(gapMs);
       return;
     }
+
+    if (trafficPollInFlight) return;
+    trafficPollInFlight = true;
 
     let delta = 0;
     try {
@@ -239,9 +258,27 @@ function startPolling() {
         watchdogRecoveryAttempts = 0;
         tunnelHealthFailedCycles = 0;
       }
-    } catch {
+      if (statsDiagnosticsFailed) {
+        statsDiagnosticsFailed = false;
+        recordDiagnosticEvent("VPN-Traffic", "Traffic statistics query recovered", "D");
+      }
+    } catch (error) {
       // Stats API may still be warming up after connect.
+      statsDiagnosticsFailed = true;
+      if (now - lastStatsDiagnosticFailureAt >= 60_000) {
+        lastStatsDiagnosticFailureAt = now;
+        recordDiagnosticEvent(
+          "VPN-Traffic",
+          `Traffic statistics query failed; polling will continue: ${String(error)}`,
+          "W",
+        );
+      }
+    } finally {
+      trafficPollInFlight = false;
     }
+    // A stop/reconnect may have happened while the native stats query was in
+    // progress. Never let that obsolete tick mutate the new session.
+    if (generation !== pollGeneration) return;
     // Record one tick of session time even when idle, mirroring the phone.
     // Persists into the local stats bucket store (used by StatsScreen).
     // The panel-side trafficUsedBytes is refreshed independently via syncSubscription.
@@ -309,6 +346,8 @@ function startPolling() {
 }
 
 function stopPolling() {
+  pollGeneration++;
+  lastRuntimeTickAt = 0;
   if (pollTimer !== null) {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -348,7 +387,7 @@ function userFacingVpnError(error: unknown, fallback = t("vpn_error_connect")): 
   if (/DNS resolve timed out|DNS resolve failed/i.test(message)) {
     return t("vpn_error_dns");
   }
-  if (/timed out after|did not start within|did not appear within/i.test(message)) {
+  if (/timed out after|did not start within|did not appear within|never became ready within/i.test(message)) {
     return t("vpn_error_connect_timeout");
   }
   if (/vpn tunnel stopped|vpn process stopped|xray/i.test(message)) {
@@ -394,6 +433,7 @@ async function connectVpnInternal(
   server: ServerVpnConfig,
   resetWatchdogRecovery: boolean,
   avoidCurrentInAuto = false,
+  nativeTunnelAlreadyStopped = false,
 ): Promise<void> {
   // Refuse the panel's "subscription expired" sentinel server before we
   // hand it to the Rust-side engine. xray would crash on its all-zeros
@@ -427,7 +467,8 @@ async function connectVpnInternal(
   // start pipeline is already serialized in Rust; cancelling the old fetches
   // here also prevents an obsolete health result from scheduling recovery.
   stopTunnelHealthCheck();
-  const cancelInFlightStart = state.connecting && !state.connected;
+  const cancelInFlightStart =
+    state.connecting && !state.connected && !nativeTunnelAlreadyStopped;
   const hadConnectedTunnel = state.connected;
   const previousServerForRecovery = currentServerForRecovery;
   const gen = ++connectionGeneration;
@@ -439,6 +480,7 @@ async function connectVpnInternal(
     watchdogRecoveryAttempts = 0;
   }
   setState({ connecting: true, disconnecting: false, lastError: null });
+  const connectionStartedAt = performance.now();
   recordDiagnosticEvent(
     "VPN",
     `Connection requested; reconnect=${hadConnectedTunnel}, recovery=${!resetWatchdogRecovery}, routing=${server.routing_mode ?? "default"}`,
@@ -463,7 +505,13 @@ async function connectVpnInternal(
     const refresh = refreshServerConfigAfterAccessCheck(serverToStart, {
       avoidCurrentInAuto,
     });
+    const preparationStartedAt = performance.now();
     const blocked = await blockPing;
+    recordDiagnosticEvent(
+      "VPN-Prepare",
+      `Access verification completed; blocked=${blocked}, elapsed_ms=${Math.max(0, Math.round(performance.now() - preparationStartedAt))}`,
+      blocked ? "W" : "D",
+    );
     if (gen !== connectionGeneration) {
       refresh.catch(() => {});
       return;
@@ -476,11 +524,22 @@ async function connectVpnInternal(
       throw new Error(t("usage_blocked"));
     }
     serverToStart = await refresh;
+    recordDiagnosticEvent(
+      "VPN-Prepare",
+      `Fresh server configuration selected; automatic=${loadAutomaticServerSelection()}, total_elapsed_ms=${Math.max(0, Math.round(performance.now() - preparationStartedAt))}`,
+      "D",
+    );
     if (gen !== connectionGeneration) return;
     currentServerForRecovery = serverToStart;
     serverStartAttempted = true;
     recordDiagnosticEvent("VPN", "Starting native VPN core and tunnel");
+    const nativeStartAt = performance.now();
     await startNativeVpnWithTimeout(serverToStart, gen);
+    recordDiagnosticEvent(
+      "VPN",
+      `Native VPN startup completed; elapsed_ms=${Math.max(0, Math.round(performance.now() - nativeStartAt))}`,
+      "D",
+    );
     if (gen !== connectionGeneration) return;
     nativeStartCompleted = true;
     // Native start already proves that Xray, tun2socks, Wintun and the routes
@@ -503,14 +562,18 @@ async function connectVpnInternal(
     void recordServerConnectionSuccess(serverToStart);
     recordDiagnosticEvent(
       "VPN",
-      "Native VPN connection established; background traffic validation scheduled",
+      `Native VPN connection established; background traffic validation scheduled; total_elapsed_ms=${Math.max(0, Math.round(performance.now() - connectionStartedAt))}`,
     );
     startPolling();
     startTunnelHealthCheck(gen);
   } catch (e) {
     if (gen !== connectionGeneration) return;
     const msg = userFacingVpnError(e);
-    recordDiagnosticEvent("VPN", `Connection attempt failed: ${String(e)}`, "E");
+    recordDiagnosticEvent(
+      "VPN",
+      `Connection attempt failed after ${Math.max(0, Math.round(performance.now() - connectionStartedAt))}ms: ${String(e)}`,
+      "E",
+    );
     if (serverStartAttempted) {
       await recordServerConnectionFailure(serverToStart);
     }
@@ -637,6 +700,18 @@ function stopTunnelHealthCheck() {
 async function runTunnelHealthLoop(gen: number, source = "PERIODIC"): Promise<void> {
   if (gen !== connectionGeneration || !state.connected) return;
 
+  // On Windows a due health timeout and the traffic interval are released
+  // together after screen unlock. Whichever callback runs first must route
+  // through the post-resume validator; otherwise the health callback could
+  // start a blind recovery before the interval notices the long timer gap.
+  const now = Date.now();
+  if (lastRuntimeTickAt > 0 && now - lastRuntimeTickAt >= SYSTEM_RESUME_GAP_MS) {
+    const gapMs = now - lastRuntimeTickAt;
+    lastRuntimeTickAt = now;
+    await recoverTunnelAfterSystemResume(gapMs);
+    return;
+  }
+
   if (navigator.onLine !== false) {
     const healthy = await probeTunnelWithRetries(TUNNEL_HEALTH_ATTEMPTS);
     if (gen !== connectionGeneration || !state.connected) return;
@@ -746,7 +821,7 @@ async function recoverTunnelAfterHealthFailure(gen: number): Promise<void> {
     if (gen !== connectionGeneration) return;
     await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
     if (gen !== connectionGeneration) return;
-    await connectVpnInternal(server, false, true).catch(() => {});
+    await connectVpnInternal(server, false, true, true).catch(() => {});
   } finally {
     tunnelRecoveryInFlight = false;
   }
@@ -755,30 +830,70 @@ async function recoverTunnelAfterHealthFailure(gen: number): Promise<void> {
 async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
   if (resumeRecoveryInFlight || tunnelRecoveryInFlight) return;
   const server = currentServerForRecovery;
-  if (!server || (!state.connected && !state.connecting)) return;
+  // The timer exists for an established session. Never let a delayed tick
+  // interfere with a user-initiated connection that is already in progress.
+  if (!server || !state.connected) return;
 
   resumeRecoveryInFlight = true;
   tunnelRecoveryInFlight = true;
   tunnelHealthFailedCycles = 0;
   const gen = ++connectionGeneration;
-  console.info(`[VPN] system resume detected after ${Math.round(gapMs / 1000)}s, restarting tunnel`);
+  console.info(`[VPN] system resume detected after ${Math.round(gapMs / 1000)}s, validating tunnel`);
   recordDiagnosticEvent(
     "VPN-Recovery",
-    `System resume detected after ${Math.round(gapMs / 1000)} seconds; restarting tunnel`,
+    `System resume detected after ${Math.round(gapMs / 1000)} seconds; validating existing tunnel before recovery`,
     "W",
   );
   stopTunnelHealthCheck();
   stopPolling();
-  setState({ connected: false, connecting: true, disconnecting: false, lastError: null });
 
   try {
-    await engineStop().catch((e) => {
-      console.warn("[VPN] resume cleanup failed before reconnect:", e);
-    });
-    statsSessionEnd();
-    await waitForNetworkAfterResume();
+    const networkAvailable = await waitForNetworkAfterResume();
     if (gen !== connectionGeneration) return;
-    await connectVpnInternal(server, true);
+
+    if (!networkAvailable) {
+      recordDiagnosticEvent(
+        "VPN-Recovery",
+        "Underlying network is still offline after resume; preserving tunnel and waiting for the online event",
+        "W",
+      );
+      if (state.connected) startPolling();
+      return;
+    }
+
+    const healthy = await probeTunnelWithRetries(
+      SYSTEM_RESUME_HEALTH_ATTEMPTS,
+      SYSTEM_RESUME_HEALTH_RETRY_MS,
+      SYSTEM_RESUME_HEALTH_TIMEOUT_MS,
+    );
+    if (gen !== connectionGeneration || healthy === null) return;
+    if (healthy) {
+      watchdogRecoveryAttempts = 0;
+      tunnelHealthFailedCycles = 0;
+      recordDiagnosticEvent(
+        "VPN-Recovery",
+        "Existing tunnel remained healthy after system resume; restart skipped",
+      );
+      void recordServerTunnelHealthy(server);
+      if (state.connected) {
+        startPolling();
+        startTunnelHealthCheck(gen);
+      }
+      return;
+    }
+
+    recordDiagnosticEvent(
+      "VPN-Recovery",
+      "Existing tunnel failed post-resume validation; performing one serialized restart",
+      "W",
+    );
+    setState({ connected: false, connecting: true, disconnecting: false, lastError: null });
+    await engineStop();
+    statsSessionEnd();
+    if (gen !== connectionGeneration) return;
+    await sleepMs(TUNNEL_RECOVERY_RESTART_DELAY_MS);
+    if (gen !== connectionGeneration) return;
+    await connectVpnInternal(server, true, false, true);
   } catch (e) {
     const msg = userFacingVpnError(e);
     recordDiagnosticEvent("VPN-Recovery", `Resume recovery failed: ${String(e)}`, "E");
@@ -791,12 +906,13 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
   }
 }
 
-async function waitForNetworkAfterResume(): Promise<void> {
+async function waitForNetworkAfterResume(): Promise<boolean> {
   await sleepMs(SYSTEM_RESUME_NETWORK_SETTLE_MS);
   const startedAt = Date.now();
   while (navigator.onLine === false && Date.now() - startedAt < SYSTEM_RESUME_ONLINE_WAIT_MS) {
     await sleepMs(SYSTEM_RESUME_ONLINE_POLL_MS);
   }
+  return navigator.onLine !== false;
 }
 
 async function stopVpnWithError(message: string): Promise<void> {
@@ -831,6 +947,11 @@ async function probeTunnelWithRetries(
 ): Promise<boolean | null> {
   if (activeTunnelProbe !== null) {
     const probe = activeTunnelProbe;
+    recordDiagnosticEvent(
+      "VPN-Health",
+      `Tunnel probe joined an already active probe; probe_id=${probe.id}`,
+      "D",
+    );
     const healthy = await probe.promise;
     // Cancellation means this result belongs to an obsolete connection or
     // network state. It must never be counted as a failed health check.
@@ -866,10 +987,24 @@ async function runTunnelProbeAttempts(
   retryDelayMs: number,
   attemptTimeoutMs: number,
 ): Promise<boolean> {
+  const probeStartedAt = performance.now();
   for (let i = 0; i < attempts; i++) {
     if (probe.cancelled) return false;
-    if (await probeTunnelOnce(probe, attemptTimeoutMs)) return true;
+    const attemptStartedAt = performance.now();
+    if (await probeTunnelOnce(probe, attemptTimeoutMs)) {
+      recordDiagnosticEvent(
+        "VPN-Health",
+        `Tunnel probe passed; attempt=${i + 1}/${attempts}, attempt_elapsed_ms=${Math.max(0, Math.round(performance.now() - attemptStartedAt))}, total_elapsed_ms=${Math.max(0, Math.round(performance.now() - probeStartedAt))}`,
+        "D",
+      );
+      return true;
+    }
     if (probe.cancelled) return false;
+    recordDiagnosticEvent(
+      "VPN-Health",
+      `Tunnel probe attempt failed; attempt=${i + 1}/${attempts}, elapsed_ms=${Math.max(0, Math.round(performance.now() - attemptStartedAt))}`,
+      "D",
+    );
     if (i < attempts - 1) await sleepMs(retryDelayMs);
   }
   return false;

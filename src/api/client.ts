@@ -2,6 +2,7 @@
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { BOT_API_BASE_URL, BOT_API_FALLBACK_URL, CONTROL_PLANE_BYPASS_HOSTS } from "./config";
 import { getDeviceFingerprint } from "../session/fingerprint";
+import { recordDiagnosticEvent } from "../session/diagnostics";
 import {
   clearSessionTokens,
   getSession,
@@ -126,6 +127,44 @@ const FALLBACK_HTTP_STATUS = 403;
 let tokenOperation: { generation: number; promise: Promise<string | null> } | null = null;
 let primaryUnavailableUntil = 0;
 
+// Diagnostic names are deliberately fixed and never derived from path/query
+// values. Some API routes contain a Telegram id, pairing code or auth token;
+// those values must not enter an exportable journal even temporarily.
+function diagnosticApiRoute(path: string): string {
+  const normalized = path.replace(/^\/+/, "").toLowerCase();
+  const routes: Array<[prefix: string, label: string]> = [
+    ["api/device/bootstrap", "device-bootstrap"],
+    ["api/device/refresh", "device-refresh"],
+    ["api/device/register", "device-heartbeat"],
+    ["api/device/unlink", "device-unlink"],
+    ["api/device/logout", "device-logout"],
+    ["api/device/referrer", "referrer"],
+    ["api/device/save-email", "save-email"],
+    ["api/devices", "devices"],
+    ["api/auth/request", "auth-request"],
+    ["api/auth/status", "auth-status"],
+    ["api/referrals", "referrals"],
+    ["api/user/promocodes/activate", "promocode-activate"],
+    ["api/user/promocodes", "promocodes"],
+    ["api/user/avatar", "avatar"],
+    ["api/tv/pair/create", "tv-pair-create"],
+    ["api/tv/pair/status", "tv-pair-status"],
+    ["api/panel/user-by-telegram", "panel-user"],
+    ["api/panel/nodes", "server-metadata"],
+    ["api/subscription/current-plan", "current-plan"],
+    ["api/purchase/plans", "purchase-plans"],
+  ];
+  return routes.find(([prefix]) => normalized.startsWith(prefix))?.[1] ?? "other";
+}
+
+function diagnosticRequestFailure(error: unknown, signal: AbortSignal | null | undefined): string {
+  if (signal?.aborted) return "cancelled";
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("timed out") || message.includes("timeout")) return "timeout";
+  if (message.includes("session changed")) return "session-changed";
+  return "network";
+}
+
 function publicErrorMessage(raw: string): string {
   let message = raw
     .replace(/https?:\/\/[^\s)]+/gi, "[configured endpoint]")
@@ -227,15 +266,49 @@ async function fallbackFirstFetch(
   primaryInit: RequestInit,
   fallbackInit: RequestInit,
   userSignal: AbortSignal | null | undefined,
+  diagnosticRoute: string,
 ): Promise<Response> {
+  recordDiagnosticEvent(
+    "API-Route",
+    `Fallback-first request started; route=${diagnosticRoute}`,
+    "D",
+  );
+  let rejectedFallbackResponse: Response | null = null;
   try {
     const response = await attemptFetch(fallbackUrl, fallbackInit, FALLBACK_TIMEOUT_MS, userSignal);
-    return await rejectProxyGatewayAuthError(response);
+    const validated = await rejectProxyGatewayAuthError(response);
+    if (validated.ok) return validated;
+    // A fallback HTTP error is not authoritative: the proxy can lag behind
+    // the primary API and legitimately have no newer route yet. Keep the
+    // response only as a last resort and give the primary a chance to answer.
+    rejectedFallbackResponse = validated;
+    recordDiagnosticEvent(
+      "API-Route",
+      `Fallback-first response was not successful; route=${diagnosticRoute}, status=${validated.status}; trying primary`,
+      "W",
+    );
   } catch (fallbackError) {
     if (userSignal?.aborted) throw fallbackError;
+    recordDiagnosticEvent(
+      "API-Route",
+      `Fallback-first transport failed; route=${diagnosticRoute}; trying primary`,
+      "W",
+    );
+  }
+
+  try {
     const response = await attemptFetch(primaryUrl, primaryInit, PRIMARY_TIMEOUT_MS, userSignal);
     primaryUnavailableUntil = 0;
+    recordDiagnosticEvent(
+      "API-Route",
+      `Primary route answered after fallback-first retry; route=${diagnosticRoute}, status=${response.status}`,
+      response.ok ? "D" : "W",
+    );
     return response;
+  } catch (primaryError) {
+    if (userSignal?.aborted) throw primaryError;
+    if (rejectedFallbackResponse) return rejectedFallbackResponse;
+    throw primaryError;
   }
 }
 
@@ -245,6 +318,8 @@ async function hedgedGetFetch(
   primaryInit: RequestInit,
   fallbackInit: RequestInit,
   userSignal: AbortSignal | null | undefined,
+  waitForOkResponse = false,
+  diagnosticRoute = "other",
 ): Promise<Response> {
   type HedgedResponse = {
     source: "primary" | "fallback";
@@ -254,6 +329,7 @@ async function hedgedGetFetch(
   const primaryController = new AbortController();
   const fallbackController = new AbortController();
   let rejectedPrimaryResponse: Response | null = null;
+  let rejectedFallbackResponse: Response | null = null;
   if (userSignal) {
     const abortBoth = () => {
       primaryController.abort();
@@ -269,9 +345,14 @@ async function hedgedGetFetch(
     PRIMARY_TIMEOUT_MS,
     primaryController.signal,
   ).then((response) => {
-    if (response.status === FALLBACK_HTTP_STATUS) {
+    // A completed HTTP request is not necessarily a usable response.  In
+    // particular the fallback gateway can answer with a fast 404/429 while
+    // the (slightly slower) primary is about to return the requested data.
+    // Treating that first non-2xx response as the hedge winner made binary
+    // endpoints such as /api/user/avatar disappear intermittently.
+    if (response.status === FALLBACK_HTTP_STATUS || (waitForOkResponse && !response.ok)) {
       rejectedPrimaryResponse = response;
-      throw new Error("Primary route rejected request");
+      throw new Error(`Primary route returned HTTP ${response.status}`);
     }
     return { source: "primary" as const, response };
   });
@@ -283,7 +364,15 @@ async function hedgedGetFetch(
       FALLBACK_TIMEOUT_MS,
       fallbackController.signal,
     );
-    return await rejectProxyGatewayAuthError(response);
+    const validated = await rejectProxyGatewayAuthError(response);
+    // Never let a non-2xx response from the fallback win the hedge. The
+    // primary response remains authoritative; the rejected fallback is only
+    // returned later when the primary route itself cannot produce a response.
+    if (!validated.ok) {
+      rejectedFallbackResponse = validated;
+      throw new Error(`Fallback route returned HTTP ${validated.status}`);
+    }
+    return validated;
   })().then((response) => ({ source: "fallback" as const, response }));
 
   try {
@@ -293,12 +382,27 @@ async function hedgedGetFetch(
       primaryUnavailableUntil = 0;
     } else {
       primaryController.abort();
-      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      // A non-2xx primary still proves that the primary route is reachable;
+      // only prefer the fallback for later requests when the primary did not
+      // produce an HTTP response at all (network failure/timeout).
+      primaryUnavailableUntil = waitForOkResponse && rejectedPrimaryResponse
+        ? 0
+        : performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+      recordDiagnosticEvent(
+        "API-Route",
+        `Fallback route won delayed request; route=${diagnosticRoute}`,
+        "D",
+      );
     }
     return winner.response;
   } catch {
-    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    primaryController.abort();
+    fallbackController.abort();
+    primaryUnavailableUntil = waitForOkResponse && rejectedPrimaryResponse
+      ? 0
+      : performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
     if (rejectedPrimaryResponse) return rejectedPrimaryResponse;
+    if (rejectedFallbackResponse) return rejectedFallbackResponse;
     throw new Error("Network request failed");
   }
 }
@@ -330,10 +434,11 @@ async function rejectProxyGatewayAuthError(response: Response): Promise<Response
   throw new Error("Fallback route rejected request");
 }
 
-async function performFetch(
+async function performFetchRoute(
   path: string,
   init: RequestInit = {},
   query?: Record<string, string | number | undefined>,
+  options: { waitForOkHedge?: boolean } = {},
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
@@ -353,13 +458,40 @@ async function performFetch(
     : null;
   const method = (init.method ?? "GET").toUpperCase();
   const isSafeMethod = method === "GET" || method === "HEAD";
+  const diagnosticRoute = diagnosticApiRoute(path);
 
-  if (fallbackUrl && isSafeMethod && primaryUnavailableUntil > performance.now()) {
-    return fallbackFirstFetch(primaryUrl, fallbackUrl, primaryInit, fallbackInit, userSignal);
+  // Endpoints that explicitly require a successful response must not inherit
+  // the global fallback-first cooldown. The fallback proxy can legitimately
+  // lack a newer/account-specific route (for example purchase plans) and
+  // answer quickly with 400 while the healthy primary would return the data.
+  // Keep the primary + fallback hedge for those requests so a stale cooldown
+  // from an unrelated endpoint cannot hide tariffs or the user avatar.
+  if (
+    fallbackUrl &&
+    isSafeMethod &&
+    options.waitForOkHedge !== true &&
+    primaryUnavailableUntil > performance.now()
+  ) {
+    return fallbackFirstFetch(
+      primaryUrl,
+      fallbackUrl,
+      primaryInit,
+      fallbackInit,
+      userSignal,
+      diagnosticRoute,
+    );
   }
 
   if (fallbackUrl && isSafeMethod) {
-    return hedgedGetFetch(primaryUrl, fallbackUrl, primaryInit, fallbackInit, userSignal);
+    return hedgedGetFetch(
+      primaryUrl,
+      fallbackUrl,
+      primaryInit,
+      fallbackInit,
+      userSignal,
+      options.waitForOkHedge === true,
+      diagnosticRoute,
+    );
   }
 
   try {
@@ -384,6 +516,44 @@ async function performFetch(
       userSignal,
     );
     return await rejectProxyGatewayAuthError(response);
+  }
+}
+
+async function performFetch(
+  path: string,
+  init: RequestInit = {},
+  query?: Record<string, string | number | undefined>,
+  options: { waitForOkHedge?: boolean } = {},
+): Promise<Response> {
+  const startedAt = performance.now();
+  const route = diagnosticApiRoute(path);
+  const method = (init.method ?? "GET").toUpperCase();
+  try {
+    const response = await performFetchRoute(path, init, query, options);
+    const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+    if (!response.ok) {
+      recordDiagnosticEvent(
+        "API",
+        `Request returned an error; route=${route}, method=${method}, status=${response.status}, elapsed_ms=${elapsedMs}`,
+        "W",
+      );
+    } else if (elapsedMs >= 3_000) {
+      recordDiagnosticEvent(
+        "API",
+        `Request completed slowly; route=${route}, method=${method}, status=${response.status}, elapsed_ms=${elapsedMs}`,
+        "D",
+      );
+    }
+    return response;
+  } catch (error) {
+    const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+    const reason = diagnosticRequestFailure(error, init.signal);
+    recordDiagnosticEvent(
+      "API",
+      `Request failed before a response; route=${route}, method=${method}, reason=${reason}, elapsed_ms=${elapsedMs}`,
+      reason === "cancelled" ? "D" : "W",
+    );
+    throw error;
   }
 }
 
@@ -620,6 +790,7 @@ async function request<T>(
   query?: Record<string, string | number | undefined>,
   authMode: AuthMode = "access",
   retryOnAuthFailure = true,
+  fetchOptions: { waitForOkHedge?: boolean } = {},
 ): Promise<T> {
   const headers = new Headers(init.headers);
   let accessToken: string | null = null;
@@ -638,7 +809,7 @@ async function request<T>(
     }
   }
 
-  const response = await performFetch(path, { ...init, headers }, query);
+  const response = await performFetch(path, { ...init, headers }, query, fetchOptions);
   assertSessionIsCurrent();
   const method = (init.method ?? "GET").toUpperCase();
   if (
@@ -649,7 +820,7 @@ async function request<T>(
     const recoveredToken = await recoverAccessTokenAfter401(accessToken);
     assertSessionIsCurrent();
     if (recoveredToken && (method === "GET" || method === "HEAD")) {
-      return request(path, init, query, authMode, false);
+      return request(path, init, query, authMode, false, fetchOptions);
     }
   }
 
@@ -662,8 +833,9 @@ async function request<T>(
 
 // Fetches the current user's Telegram avatar (binary JPEG from
 // GET /api/user/avatar, same endpoint the Android client uses). Returns the
-// image bytes as a Blob, or null when the user has no photo / the request
-// fails. The endpoint is rate-limited, so callers should cache the result
+// image bytes as a Blob, or null when the user has no photo. Request failures
+// throw so a temporary auth/network problem is not cached as an absent photo.
+// The endpoint is rate-limited, so callers should cache a successful result
 // for the app session instead of re-fetching on every screen open.
 export async function fetchUserAvatar(): Promise<Blob | null> {
   const requestGeneration = getSessionGeneration();
@@ -677,7 +849,12 @@ export async function fetchUserAvatar(): Promise<Blob | null> {
   assertSessionIsCurrent();
   if (accessToken) headers.set(DIRECT_AUTH_HEADER, `Bearer ${accessToken}`);
 
-  let response = await performFetch("api/user/avatar", { method: "GET", headers });
+  let response = await performFetch(
+    "api/user/avatar",
+    { method: "GET", headers },
+    undefined,
+    { waitForOkHedge: true },
+  );
   assertSessionIsCurrent();
   if (isInvalidSessionStatus(response.status)) {
     const recovered = await recoverAccessTokenAfter401(accessToken);
@@ -685,12 +862,24 @@ export async function fetchUserAvatar(): Promise<Blob | null> {
     if (recovered) {
       const retryHeaders = new Headers();
       retryHeaders.set(DIRECT_AUTH_HEADER, `Bearer ${recovered}`);
-      response = await performFetch("api/user/avatar", { method: "GET", headers: retryHeaders });
+      response = await performFetch(
+        "api/user/avatar",
+        { method: "GET", headers: retryHeaders },
+        undefined,
+        { waitForOkHedge: true },
+      );
       assertSessionIsCurrent();
     }
   }
 
-  if (!response.ok) return null;
+  // A missing photo is a valid empty result. Authentication/server failures
+  // must stay retryable: caching every non-2xx response as "no avatar" made
+  // the image remain absent when Settings mounted a moment before the secure
+  // access token had finished loading.
+  if (response.status === 204 || response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`Avatar request failed with HTTP ${response.status}`);
+  }
   // Match the Android client: the endpoint returns raw JPEG bytes, but the
   // Content-Type can be generic (e.g. application/octet-stream). Read the
   // bytes and re-wrap them as image/jpeg so the object URL renders in <img>
@@ -807,7 +996,18 @@ export function getNodes(): Promise<PanelResponse<PanelNodeDto[]>> {
 }
 
 export function getCurrentPlan(): Promise<ApiResponse<CurrentPlanDto>> {
-  return request("api/subscription/current-plan", { method: "GET" });
+  // The current-plan payload feeds the limits shown above the tariff list.
+  // Like purchase plans, this is an account-specific route that may not yet
+  // exist on the fallback proxy. Never let a cached fallback-first decision
+  // replace a valid primary response with placeholder limits.
+  return request(
+    "api/subscription/current-plan",
+    { method: "GET" },
+    undefined,
+    "access",
+    true,
+    { waitForOkHedge: true },
+  );
 }
 
 // --- Email ---
@@ -822,5 +1022,14 @@ export function saveEmail(req: SaveEmailRequestDto): Promise<ApiResponse<unknown
 // --- Purchase plans ---
 
 export function getPurchasePlans(): Promise<ApiResponse<PurchasePlansDto>> {
-  return request("api/purchase/plans", { method: "GET" });
+  // Prices are account-specific and a fast non-2xx response from the backup
+  // gateway must not beat a valid (slightly slower) primary response.
+  return request(
+    "api/purchase/plans",
+    { method: "GET" },
+    undefined,
+    "access",
+    true,
+    { waitForOkHedge: true },
+  );
 }

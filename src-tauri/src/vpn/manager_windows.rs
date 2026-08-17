@@ -13,6 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -70,6 +71,7 @@ const WINTUN_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd66, 0x6f62, 0x6576, 0x706e, 0, 0
 const WINTUN_PUBLIC_IPV6_ROUTE: Ipv6Addr = Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0);
 const WINTUN_PUBLIC_IPV6_PREFIX: u8 = 3;
 
+#[derive(Clone)]
 pub struct VpnManager {
     state: Arc<Mutex<VpnState>>,
     xray_process: Arc<Mutex<Option<Child>>>,
@@ -195,6 +197,7 @@ impl VpnManager {
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
+        let connect_started = Instant::now();
         log_win!("══════════════════════════════════════════════════");
         log_win!("[VPN-WIN] START called");
 
@@ -207,11 +210,13 @@ impl VpnManager {
                 message: msg.clone(),
             })
             .await;
+            log_win!("[VPN-WIN] Connection failed at privilege check");
             return Err(msg);
         }
 
         let prev_state = self.state.lock().await.clone();
         if matches!(&prev_state, VpnState::Disconnecting) {
+            log_win!("[VPN-WIN] Connection rejected because cleanup is still in progress");
             return Err("Disconnecting in progress, try again in a moment".into());
         }
 
@@ -222,6 +227,7 @@ impl VpnManager {
         // concurrently. They are independent DNS lookups, so overlapping them
         // trims connect/switch latency; on a live switch both still run while
         // the existing tunnel is up (see comment above).
+        let resolution_started = Instant::now();
         let (server_ip_res, bypass_res) = tokio::join!(
             Self::resolve_server_ip(&server.address, attempt),
             Self::resolve_bypass_ips(&server.bypass_hosts, attempt),
@@ -229,6 +235,10 @@ impl VpnManager {
         let server_ip = match server_ip_res {
             Ok(ip) => ip,
             Err(e) => {
+                log_win!(
+                    "[VPN-WIN] Endpoint resolution failed after {}ms: {e}",
+                    resolution_started.elapsed().as_millis()
+                );
                 if !matches!(&prev_state, VpnState::Connected) {
                     self.set_state(VpnState::Error { message: e.clone() }).await;
                 }
@@ -238,15 +248,27 @@ impl VpnManager {
         log_win!("[VPN-WIN] Server address resolved");
         let mut control_bypass_ips = match bypass_res {
             Ok(ips) => ips,
-            Err(e) => return Err(e),
+            Err(e) => {
+                log_win!(
+                    "[VPN-WIN] Direct-access destination resolution failed after {}ms: {e}",
+                    resolution_started.elapsed().as_millis()
+                );
+                return Err(e);
+            }
         };
         control_bypass_ips.retain(|ip| ip != &server_ip);
         log_win!(
-            "[VPN-WIN] Resolved {} configured direct-access destinations",
-            control_bypass_ips.len()
+            "[VPN-WIN] Endpoint preparation completed; bypass_destinations={}, elapsed_ms={}",
+            control_bypass_ips.len(),
+            resolution_started.elapsed().as_millis()
         );
-        let physical_route =
-            get_default_route().ok_or("Could not detect the physical IPv4 route")?;
+        let physical_route = match get_default_route() {
+            Some(route) => route,
+            None => {
+                log_win!("[VPN-WIN] Physical IPv4 route detection failed");
+                return Err("Could not detect the physical IPv4 route".into());
+            }
+        };
         log_win!(
             "[VPN-WIN] Physical route detected (ifIndex={}, metric={})",
             physical_route.interface_index,
@@ -286,6 +308,7 @@ impl VpnManager {
             return Err(CONNECT_CANCELLED.into());
         }
         self.set_state(VpnState::Connecting).await;
+        log_win!("[VPN-WIN] State -> Connecting");
 
         let mut server = server;
         if server.sni.is_empty() && server.address.parse::<std::net::IpAddr>().is_err() {
@@ -304,8 +327,11 @@ impl VpnManager {
         // tightly ACL'd on multi-user boxes.
         let config_json = config::build_xray_config(&server);
         let config_path = app_data_dir().join("xray.json");
-        std::fs::write(&config_path, &config_json)
-            .map_err(|e| format!("Failed to write xray config: {e}"))?;
+        std::fs::write(&config_path, &config_json).map_err(|e| {
+            log_win!("[VPN-WIN] VPN core configuration write failed: {e}");
+            format!("Failed to write xray config: {e}")
+        })?;
+        log_win!("[VPN-WIN] VPN core configuration prepared");
         if attempt.is_cancelled() {
             self.set_state(VpnState::Disconnected).await;
             return Err(CONNECT_CANCELLED.into());
@@ -342,7 +368,11 @@ impl VpnManager {
             .creation_flags(CREATE_NO_WINDOW)
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("Failed to start xray: {e}"))?;
+            .map_err(|e| {
+                log_win!("[VPN-WIN] VPN core process start failed: {e}");
+                format!("Failed to start xray: {e}")
+            })?;
+        log_win!("[VPN-WIN] VPN core process started");
 
         if let Some(stderr) = xray_child.stderr.take() {
             tokio::spawn(async move {
@@ -360,7 +390,12 @@ impl VpnManager {
         }
 
         // 3. wait for SOCKS port
+        let core_readiness_started = Instant::now();
         if let Err(e) = wait_for_port(SOCKS_PORT, Duration::from_secs(10), attempt).await {
+            log_win!(
+                "[VPN-WIN] VPN core readiness check failed after {}ms: {e}",
+                core_readiness_started.elapsed().as_millis()
+            );
             self.force_stop().await;
             if attempt.is_cancelled() {
                 self.set_state(VpnState::Disconnected).await;
@@ -369,6 +404,10 @@ impl VpnManager {
             }
             return Err(e);
         }
+        log_win!(
+            "[VPN-WIN] VPN core readiness check passed; elapsed_ms={}",
+            core_readiness_started.elapsed().as_millis()
+        );
 
         {
             let mut proc = self.xray_process.lock().await;
@@ -402,10 +441,16 @@ impl VpnManager {
         }
 
         // 4. TUN + routes
+        let tunnel_setup_started = Instant::now();
+        log_win!("[VPN-WIN] TUN and route setup started");
         if let Err(e) = self
             .start_tun(&server_ip, &control_bypass_ips, &physical_route, attempt)
             .await
         {
+            log_win!(
+                "[VPN-WIN] TUN and route setup failed after {}ms: {e}",
+                tunnel_setup_started.elapsed().as_millis()
+            );
             self.force_stop().await;
             if attempt.is_cancelled() {
                 self.set_state(VpnState::Disconnected).await;
@@ -414,6 +459,10 @@ impl VpnManager {
             }
             return Err(e);
         }
+        log_win!(
+            "[VPN-WIN] TUN and route setup completed; elapsed_ms={}",
+            tunnel_setup_started.elapsed().as_millis()
+        );
 
         if attempt.is_cancelled() {
             self.force_stop().await;
@@ -421,7 +470,10 @@ impl VpnManager {
             return Err(CONNECT_CANCELLED.into());
         }
         self.set_state(VpnState::Connected).await;
-        log_win!("[VPN-WIN] State -> Connected");
+        log_win!(
+            "[VPN-WIN] State -> Connected; total_elapsed_ms={}",
+            connect_started.elapsed().as_millis()
+        );
 
         // Bump generation, spawn kill-switch watchdog. This is the key safety
         // net on Windows: if tun2socks dies (crash, OOM, AV-killed), the
@@ -516,6 +568,7 @@ impl VpnManager {
     }
 
     pub async fn stop(&self) -> Result<(), String> {
+        let stop_started = Instant::now();
         log_win!("[VPN-WIN] STOP called");
         // Bump generation so any running watchdog from the previous Connected
         // session exits cleanly without firing vpn-died over our intentional
@@ -524,6 +577,10 @@ impl VpnManager {
         self.set_state(VpnState::Disconnecting).await;
         self.force_stop().await;
         self.set_state(VpnState::Disconnected).await;
+        log_win!(
+            "[VPN-WIN] State -> Disconnected; cleanup_elapsed_ms={}",
+            stop_started.elapsed().as_millis()
+        );
         Ok(())
     }
 
@@ -838,7 +895,12 @@ impl VpnManager {
         // Instead we re-resolve the index every iteration and treat a failed
         // address claim as "not the live adapter yet" — the next poll picks up
         // the new adapter (see log: idx 45 -> orphan removed -> idx 21).
-        let ready_deadline_secs = 20u64;
+        // Windows can keep the previous Wintun IP interface in a transient
+        // teardown state for a little over 20 seconds after unlock/reconnect.
+        // The old 20-second boundary failed just before the replacement index
+        // appeared (confirmed by diagnostics). Keep the attempt cancellable,
+        // but allow the driver enough time to finish the handover.
+        let ready_deadline_secs = 30u64;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_deadline_secs);
         let mut iter = 0;
         let mut last_err: Option<String> = None;
@@ -1026,6 +1088,7 @@ impl VpnManager {
     }
 
     async fn force_stop(&self) {
+        let cleanup_started = Instant::now();
         log_win!("[VPN-WIN] force_stop");
 
         // Stop proxy traffic first, then remove only routes owned by this
@@ -1084,6 +1147,10 @@ impl VpnManager {
         }
 
         let _ = std::fs::remove_file(app_data_dir().join("xray.json"));
+        log_win!(
+            "[VPN-WIN] force_stop completed; elapsed_ms={}",
+            cleanup_started.elapsed().as_millis()
+        );
     }
 }
 

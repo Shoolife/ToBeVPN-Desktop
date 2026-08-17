@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { getSavedLang, t, tf } from "../i18n";
 import {
   deleteDiagnosticLog,
@@ -302,7 +303,14 @@ export default function DiagnosticsPanel({
       return;
     }
     const path = await exportDiagnosticLog(fileName);
-    onNotice(tf("diagnostics_exported", path));
+    // Do not keep the button busy while Windows Shell/Explorer handles the
+    // reveal request. SHOpenFolderAndSelectItems can wait on a wedged Explorer
+    // process; export already succeeded, so release the UI immediately and
+    // surface the saved path only if the folder cannot be opened.
+    onNotice(t("diagnostics_exported_and_revealed"));
+    void revealItemInDir(path).catch(() => {
+      onNotice(tf("diagnostics_exported", path));
+    });
   });
 
   const openHistory = async () => {

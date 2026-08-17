@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { t } from "../i18n";
 import { useVpnRuntime } from "../session/vpnState";
 import { recordDiagnosticEvent } from "../session/diagnostics";
+import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import "./SpeedTestScreen.css";
 
 type Phase = "idle" | "ping" | "download" | "done";
@@ -353,7 +354,7 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
         </span>
       </div>
 
-      <div className="speed-content">
+      <ScrollEdgeAffordance className="speed-content">
         <div className="speed-gauge">
           <svg className="speed-gauge__svg" width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
             {/* Track */}
@@ -427,7 +428,7 @@ export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
         <button className="speed-start-btn" onClick={handleBtnClick}>
           {btnText}
         </button>
-      </div>
+      </ScrollEdgeAffordance>
     </div>
   );
 }

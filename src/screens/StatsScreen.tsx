@@ -7,6 +7,7 @@ import {
   subscribeStats,
   type StatSlot,
 } from "../session/stats";
+import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import "./StatsScreen.css";
 
 type Period = "day" | "week" | "month";
@@ -139,7 +140,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
         <span className="stats-topbar__title">{t("stats_title")}</span>
       </div>
 
-      <div className="stats-content">
+      <ScrollEdgeAffordance className="stats-content">
         {/* Hero card */}
         <div className="stats-hero">
           <div className="stats-hero__top">
@@ -251,7 +252,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
             </div>
           );
         })}
-      </div>
+      </ScrollEdgeAffordance>
     </div>
   );
 }

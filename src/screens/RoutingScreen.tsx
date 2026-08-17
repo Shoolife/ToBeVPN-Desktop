@@ -14,6 +14,7 @@ import {
   reapplyRoutingSettings,
   useVpnRuntime,
 } from "../session/vpnState";
+import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import "./RoutingScreen.css";
 
 type DomainListKey = "directDomains" | "proxyDomains";
@@ -276,7 +277,7 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
         <div className="routing-topbar__spacer" />
       </div>
 
-      <div className="routing-content">
+      <ScrollEdgeAffordance className="routing-content">
         <section className="routing-section">
           <h2 className="routing-section__title">{t("routing_mode")}</h2>
           <div className="routing-segmented">
@@ -437,7 +438,7 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
             onRemove={(domain) => updateDomainList("proxyDomains", "remove", domain)}
           />
         </details>
-      </div>
+      </ScrollEdgeAffordance>
 
       <div className="routing-actions">
         <button

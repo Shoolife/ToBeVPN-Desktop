@@ -1,9 +1,37 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import pkg from "./package.json" with { type: "json" };
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+
+// Keep the source styles readable while making every real application text
+// style react to the same font-scale / bold variables used by Android. Vite
+// runs this for all local CSS modules before bundling, including dialogs and
+// sheets, so accessibility settings are genuinely app-wide rather than a
+// Settings-screen-only imitation.
+function accessibleTypographyVariables(): Plugin {
+  const scalePxTokens = (value: string) =>
+    value.replace(/(-?\d*\.?\d+)px\b/g, "calc($1px * var(--app-font-scale, 1))");
+
+  return {
+    name: "tobevpn-accessible-typography",
+    enforce: "pre",
+    transform(code, id) {
+      if (!id.split("?", 1)[0].endsWith(".css")) return null;
+      let transformed = code.replace(
+        /((?:font-size|line-height)\s*:\s*)([^;}]+)(?=[;}])/g,
+        (_match, prefix: string, value: string) => `${prefix}${scalePxTokens(value)}`,
+      );
+      transformed = transformed.replace(
+        /(font-weight\s*:\s*)(\d+)(?=\s*[;}])/g,
+        (_match, prefix: string, value: string) =>
+          `${prefix}clamp(100, calc(${value} + var(--app-font-weight-boost, 0)), 1000)`,
+      );
+      return transformed === code ? null : { code: transformed, map: null };
+    },
+  };
+}
 
 // https://vite.dev/config/
 export default defineConfig(async ({ mode }) => {
@@ -16,7 +44,7 @@ export default defineConfig(async ({ mode }) => {
   const proxyTarget = env.VITE_BOT_API_URL || "https://your-backend.example/";
 
   return {
-    plugins: [react()],
+    plugins: [accessibleTypographyVariables(), react()],
 
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),

@@ -53,7 +53,21 @@ interface TimedPing {
   measuredAt: number;
 }
 
+interface PendingPingProbe {
+  key: string;
+  server: VpnServer;
+  promise: Promise<number>;
+  resolve: (ping: number) => void;
+  settled: boolean;
+  value: number;
+}
+
 const pingCache = new Map<string, TimedPing>();
+// Cache TTL prevents sequential duplicate probes; this map also coalesces
+// simultaneous requests from Home, the server list and automatic selection.
+// Without it one subscription refresh can launch several identical batches,
+// each asking the Windows backend to mutate direct ping routes.
+const pingProbesInFlight = new Map<string, Promise<number>>();
 let cachedState: QualityState | null = null;
 let stateWriteQueue = Promise.resolve();
 
@@ -82,6 +96,72 @@ function isAvailableServer(server: VpnServer): boolean {
     server.address !== "0.0.0.0" &&
     !/истекла|expired/i.test(server.name)
   );
+}
+
+function startPingProbeBatch(probes: PendingPingProbe[]): void {
+  const finish = (probe: PendingPingProbe, ping: number) => {
+    if (probe.settled) return;
+    probe.settled = true;
+    probe.value = ping;
+    pingCache.set(probe.key, { ping, measuredAt: Date.now() });
+    probe.resolve(ping);
+  };
+
+  void (async () => {
+    recordDiagnosticEvent(
+      "Servers-Ping",
+      `TCP latency measurement started; targets=${probes.length}, coalesced=true`,
+      "D",
+    );
+    try {
+      const targets = await preparePingBypass(
+        probes.map((probe) => probe.server.address),
+      ).catch(() => new Map<string, string>());
+      let nextProbeIndex = 0;
+      const worker = async () => {
+        while (nextProbeIndex < probes.length) {
+          const probe = probes[nextProbeIndex++];
+          const target =
+            targets.get(probe.server.address) ?? probe.server.address;
+          let ping = -1;
+          try {
+            const measured = await invoke<number>("tcp_ping", {
+              host: target,
+              port: probe.server.port,
+              timeoutMs: PING_TIMEOUT_MS,
+            });
+            ping = measured >= 0 ? Math.max(measured, 1) : -1;
+          } catch {
+            ping = -1;
+          }
+          finish(probe, ping);
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(MAX_CONCURRENT_PINGS, probes.length) },
+          () => worker(),
+        ),
+      );
+    } finally {
+      for (const probe of probes) {
+        finish(probe, -1);
+        if (pingProbesInFlight.get(probe.key) === probe.promise) {
+          pingProbesInFlight.delete(probe.key);
+        }
+      }
+      const successfulPings = probes
+        .map((probe) => probe.value)
+        .filter((ping) => ping >= 0);
+      recordDiagnosticEvent(
+        "Servers-Ping",
+        successfulPings.length > 0
+          ? `TCP latency measurement completed; reachable=${successfulPings.length}, unavailable=${probes.length - successfulPings.length}, min_ms=${Math.min(...successfulPings)}, max_ms=${Math.max(...successfulPings)}, avg_ms=${Math.round(successfulPings.reduce((sum, ping) => sum + ping, 0) / successfulPings.length)}`
+          : `TCP latency measurement completed; reachable=0, unavailable=${probes.length}`,
+        successfulPings.length > 0 ? "D" : "W",
+      );
+    }
+  })();
 }
 
 function isQualityRecord(value: unknown): value is QualityRecord {
@@ -258,7 +338,8 @@ export async function measureVpnServerPings(
 
   const now = Date.now();
   const result = new Map<string, number>();
-  const pending: VpnServer[] = [];
+  const pending: Array<{ server: VpnServer; promise: Promise<number> }> = [];
+  const newProbes: PendingPingProbe[] = [];
   for (const server of servers) {
     if (!isAvailableServer(server)) {
       result.set(server.id, -1);
@@ -269,53 +350,34 @@ export async function measureVpnServerPings(
     if (!options.force && cached && cacheAge >= 0 && cacheAge <= PING_CACHE_TTL_MS) {
       result.set(server.id, cached.ping);
     } else {
-      pending.push(server);
+      const key = qualityKey(server);
+      let promise = pingProbesInFlight.get(key);
+      if (!promise) {
+        let resolve!: (ping: number) => void;
+        promise = new Promise<number>((complete) => {
+          resolve = complete;
+        });
+        const probe: PendingPingProbe = {
+          key,
+          server,
+          promise,
+          resolve,
+          settled: false,
+          value: -1,
+        };
+        pingProbesInFlight.set(key, promise);
+        newProbes.push(probe);
+      }
+      pending.push({ server, promise });
     }
   }
   if (pending.length === 0) return result;
 
-  recordDiagnosticEvent(
-    "Servers-Ping",
-    `TCP latency measurement started; targets=${pending.length}, cached=${result.size}`,
-    "D",
+  if (newProbes.length > 0) startPingProbeBatch(newProbes);
+  const measured = await Promise.all(
+    pending.map(async ({ server, promise }) => ({ server, ping: await promise })),
   );
-
-  const targets = await preparePingBypass(pending.map((server) => server.address))
-    .catch(() => new Map<string, string>());
-  let nextServerIndex = 0;
-  const worker = async () => {
-    while (nextServerIndex < pending.length) {
-      const server = pending[nextServerIndex++];
-      const target = targets.get(server.address) ?? server.address;
-      let ping = -1;
-      try {
-        const measured = await invoke<number>("tcp_ping", {
-          host: target,
-          port: server.port,
-          timeoutMs: PING_TIMEOUT_MS,
-        });
-        ping = measured >= 0 ? Math.max(measured, 1) : -1;
-      } catch {
-        ping = -1;
-      }
-      pingCache.set(qualityKey(server), { ping, measuredAt: Date.now() });
-      result.set(server.id, ping);
-    }
-  };
-  await Promise.all(
-    Array.from(
-      { length: Math.min(MAX_CONCURRENT_PINGS, pending.length) },
-      () => worker(),
-    ),
-  );
-  const successfulPings = Array.from(result.values()).filter((ping) => ping >= 0);
-  recordDiagnosticEvent(
-    "Servers-Ping",
-    successfulPings.length > 0
-      ? `TCP latency measurement completed; reachable=${successfulPings.length}, unavailable=${result.size - successfulPings.length}, min_ms=${Math.min(...successfulPings)}, max_ms=${Math.max(...successfulPings)}, avg_ms=${Math.round(successfulPings.reduce((sum, ping) => sum + ping, 0) / successfulPings.length)}`
-      : `TCP latency measurement completed; reachable=0, unavailable=${result.size}`,
-    successfulPings.length > 0 ? "D" : "W",
-  );
+  for (const { server, ping } of measured) result.set(server.id, ping);
   return result;
 }
 

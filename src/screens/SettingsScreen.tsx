@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { t, getSavedLang, saveLang, type Lang, type StringKey } from "../i18n";
-import { logout, saveEmail } from "../session/auth";
-import { useSession, type UserPlan } from "../session/store";
+import { t, tf, getSavedLang, saveLang, type Lang, type StringKey } from "../i18n";
+import { getCurrentPlan } from "../api/client";
+import { getCachedVpnServers, isAvailableVpnServer, logout, saveEmail, type VpnServer } from "../session/auth";
+import { useSession, type Session, type UserPlan } from "../session/store";
 import { getXrayVersion } from "../session/vpn";
 import { formatDateDots } from "../session/dateFormat";
 import { loadRoutingSettings, type RoutingMode } from "../session/routingSettings";
@@ -15,6 +16,18 @@ import {
   saveProfileNameDisplay,
   type ProfileNameDisplay,
 } from "../session/profileDisplay";
+import {
+  FONT_SCALE_DEFAULT,
+  FONT_SCALE_MAX,
+  FONT_SCALE_MIN,
+  FONT_SCALE_STEP,
+  INTERFACE_SCALE_DEFAULT,
+  INTERFACE_SCALE_MAX,
+  INTERFACE_SCALE_MIN,
+  INTERFACE_SCALE_STEP,
+  normalizeFontScale,
+  normalizeInterfaceScale,
+} from "../session/interfaceScale";
 import UpdateCheckRow from "../components/UpdateCheckRow";
 import WhatsNewDialog from "../components/WhatsNewDialog";
 import {
@@ -29,6 +42,9 @@ import MaterialIcon, {
   type MaterialIconName,
 } from "../components/MaterialIcon";
 import DiagnosticsPanel from "../components/DiagnosticsPanel";
+import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
+import { SubscriptionCurrentPlanCard } from "../components/SubscriptionSheet";
+import { ServerListRow } from "./ServersScreen";
 import {
   getDiagnosticStateSnapshot,
   initializeDiagnostics,
@@ -45,7 +61,13 @@ const SUPPORT_URL = "https://t.me/meow_meow_vpn?direct";
 // theme/language/devices/about pushed onto their own sub-sections. Navigation
 // stays inside this component (a local section state) so the surrounding App
 // router and every existing settings control keep working unchanged.
-type Section = "main" | "personalization" | "advanced" | "support" | "about";
+export type SettingsSection =
+  | "main"
+  | "personalization"
+  | "displayScale"
+  | "advanced"
+  | "support"
+  | "about";
 
 // Name-display modes for the account card, mirroring the Android tiles.
 const NAME_MODES: { mode: ProfileNameDisplay; key: StringKey }[] = [
@@ -73,7 +95,68 @@ const FAQ: { q: StringKey; a: StringKey }[] = [
   { q: "faq_q_support_details", a: "faq_a_support_details" },
 ];
 
+const DISPLAY_PREVIEW_FALLBACK_SERVERS: VpnServer[] = [
+  {
+    id: "display-preview-ru",
+    name: t("display_preview_server_russia"),
+    address: "preview-ru.tobevpn.local",
+    port: 443,
+    uuid: "display-preview-ru",
+    flow: "",
+    security: "reality",
+    sni: "",
+    fingerprint: "chrome",
+    public_key: "preview",
+    short_id: "preview",
+    network: "tcp",
+    path: "",
+    mode: "",
+    spx: "",
+    country: "RU",
+    isOnline: true,
+    sortOrder: 0,
+  },
+  {
+    id: "display-preview-gb",
+    name: t("display_preview_server_uk"),
+    address: "preview-gb.tobevpn.local",
+    port: 443,
+    uuid: "display-preview-gb",
+    flow: "",
+    security: "reality",
+    sni: "",
+    fingerprint: "chrome",
+    public_key: "preview",
+    short_id: "preview",
+    network: "tcp",
+    path: "",
+    mode: "",
+    spx: "",
+    country: "GB",
+    isOnline: true,
+    sortOrder: 1,
+  },
+];
+
+const DISPLAY_SCALE_TICK_VALUES = [0.8, 0.9, 1, 1.1, 1.2] as const;
+
 type AccentTier = "green" | "orange" | "red";
+
+interface DisplayPreviewPlanLimits {
+  trafficLimitBytes: number | null;
+  deviceLimit: number | null;
+  unlimited: boolean;
+}
+
+function normalizeDisplayPreviewTrafficLimit(
+  bytes: number | null | undefined,
+  gigabytes: number | null | undefined,
+): number | null {
+  if (typeof bytes === "number" && Number.isFinite(bytes) && bytes >= 0) return bytes;
+  if (typeof gigabytes !== "number" || !Number.isFinite(gigabytes) || gigabytes < 0) return null;
+  if (gigabytes === 0) return 0;
+  return gigabytes * 1024 * 1024 * 1024;
+}
 
 function planLabel(plan: UserPlan, displayName?: string | null): string {
   if (displayName && plan !== "EXPIRED") return displayName;
@@ -124,6 +207,15 @@ export default function SettingsScreen({
   onRouting,
   onReferrals,
   onPromocodes,
+  interfaceScale,
+  onInterfaceScaleChange,
+  fontScale,
+  onFontScaleChange,
+  boldText,
+  onBoldTextChange,
+  outlinedText,
+  onOutlinedTextChange,
+  onSectionChange,
   initialSection = "main",
 }: {
   onBack: () => void;
@@ -132,7 +224,16 @@ export default function SettingsScreen({
   onRouting: () => void;
   onReferrals: () => void;
   onPromocodes: () => void;
-  initialSection?: Section;
+  interfaceScale: number;
+  onInterfaceScaleChange: (value: number, centerAfterResize?: boolean) => void;
+  fontScale: number;
+  onFontScaleChange: (value: number) => void;
+  boldText: boolean;
+  onBoldTextChange: (value: boolean) => void;
+  outlinedText: boolean;
+  onOutlinedTextChange: (value: boolean) => void;
+  onSectionChange?: (section: SettingsSection) => void;
+  initialSection?: SettingsSection;
 }) {
   const session = useSession();
   const currentLang = getSavedLang();
@@ -142,18 +243,19 @@ export default function SettingsScreen({
     getDiagnosticStateSnapshot,
     getDiagnosticStateSnapshot,
   );
-  const [section, setSection] = useState<Section>(initialSection);
+  const [section, setSection] = useState<SettingsSection>(initialSection);
   // During a section change we keep the previous section mounted for one
   // animation cycle so the two cross-fade (old fades/scales out, new fades in),
   // matching the app's screen transitions (e.g. opening the servers list).
-  const [prevSection, setPrevSection] = useState<Section | null>(null);
+  const [prevSection, setPrevSection] = useState<SettingsSection | null>(null);
   const sectionTimerRef = useRef<number | null>(null);
 
-  const goToSection = (next: Section) => {
+  const goToSection = (next: SettingsSection) => {
     if (next === section) return;
     if (sectionTimerRef.current !== null) window.clearTimeout(sectionTimerRef.current);
     setPrevSection(section);
     setSection(next);
+    onSectionChange?.(next);
     sectionTimerRef.current = window.setTimeout(() => {
       setPrevSection(null);
       sectionTimerRef.current = null;
@@ -180,6 +282,12 @@ export default function SettingsScreen({
   const [autostartLoading, setAutostartLoading] = useState(true);
   const [autostartError, setAutostartError] = useState(false);
   const [autoUpdateEnabled, setAutoUpdateState] = useState(() => getAutoUpdateEnabled());
+  const [previewInterfaceScale, setPreviewInterfaceScale] = useState(interfaceScale);
+  const [previewFontScale, setPreviewFontScale] = useState(fontScale);
+  const [subscriptionPreviewLimits, setSubscriptionPreviewLimits] =
+    useState<DisplayPreviewPlanLimits | null>(null);
+  const [subscriptionPreviewLimitsLoading, setSubscriptionPreviewLimitsLoading] =
+    useState(false);
 
   // Email editing
   const [editingEmail, setEditingEmail] = useState(
@@ -193,6 +301,161 @@ export default function SettingsScreen({
   const logoutDialogTimerRef = useRef<number | null>(null);
   const diagnosticHoldTimerRef = useRef<number | null>(null);
   const diagnosticModeChangingRef = useRef(false);
+  const interfaceScaleSliderRef = useRef<HTMLInputElement>(null);
+  const fontScaleSliderRef = useRef<HTMLInputElement>(null);
+  const interfaceScaleOutputRef = useRef<HTMLOutputElement>(null);
+  const fontScaleOutputRef = useRef<HTMLOutputElement>(null);
+  const displayScalePreviewRootRef = useRef<HTMLDivElement>(null);
+  const displayScalePreviewTrackRef = useRef<HTMLDivElement>(null);
+  const interfaceScaleDraggingRef = useRef(false);
+  const fontScaleDraggingRef = useRef(false);
+  const previewInterfaceValueRef = useRef(previewInterfaceScale);
+  const interfacePreviewFrameRef = useRef<number | null>(null);
+  const fontPreviewFrameRef = useRef<number | null>(null);
+  const interfaceReleaseFrameRef = useRef<number | null>(null);
+  const fontReleaseFrameRef = useRef<number | null>(null);
+  const pendingInterfacePreviewRef = useRef(previewInterfaceScale);
+  const renderedFontPreviewRef = useRef(previewFontScale);
+  const fontPreviewTargetRef = useRef(previewFontScale);
+
+  const updateSliderVisual = (
+    slider: HTMLInputElement | null,
+    output: HTMLOutputElement | null,
+    value: number,
+    min: number,
+    max: number,
+  ) => {
+    const progress = ((value - min) / (max - min)) * 100;
+    if (slider) {
+      slider.value = String(value);
+      slider.style.setProperty("--interface-scale-progress", `${progress}%`);
+      slider.setAttribute("aria-valuetext", `${Math.round(value * 100)}%`);
+      slider.parentElement
+        ?.querySelectorAll<HTMLElement>(".display-scale-slider__ticks span")
+        .forEach((tick, index) => {
+          tick.classList.toggle(
+            "is-active",
+            DISPLAY_SCALE_TICK_VALUES[index] <= value + 0.001,
+          );
+        });
+    }
+    if (output) {
+      output.textContent = `${value.toFixed(1).replace(".", currentLang === "ru" ? "," : ".")}×`;
+    }
+  };
+
+  const resizeDisplayPreviewViewport = (relativeScale: number) => {
+    const preview = displayScalePreviewRootRef.current;
+    const profile = preview?.querySelector<HTMLElement>(
+      ".display-scale-preview__page--profile > *",
+    );
+    const viewport = preview?.querySelector<HTMLElement>(
+      ".display-scale-preview__viewport",
+    );
+    if (profile && viewport) {
+      viewport.style.height = `${Math.ceil(profile.offsetHeight * relativeScale + 8)}px`;
+    }
+  };
+
+  const applyInterfacePreview = (value: number) => {
+    previewInterfaceValueRef.current = value;
+    const relativeScale = value / interfaceScale;
+    const preview = displayScalePreviewRootRef.current;
+    preview?.style.setProperty("--display-preview-content-scale", String(relativeScale));
+    preview?.style.setProperty(
+      "--display-preview-content-width",
+      `${100 / relativeScale}%`,
+    );
+    updateSliderVisual(
+      interfaceScaleSliderRef.current,
+      interfaceScaleOutputRef.current,
+      value,
+      INTERFACE_SCALE_MIN,
+      INTERFACE_SCALE_MAX,
+    );
+    resizeDisplayPreviewViewport(relativeScale);
+  };
+
+  const paintFontPreviewContent = (value: number) => {
+    renderedFontPreviewRef.current = value;
+    displayScalePreviewTrackRef.current?.style.setProperty(
+      "--app-font-scale",
+      String(value),
+    );
+    resizeDisplayPreviewViewport(previewInterfaceValueRef.current / interfaceScale);
+  };
+
+  const applyFontPreviewImmediately = (value: number) => {
+    if (fontPreviewFrameRef.current !== null) {
+      window.cancelAnimationFrame(fontPreviewFrameRef.current);
+      fontPreviewFrameRef.current = null;
+    }
+    fontPreviewTargetRef.current = value;
+    paintFontPreviewContent(value);
+    updateSliderVisual(
+      fontScaleSliderRef.current,
+      fontScaleOutputRef.current,
+      value,
+      FONT_SCALE_MIN,
+      FONT_SCALE_MAX,
+    );
+  };
+
+  const animateFontPreview = (value: number) => {
+    updateSliderVisual(
+      fontScaleSliderRef.current,
+      fontScaleOutputRef.current,
+      value,
+      FONT_SCALE_MIN,
+      FONT_SCALE_MAX,
+    );
+    if (
+      fontPreviewFrameRef.current !== null &&
+      Math.abs(fontPreviewTargetRef.current - value) < 0.0001
+    ) {
+      return;
+    }
+    if (fontPreviewFrameRef.current !== null) {
+      window.cancelAnimationFrame(fontPreviewFrameRef.current);
+      fontPreviewFrameRef.current = null;
+    }
+
+    const from = renderedFontPreviewRef.current;
+    fontPreviewTargetRef.current = value;
+    if (Math.abs(value - from) < 0.0001) {
+      paintFontPreviewContent(value);
+      return;
+    }
+
+    const startedAt = window.performance.now();
+    const durationMs = 210;
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = progress < 0.5
+        ? 4 * progress * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+      paintFontPreviewContent(from + (value - from) * eased);
+      if (progress < 1) {
+        fontPreviewFrameRef.current = window.requestAnimationFrame(animate);
+      } else {
+        fontPreviewFrameRef.current = null;
+      }
+    };
+    fontPreviewFrameRef.current = window.requestAnimationFrame(animate);
+  };
+
+  const scheduleInterfacePreview = (value: number) => {
+    pendingInterfacePreviewRef.current = value;
+    if (interfacePreviewFrameRef.current !== null) return;
+    interfacePreviewFrameRef.current = window.requestAnimationFrame(() => {
+      interfacePreviewFrameRef.current = null;
+      applyInterfacePreview(pendingInterfacePreviewRef.current);
+    });
+  };
+
+  const scheduleFontPreview = (value: number) => {
+    animateFontPreview(value);
+  };
 
   // Support FAQ scroll affordances (fading edges + ↑/↓ arrows), mirroring the
   // Android SupportScreen.
@@ -422,7 +685,14 @@ export default function SettingsScreen({
     return () => {
       cancelled = true;
     };
-  }, [session.deviceId, session.isLinked, session.shortUuid, session.telegramId]);
+  }, [
+    session.accessToken,
+    session.deviceId,
+    session.isLinked,
+    session.panelUserUuid,
+    session.shortUuid,
+    session.telegramId,
+  ]);
 
   useEffect(() => {
     const refreshRoutingMode = () => setRoutingMode(loadRoutingSettings().mode);
@@ -455,6 +725,106 @@ export default function SettingsScreen({
   useEffect(() => clearLanguageDialogTimer, []);
   useEffect(() => clearLogoutDialogTimer, []);
 
+  useEffect(() => {
+    if (!interfaceScaleDraggingRef.current) {
+      setPreviewInterfaceScale(interfaceScale);
+    }
+  }, [interfaceScale]);
+
+  useEffect(() => {
+    if (!fontScaleDraggingRef.current) {
+      setPreviewFontScale(fontScale);
+    }
+  }, [fontScale]);
+
+  useEffect(() => {
+    if (section !== "displayScale") return;
+    const frame = window.requestAnimationFrame(() => {
+      applyInterfacePreview(previewInterfaceScale);
+      if (fontPreviewFrameRef.current === null) {
+        applyFontPreviewImmediately(previewFontScale);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    currentLang,
+    interfaceScale,
+    previewFontScale,
+    previewInterfaceScale,
+    section,
+  ]);
+
+  useEffect(() => () => {
+    if (interfacePreviewFrameRef.current !== null) {
+      window.cancelAnimationFrame(interfacePreviewFrameRef.current);
+    }
+    if (fontPreviewFrameRef.current !== null) {
+      window.cancelAnimationFrame(fontPreviewFrameRef.current);
+    }
+    if (interfaceReleaseFrameRef.current !== null) {
+      window.cancelAnimationFrame(interfaceReleaseFrameRef.current);
+    }
+    if (fontReleaseFrameRef.current !== null) {
+      window.cancelAnimationFrame(fontReleaseFrameRef.current);
+    }
+  }, []);
+
+  // The session snapshot has traffic usage but intentionally does not persist
+  // the device limit. Load the same authoritative current-plan response used
+  // by SubscriptionSheet so the third preview shows the user's real value.
+  useEffect(() => {
+    const shouldLoad =
+      section === "displayScale" &&
+      session.isLinked &&
+      session.telegramId !== null &&
+      (session.userPlan === "PAID" || session.userPlan === "ADMIN");
+    if (!shouldLoad) {
+      setSubscriptionPreviewLimits(null);
+      setSubscriptionPreviewLimitsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSubscriptionPreviewLimitsLoading(true);
+    getCurrentPlan()
+      .then((response) => {
+        if (cancelled || !response.success || !response.data) return;
+        const snapshot = response.data.current_plan ?? response.data.plan_snapshot ?? null;
+        const subscription = response.data.subscription ?? null;
+        const rawDeviceLimit = subscription?.device_limit ?? snapshot?.device_limit;
+        const deviceLimit =
+          typeof rawDeviceLimit === "number" &&
+          Number.isSafeInteger(rawDeviceLimit) &&
+          rawDeviceLimit >= 0
+            ? rawDeviceLimit
+            : null;
+        const trafficLimitBytes = normalizeDisplayPreviewTrafficLimit(
+          subscription?.traffic_limit_bytes ?? snapshot?.traffic_limit_bytes,
+          subscription?.traffic_limit ?? snapshot?.traffic_limit,
+        );
+        const unlimited =
+          subscription?.is_unlimited === true ||
+          snapshot?.type?.trim().toUpperCase() === "UNLIMITED";
+        setSubscriptionPreviewLimits({ trafficLimitBytes, deviceLimit, unlimited });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setSubscriptionPreviewLimitsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    section,
+    session.deviceId,
+    session.isLinked,
+    session.panelUserUuid,
+    session.shortUuid,
+    session.telegramId,
+    session.userPlan,
+  ]);
+
   // Recompute the FAQ fade edges whenever we enter the Support section (after
   // its list has laid out).
   useEffect(() => {
@@ -463,11 +833,83 @@ export default function SettingsScreen({
     return () => cancelAnimationFrame(id);
   }, [section]);
 
-  const tier = accentTier(session.userPlan, session.planExpiresAt);
-  const showExpires =
-    (session.userPlan === "PAID" || session.userPlan === "ADMIN") &&
-    session.planExpiresAt !== null;
+  // WebView2 and WebKitGTK change a focused range input with the mouse wheel.
+  // In a vertically scrolling settings page that made an ordinary scroll also
+  // resize the whole native window. Consume that native action and forward the
+  // same delta to the settings scroller instead.
+  useEffect(() => {
+    if (section !== "displayScale") return;
+    const sliders = [interfaceScaleSliderRef.current, fontScaleSliderRef.current]
+      .filter((slider): slider is HTMLInputElement => slider !== null);
+    if (sliders.length === 0) return;
 
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const scroller = (event.currentTarget as HTMLElement)
+        .closest<HTMLElement>(".settings-content");
+      if (!scroller) return;
+      const unit = event.deltaMode === 1
+        ? 18
+        : event.deltaMode === 2
+          ? scroller.clientHeight
+          : 1;
+      scroller.scrollTop += (event.deltaY || event.deltaX) * unit;
+    };
+
+    sliders.forEach((slider) =>
+      slider.addEventListener("wheel", handleWheel, { passive: false }),
+    );
+    return () => sliders.forEach((slider) => slider.removeEventListener("wheel", handleWheel));
+  }, [section]);
+
+  const tier = accentTier(session.userPlan, session.planExpiresAt);
+  const interfaceScalePercent = Math.round(previewInterfaceScale * 100);
+  const interfaceScaleProgress =
+    ((previewInterfaceScale - INTERFACE_SCALE_MIN) /
+      (INTERFACE_SCALE_MAX - INTERFACE_SCALE_MIN)) *
+    100;
+  const fontScalePercent = Math.round(previewFontScale * 100);
+  const fontScaleProgress =
+    ((previewFontScale - FONT_SCALE_MIN) / (FONT_SCALE_MAX - FONT_SCALE_MIN)) * 100;
+  const commitInterfaceScale = (value: number) => {
+    const normalized = normalizeInterfaceScale(value);
+    if (interfacePreviewFrameRef.current !== null) {
+      window.cancelAnimationFrame(interfacePreviewFrameRef.current);
+      interfacePreviewFrameRef.current = null;
+    }
+    interfaceScaleDraggingRef.current = false;
+    applyInterfacePreview(normalized);
+    setPreviewInterfaceScale(normalized);
+    // Keep the window's current top-left anchor. Re-centring after every step
+    // looked like a final jump even when the resize itself was animated.
+    onInterfaceScaleChange(normalized, false);
+  };
+  const commitFontScale = (value: number) => {
+    const normalized = normalizeFontScale(value);
+    fontScaleDraggingRef.current = false;
+    animateFontPreview(normalized);
+    setPreviewFontScale(normalized);
+    onFontScaleChange(normalized);
+  };
+  const commitInterfaceScaleAfterRelease = (value: number) => {
+    if (interfaceReleaseFrameRef.current !== null) {
+      window.cancelAnimationFrame(interfaceReleaseFrameRef.current);
+    }
+    interfaceReleaseFrameRef.current = window.requestAnimationFrame(() => {
+      interfaceReleaseFrameRef.current = null;
+      commitInterfaceScale(value);
+    });
+  };
+  const commitFontScaleAfterRelease = (value: number) => {
+    if (fontReleaseFrameRef.current !== null) {
+      window.cancelAnimationFrame(fontReleaseFrameRef.current);
+    }
+    fontReleaseFrameRef.current = window.requestAnimationFrame(() => {
+      fontReleaseFrameRef.current = null;
+      commitFontScale(value);
+    });
+  };
   // Text under the avatar, resolved from the profile + chosen display mode.
   const fullName = profile.name;
   const handle = profile.username ? `@${profile.username}` : null;
@@ -479,11 +921,43 @@ export default function SettingsScreen({
   const bothHandle = nameMode === "both" && fullName && handle ? handle : null;
   const cycleLabels = ([fullName, handle].filter((x): x is string => !!x));
   const animatedLabels = cycleLabels.length > 0 ? cycleLabels : idLabel ? [idLabel] : [];
+  const cachedScalePreviewServers = getCachedVpnServers().filter(isAvailableVpnServer);
+  const scalePreviewServers = [
+    ...cachedScalePreviewServers,
+    ...DISPLAY_PREVIEW_FALLBACK_SERVERS.filter(
+      (fallback) => !cachedScalePreviewServers.some((server) => server.id === fallback.id),
+    ),
+  ].slice(0, 2).map((server, index) => ({
+    ...server,
+    ping: index === 0 ? 36 : 35,
+  }));
+  const subscriptionPreviewShowsLimits =
+    session.userPlan === "PAID" || session.userPlan === "ADMIN";
+  const subscriptionPreviewHint = subscriptionPreviewShowsLimits && session.planExpiresAt !== null
+    ? tf("plan_active_until", formatDateDots(session.planExpiresAt))
+    : session.userPlan === "EXPIRED"
+      ? t("plan_renew_full")
+      : t("plan_limited_traffic");
+  const subscriptionPreviewTrafficBytes =
+    subscriptionPreviewLimits?.trafficLimitBytes ?? session.trafficLimitBytes;
+  const subscriptionPreviewTrafficLimit =
+    subscriptionPreviewLimits?.unlimited || subscriptionPreviewTrafficBytes <= 0
+    ? "∞"
+    : `${Math.max(1, Math.floor(subscriptionPreviewTrafficBytes / (1024 * 1024 * 1024)))} ${t("unit_gb")}`;
+  const subscriptionPreviewDeviceLimit = subscriptionPreviewLimits?.unlimited
+    ? "∞"
+    : subscriptionPreviewLimits?.deviceLimit !== null &&
+        subscriptionPreviewLimits?.deviceLimit !== undefined &&
+        subscriptionPreviewLimits.deviceLimit > 0
+      ? String(subscriptionPreviewLimits.deviceLimit)
+      : "XX";
 
   // Top bar: back on the left mirrors the sign-out icon on the right (main
   // section only). Sub-sections use back to return to the tile grid.
   const topTitle =
-    section === "personalization"
+    section === "displayScale"
+      ? t("display_and_text_scale_title")
+      : section === "personalization"
       ? t("settings_personalization")
       : section === "advanced"
         ? t("settings_advanced")
@@ -495,6 +969,7 @@ export default function SettingsScreen({
 
   const handleTopBack = () => {
     if (section === "main") onBack();
+    else if (section === "displayScale") goToSection("personalization");
     else goToSection("main");
   };
 
@@ -508,26 +983,28 @@ export default function SettingsScreen({
           </svg>
         </button>
         <span className="settings-topbar__title">{topTitle}</span>
-        {section === "main" && session.isLinked ? (
-          <button
-            className="settings-topbar__logout"
-            onClick={openLogoutDialog}
-            aria-label={t("logout")}
-            title={t("logout")}
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-              <polyline points="16 17 21 12 16 7" />
-              <line x1="21" y1="12" x2="9" y2="12" />
-            </svg>
-          </button>
-        ) : (
-          <div style={{ width: 40 }} />
+        {section === "main" && (
+          session.isLinked ? (
+            <button
+              className="settings-topbar__logout"
+              onClick={openLogoutDialog}
+              aria-label={t("logout")}
+              title={t("logout")}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+            </button>
+          ) : (
+            <div style={{ width: 40, flexShrink: 0 }} />
+          )
         )}
       </div>
 
       <div className="settings-viewport">
-        {([prevSection, section] as (Section | null)[]).map((s, idx) => {
+        {([prevSection, section] as (SettingsSection | null)[]).map((s, idx) => {
           if (s === null) return null;
           const animClass =
             prevSection === null
@@ -537,80 +1014,33 @@ export default function SettingsScreen({
                 : "settings-layer--exit";
           return (
             <div key={`${s}-${idx}`} className={`settings-layer ${animClass}`}>
-              <div className={`settings-content ${s === "support" ? "settings-content--support" : ""}`}>
+              <ScrollEdgeAffordance
+                className={`settings-content ${s === "support" ? "settings-content--support" : ""} ${s === "displayScale" ? "settings-content--display-scale" : ""}`}
+              >
         {s === "main" && (
           <>
             {/* Account card — avatar centred in the left half, plan/ID/expiry
                 block centred in the right half, mirroring the Android card. */}
-            <div className={`settings-account settings-account--${tier}`}>
-              <div className="settings-account__left">
-                <div className="settings-account__avatar">
-                  <div className="settings-account__avatar-inner">
-                    {avatarUrl ? (
-                      <img
-                        src={avatarUrl}
-                        alt=""
-                        className="settings-account__avatar-img"
-                        onError={() => setAvatarUrl(null)}
-                      />
-                    ) : avatarLoading ? (
-                      <Spinner size={40} thickness={3} />
-                    ) : (
-                      <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                        <circle cx="12" cy="8" r="4" />
-                        <path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" />
-                      </svg>
-                    )}
-                  </div>
-                </div>
-                {nameMode === "animated"
-                  ? animatedLabels.length > 0 && (
-                      <CyclingName
-                        labels={animatedLabels}
-                        className="settings-account__name"
-                      />
-                    )
-                  : primaryName && (
-                      <>
-                        <span className="settings-account__name">{primaryName}</span>
-                        {bothHandle && (
-                          <span className="settings-account__handle">{bothHandle}</span>
-                        )}
-                      </>
-                    )}
-              </div>
-              <div className="settings-account__right">
-                <span className={`settings-account__plan settings-account__plan--${tier}`}>
-                  {planLabel(session.userPlan, session.planDisplayName)}
-                </span>
-                {session.telegramId !== null ? (
-                  <button
-                    type="button"
-                    className="settings-account__id settings-account__id--button"
-                    onClick={() =>
-                      void copyWithNotification(
-                        String(session.telegramId),
-                        t("settings_telegram_id_copied"),
-                      )
-                    }
-                    aria-label={t("settings_copy_telegram_id")}
-                    title={t("settings_copy_telegram_id")}
-                  >
-                    ID {session.telegramId}
-                  </button>
-                ) : (
-                  <span className="settings-account__id">ID —</span>
-                )}
-                {showExpires && (
-                  <span className="settings-account__expires">
-                    {t("expires")} {formatDateDots(session.planExpiresAt!)}
-                  </span>
-                )}
-                {session.userPlan === "EXPIRED" && (
-                  <span className="settings-account__renew">{t("renew_in_bot")}</span>
-                )}
-              </div>
-            </div>
+            <SettingsAccountCard
+              session={session}
+              tier={tier}
+              avatarUrl={avatarUrl}
+              avatarLoading={avatarLoading}
+              nameMode={nameMode}
+              animatedLabels={animatedLabels}
+              primaryName={primaryName}
+              bothHandle={bothHandle}
+              onAvatarError={() => {
+                clearUserAvatarCache();
+                setAvatarUrl(null);
+              }}
+              onCopyId={(telegramId) =>
+                void copyWithNotification(
+                  String(telegramId),
+                  t("settings_telegram_id_copied"),
+                )
+              }
+            />
 
             {/* Category grid mirrors Android: Promocodes and About share the
                 final row so both stay easy to reach. */}
@@ -712,6 +1142,43 @@ export default function SettingsScreen({
               </div>
             </div>
 
+            {/* Android-style navigation card: scale controls live on their
+                own screen so normal personalization scrolling can never
+                change the native window size. */}
+            <button
+              type="button"
+              className="display-scale-nav"
+              onClick={() => goToSection("displayScale")}
+            >
+              <span className="display-scale-nav__icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M7 10H5V5h5v2H7v3zm12 0h-2V7h-3V5h5v5zm-9 9H5v-5h2v3h3v2zm9 0h-5v-2h3v-3h2v5z" />
+                </svg>
+              </span>
+              <span className="display-scale-nav__copy">
+                <span className="display-scale-nav__title">
+                  {t("display_and_text_scale_title")}
+                </span>
+                <span className="display-scale-nav__description">
+                  {t("display_and_text_scale_description")}
+                </span>
+              </span>
+              <svg
+                className="display-scale-nav__chevron"
+                width="22"
+                height="22"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </button>
+
             {/* Name under the avatar */}
             {session.isLinked && (
               <div className="settings-card">
@@ -732,6 +1199,334 @@ export default function SettingsScreen({
                 </div>
               </div>
             )}
+          </>
+        )}
+
+        {s === "displayScale" && (
+          <>
+            <DisplayScalePreview
+              rootRef={displayScalePreviewRootRef}
+              trackRef={displayScalePreviewTrackRef}
+              previewScale={previewInterfaceScale}
+              appliedScale={interfaceScale}
+              previewFontScale={previewFontScale}
+              previewBoldText={boldText}
+              previewOutlinedText={outlinedText}
+              profilePreview={(
+                <SettingsAccountCard
+                  session={session}
+                  tier={tier}
+                  avatarUrl={avatarUrl}
+                  avatarLoading={avatarLoading}
+                  nameMode={nameMode}
+                  animatedLabels={animatedLabels}
+                  primaryName={primaryName}
+                  bothHandle={bothHandle}
+                  onAvatarError={() => {
+                    clearUserAvatarCache();
+                    setAvatarUrl(null);
+                  }}
+                  onCopyId={() => {}}
+                />
+              )}
+              serversPreview={(
+                <div className="display-preview-real-servers">
+                  {scalePreviewServers.map((server) => (
+                    <ServerListRow
+                      key={server.id}
+                      server={server}
+                      flagsReady
+                    />
+                  ))}
+                </div>
+              )}
+              subscriptionPreview={(
+                <SubscriptionCurrentPlanCard
+                  currentPlanName={planLabel(session.userPlan, session.planDisplayName)}
+                  currentPlanNameClass={`sub-current__name sub-current__name--${tier}`}
+                  currentHint={subscriptionPreviewHint}
+                  showLimits={subscriptionPreviewShowsLimits}
+                  limitsLoading={subscriptionPreviewLimitsLoading}
+                  trafficLimitValue={subscriptionPreviewTrafficLimit}
+                  deviceLimitValue={subscriptionPreviewDeviceLimit}
+                />
+              )}
+            />
+
+            <div className="display-scale-section-label">
+              {t("display_size_section_title")}
+            </div>
+            <div className="display-scale-group">
+              <div className="display-scale-setting">
+                <div className="display-scale-setting__header">
+                  <div className="display-scale-setting__copy">
+                    <div className="display-scale-setting__title">
+                      {t("font_scale_title")}
+                    </div>
+                    <div className="display-scale-setting__description">
+                      {t("font_scale_description")}
+                    </div>
+                  </div>
+                  <output
+                    ref={fontScaleOutputRef}
+                    className="display-scale-setting__value"
+                    htmlFor="font-scale-slider"
+                  >
+                    {previewFontScale.toFixed(1).replace(".", currentLang === "ru" ? "," : ".")}×
+                  </output>
+                </div>
+
+                <div className="display-scale-slider-row">
+                  <button
+                    type="button"
+                    className="display-scale-step"
+                    disabled={previewFontScale <= FONT_SCALE_MIN + 0.001}
+                    aria-label={t("font_scale_decrease")}
+                    onClick={() => commitFontScale(previewFontScale - FONT_SCALE_STEP)}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M5 11h14v2H5z" />
+                    </svg>
+                  </button>
+
+                  <div className="display-scale-slider-wrap">
+                    <div className="display-scale-slider__ticks" aria-hidden="true">
+                      {DISPLAY_SCALE_TICK_VALUES.map((value) => (
+                        <span
+                          key={value}
+                          className={value <= previewFontScale + 0.001 ? "is-active" : ""}
+                        />
+                      ))}
+                    </div>
+                    <input
+                      ref={fontScaleSliderRef}
+                      id="font-scale-slider"
+                      className="display-scale-slider"
+                      type="range"
+                      min={FONT_SCALE_MIN}
+                      max={FONT_SCALE_MAX}
+                      step={FONT_SCALE_STEP}
+                      defaultValue={previewFontScale}
+                      aria-label={t("font_scale_title")}
+                      aria-valuetext={`${fontScalePercent}%`}
+                      style={{
+                        "--interface-scale-progress": `${fontScaleProgress}%`,
+                      } as CSSProperties}
+                      onPointerDown={() => {
+                        fontScaleDraggingRef.current = true;
+                      }}
+                      onInput={(event) => scheduleFontPreview(
+                        Math.min(
+                          FONT_SCALE_MAX,
+                          Math.max(FONT_SCALE_MIN, event.currentTarget.valueAsNumber),
+                        ),
+                      )}
+                      onPointerUp={(event) =>
+                        commitFontScaleAfterRelease(event.currentTarget.valueAsNumber)
+                      }
+                      onPointerCancel={(event) =>
+                        commitFontScaleAfterRelease(event.currentTarget.valueAsNumber)
+                      }
+                      onKeyDown={(event) => {
+                        let next: number | null = null;
+                        if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+                          next = previewFontScale - FONT_SCALE_STEP;
+                        } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+                          next = previewFontScale + FONT_SCALE_STEP;
+                        } else if (event.key === "Home") {
+                          next = FONT_SCALE_MIN;
+                        } else if (event.key === "End") {
+                          next = FONT_SCALE_MAX;
+                        }
+                        if (next === null) return;
+                        event.preventDefault();
+                        commitFontScale(next);
+                      }}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    className="display-scale-step"
+                    disabled={previewFontScale >= FONT_SCALE_MAX - 0.001}
+                    aria-label={t("font_scale_increase")}
+                    onClick={() => commitFontScale(previewFontScale + FONT_SCALE_STEP)}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <div className="display-scale-group__divider" />
+
+              <div className="display-scale-setting">
+                <div className="display-scale-setting__header">
+                  <div className="display-scale-setting__copy">
+                    <div className="display-scale-setting__title">
+                      {t("interface_scale_title")}
+                    </div>
+                    <div className="display-scale-setting__description">
+                      {t("interface_scale_description")}
+                    </div>
+                  </div>
+                  <output
+                    ref={interfaceScaleOutputRef}
+                    className="display-scale-setting__value"
+                    htmlFor="interface-scale-slider"
+                  >
+                    {previewInterfaceScale.toFixed(1).replace(".", currentLang === "ru" ? "," : ".")}×
+                  </output>
+                </div>
+
+                <div className="display-scale-slider-row">
+                  <button
+                    type="button"
+                    className="display-scale-step"
+                    disabled={previewInterfaceScale <= INTERFACE_SCALE_MIN + 0.001}
+                    aria-label={t("interface_scale_decrease")}
+                    onClick={() => commitInterfaceScale(
+                      previewInterfaceScale - INTERFACE_SCALE_STEP,
+                    )}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M5 11h14v2H5z" />
+                    </svg>
+                  </button>
+
+                  <div className="display-scale-slider-wrap">
+                    <div className="display-scale-slider__ticks" aria-hidden="true">
+                      {DISPLAY_SCALE_TICK_VALUES.map((value) => (
+                        <span
+                          key={value}
+                          className={value <= previewInterfaceScale + 0.001 ? "is-active" : ""}
+                        />
+                      ))}
+                    </div>
+                    <input
+                      ref={interfaceScaleSliderRef}
+                      id="interface-scale-slider"
+                      className="display-scale-slider"
+                      type="range"
+                      min={INTERFACE_SCALE_MIN}
+                      max={INTERFACE_SCALE_MAX}
+                      step={INTERFACE_SCALE_STEP}
+                      defaultValue={previewInterfaceScale}
+                      aria-label={t("interface_scale_slider")}
+                      aria-valuetext={`${interfaceScalePercent}%`}
+                      style={{
+                        "--interface-scale-progress": `${interfaceScaleProgress}%`,
+                      } as CSSProperties}
+                      onPointerDown={() => {
+                        interfaceScaleDraggingRef.current = true;
+                      }}
+                      onInput={(event) => scheduleInterfacePreview(
+                        Math.min(
+                          INTERFACE_SCALE_MAX,
+                          Math.max(INTERFACE_SCALE_MIN, event.currentTarget.valueAsNumber),
+                        ),
+                      )}
+                      onPointerUp={(event) =>
+                        commitInterfaceScaleAfterRelease(event.currentTarget.valueAsNumber)
+                      }
+                      onPointerCancel={(event) =>
+                        commitInterfaceScaleAfterRelease(event.currentTarget.valueAsNumber)
+                      }
+                      onKeyDown={(event) => {
+                        let next: number | null = null;
+                        if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+                          next = previewInterfaceScale - INTERFACE_SCALE_STEP;
+                        } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+                          next = previewInterfaceScale + INTERFACE_SCALE_STEP;
+                        } else if (event.key === "Home") {
+                          next = INTERFACE_SCALE_MIN;
+                        } else if (event.key === "End") {
+                          next = INTERFACE_SCALE_MAX;
+                        }
+                        if (next === null) return;
+                        event.preventDefault();
+                        commitInterfaceScale(next);
+                      }}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    className="display-scale-step"
+                    disabled={previewInterfaceScale >= INTERFACE_SCALE_MAX - 0.001}
+                    aria-label={t("interface_scale_increase")}
+                    onClick={() => commitInterfaceScale(
+                      previewInterfaceScale + INTERFACE_SCALE_STEP,
+                    )}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="display-scale-section-label">
+              {t("text_style_section_title")}
+            </div>
+            <div className="display-scale-group">
+              <button
+                type="button"
+                className="display-text-style-row"
+                onClick={() => onBoldTextChange(!boldText)}
+              >
+                <span>{t("bold_text_title")}</span>
+                <span
+                  className={`settings-switch ${boldText ? "settings-switch--on" : ""}`}
+                  role="switch"
+                  aria-checked={boldText}
+                >
+                  <span className="settings-switch__thumb" />
+                </span>
+              </button>
+              <div className="display-scale-group__divider" />
+              <button
+                type="button"
+                className="display-text-style-row"
+                onClick={() => onOutlinedTextChange(!outlinedText)}
+              >
+                <span className="display-text-style-row__copy">
+                  <span>{t("outlined_text_title")}</span>
+                  <small>{t("outlined_text_description")}</small>
+                </span>
+                <span
+                  className={`settings-switch ${outlinedText ? "settings-switch--on" : ""}`}
+                  role="switch"
+                  aria-checked={outlinedText}
+                >
+                  <span className="settings-switch__thumb" />
+                </span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              className="display-scale-reset"
+              disabled={
+                Math.abs(previewInterfaceScale - INTERFACE_SCALE_DEFAULT) < 0.001 &&
+                Math.abs(previewFontScale - FONT_SCALE_DEFAULT) < 0.001 &&
+                !boldText &&
+                !outlinedText
+              }
+              onClick={() => {
+                commitInterfaceScale(INTERFACE_SCALE_DEFAULT);
+                commitFontScale(FONT_SCALE_DEFAULT);
+                onBoldTextChange(false);
+                onOutlinedTextChange(false);
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M13 3a9 9 0 1 0 8.95 10h-2.02A7 7 0 1 1 18 7.05L15 10h7V3l-2.58 2.58A8.96 8.96 0 0 0 13 3z" />
+              </svg>
+              <span>{t("display_settings_reset")}</span>
+            </button>
           </>
         )}
 
@@ -973,7 +1768,7 @@ export default function SettingsScreen({
             <div className="about-copyright">{t("about_copyright")}</div>
           </div>
         )}
-              </div>
+              </ScrollEdgeAffordance>
             </div>
           );
         })}
@@ -1032,6 +1827,250 @@ export default function SettingsScreen({
       )}
 
       <CopyNotification notice={copyNotice} />
+    </div>
+  );
+}
+
+function SettingsAccountCard({
+  session,
+  tier,
+  avatarUrl,
+  avatarLoading,
+  nameMode,
+  animatedLabels,
+  primaryName,
+  bothHandle,
+  onAvatarError,
+  onCopyId,
+}: {
+  session: Session;
+  tier: AccentTier;
+  avatarUrl: string | null;
+  avatarLoading: boolean;
+  nameMode: ProfileNameDisplay;
+  animatedLabels: string[];
+  primaryName: string | null;
+  bothHandle: string | null;
+  onAvatarError: () => void;
+  onCopyId: (telegramId: number) => void;
+}) {
+  const showExpires =
+    (session.userPlan === "PAID" || session.userPlan === "ADMIN") &&
+    session.planExpiresAt !== null;
+
+  return (
+    <div className={`settings-account settings-account--${tier}`}>
+      <div className="settings-account__left">
+        <div className="settings-account__avatar">
+          <div className="settings-account__avatar-inner">
+            {avatarUrl ? (
+              <img
+                src={avatarUrl}
+                alt=""
+                className="settings-account__avatar-img"
+                onError={onAvatarError}
+              />
+            ) : avatarLoading ? (
+              <Spinner size={40} thickness={3} />
+            ) : (
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="8" r="4" />
+                <path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" />
+              </svg>
+            )}
+          </div>
+        </div>
+        {nameMode === "animated"
+          ? animatedLabels.length > 0 && (
+              <CyclingName labels={animatedLabels} className="settings-account__name" />
+            )
+          : primaryName && (
+              <>
+                <span className="settings-account__name">{primaryName}</span>
+                {bothHandle && <span className="settings-account__handle">{bothHandle}</span>}
+              </>
+            )}
+      </div>
+      <div className="settings-account__right">
+        <span className={`settings-account__plan settings-account__plan--${tier}`}>
+          {planLabel(session.userPlan, session.planDisplayName)}
+        </span>
+        {session.telegramId !== null ? (
+          <button
+            type="button"
+            className="settings-account__id settings-account__id--button"
+            onClick={() => onCopyId(session.telegramId!)}
+            aria-label={t("settings_copy_telegram_id")}
+            title={t("settings_copy_telegram_id")}
+          >
+            ID {session.telegramId}
+          </button>
+        ) : (
+          <span className="settings-account__id">ID —</span>
+        )}
+        {showExpires && (
+          <span className="settings-account__expires">
+            {t("expires")} {formatDateDots(session.planExpiresAt!)}
+          </span>
+        )}
+        {session.userPlan === "EXPIRED" && (
+          <span className="settings-account__renew">{t("renew_in_bot")}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DisplayScalePreview({
+  rootRef,
+  trackRef,
+  previewScale,
+  appliedScale,
+  previewFontScale,
+  previewBoldText,
+  previewOutlinedText,
+  profilePreview,
+  serversPreview,
+  subscriptionPreview,
+}: {
+  rootRef: React.RefObject<HTMLDivElement | null>;
+  trackRef: React.RefObject<HTMLDivElement | null>;
+  previewScale: number;
+  appliedScale: number;
+  previewFontScale: number;
+  previewBoldText: boolean;
+  previewOutlinedText: boolean;
+  profilePreview: ReactNode;
+  serversPreview: ReactNode;
+  subscriptionPreview: ReactNode;
+}) {
+  const [page, setPage] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(224);
+  const dragStartRef = useRef<number | null>(null);
+  const pageRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const relativePreviewScale = previewScale / appliedScale;
+
+  // Keep the viewport stable while paging, using the real profile card as the
+  // reference size. This prevents the whole preview and all controls below it
+  // from jumping when the shorter servers/subscription examples are selected.
+  useEffect(() => {
+    let frame: number | null = null;
+
+    const measure = () => {
+      frame = null;
+      const profile = pageRefs.current[0]?.firstElementChild as HTMLElement | null;
+      if (!profile) return;
+      const next = Math.ceil(profile.offsetHeight * relativePreviewScale + 8);
+      setViewportHeight((current) => current === next ? current : next);
+    };
+
+    const scheduleMeasure = () => {
+      if (frame === null) frame = window.requestAnimationFrame(measure);
+    };
+    const observer = new ResizeObserver(scheduleMeasure);
+    const profile = pageRefs.current[0]?.firstElementChild;
+    if (profile) observer.observe(profile);
+    scheduleMeasure();
+
+    return () => {
+      observer.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [relativePreviewScale, previewFontScale]);
+
+  const finishDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = dragStartRef.current;
+    dragStartRef.current = null;
+    if (start === null) return;
+    const distance = event.clientX - start;
+    if (Math.abs(distance) < 42) return;
+    setPage((current) =>
+      Math.min(2, Math.max(0, current + (distance < 0 ? 1 : -1))),
+    );
+  };
+
+  return (
+    <div
+      ref={rootRef}
+      className="display-scale-preview"
+      style={{
+        "--display-preview-content-scale": relativePreviewScale,
+        "--display-preview-content-width": `${100 / relativePreviewScale}%`,
+      } as CSSProperties}
+    >
+      <div className="display-scale-preview__label">{t("display_preview_label")}</div>
+      <div
+        className="display-scale-preview__viewport"
+        style={{ height: `${viewportHeight}px` }}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          dragStartRef.current = event.clientX;
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerUp={finishDrag}
+        onPointerCancel={() => {
+          dragStartRef.current = null;
+        }}
+      >
+        <div
+          ref={trackRef}
+          className="display-scale-preview__track"
+          style={{
+            "--display-preview-offset": `${page * -100}%`,
+            "--app-font-weight-boost": previewBoldText ? "300" : "0",
+            "--app-text-outline-shadow": previewOutlinedText
+              ? "0 0 3px var(--display-preview-outline-color)"
+              : "none",
+          } as CSSProperties}
+        >
+          <div
+            className="display-scale-preview__page display-scale-preview__page--profile"
+            ref={(element) => { pageRefs.current[0] = element; }}
+          >
+            {profilePreview}
+          </div>
+          <div
+            className="display-scale-preview__page display-scale-preview__page--servers"
+            ref={(element) => { pageRefs.current[1] = element; }}
+          >
+            {serversPreview}
+          </div>
+          <div
+            className="display-scale-preview__page display-scale-preview__page--subscription"
+            ref={(element) => { pageRefs.current[2] = element; }}
+          >
+            {subscriptionPreview}
+          </div>
+        </div>
+      </div>
+
+      <div className="display-scale-preview__navigation">
+        <button
+          type="button"
+          disabled={page === 0}
+          aria-label={t("display_preview_previous")}
+          onClick={() => setPage((value) => Math.max(0, value - 1))}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </button>
+        <div className="display-scale-preview__dots" aria-hidden="true">
+          {[0, 1, 2].map((index) => (
+            <span key={index} className={index === page ? "is-current" : ""} />
+          ))}
+        </div>
+        <button
+          type="button"
+          disabled={page === 2}
+          aria-label={t("display_preview_next")}
+          onClick={() => setPage((value) => Math.min(2, value + 1))}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }

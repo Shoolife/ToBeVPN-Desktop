@@ -199,9 +199,19 @@ fn sanitizers() -> &'static Vec<(Regex, &'static str)> {
                 "<redacted-credential>",
             ),
             (
+                Regex::new(r#"(?i)\b(?:token|auth[_ -]?code|pair(?:ing)?[_ -]?code|device[_ -]?id|telegram[_ -]?id|short[_ -]?uuid|hwid)\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{4,}"#)
+                    .expect("valid identity diagnostic regex"),
+                "<redacted-credential>",
+            ),
+            (
                 Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
                     .expect("valid email diagnostic regex"),
                 "<redacted-email>",
+            ),
+            (
+                Regex::new(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,62})\.)+[a-z]{2,63}\b")
+                    .expect("valid hostname diagnostic regex"),
+                "<redacted-host>",
             ),
             (
                 Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
@@ -493,9 +503,14 @@ pub fn list_diagnostic_logs() -> Result<Vec<DiagnosticLogFileInfo>, String> {
 }
 
 #[tauri::command]
-pub fn export_diagnostic_log(file_name: Option<String>) -> Result<String, String> {
-    with_inner(|inner| {
-        let source = resolve_log(inner, file_name.as_deref())?;
+pub async fn export_diagnostic_log(file_name: Option<String>) -> Result<String, String> {
+    // Resolve the private source while holding the journal lock, then release
+    // it before touching Downloads. On Windows an antivirus or a redirected
+    // Downloads folder can make fs::copy noticeably slow; keeping the mutex
+    // locked here used to stall both the UI command and new VPN log entries.
+    let source = with_inner(|inner| resolve_log(inner, file_name.as_deref()))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
         let downloads = dirs::download_dir()
             .or_else(dirs::document_dir)
             .ok_or_else(|| "Could not resolve the Downloads directory".to_string())?;
@@ -520,6 +535,8 @@ pub fn export_diagnostic_log(file_name: Option<String>) -> Result<String, String
             .map_err(|error| format!("Could not export the diagnostic log: {error}"))?;
         Ok(destination.to_string_lossy().into_owned())
     })
+    .await
+    .map_err(|error| format!("Diagnostic export task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -558,9 +575,12 @@ mod tests {
     #[test]
     fn redacts_private_network_and_identity_values() {
         let value = sanitize_message(
-            "https://example.com/a user@example.com 123456789 1.2.3.4 123e4567-e89b-12d3-a456-426614174000",
+            "https://example.com/a vpn.example.net user@example.com token=secret-token-123 device_id=abcd1234 123456789 1.2.3.4 123e4567-e89b-12d3-a456-426614174000",
         );
         assert!(!value.contains("example.com"));
+        assert!(!value.contains("example.net"));
+        assert!(!value.contains("secret-token"));
+        assert!(!value.contains("abcd1234"));
         assert!(!value.contains("123456789"));
         assert!(!value.contains("1.2.3.4"));
         assert!(!value.contains("123e4567"));

@@ -3,6 +3,7 @@ import { t } from "../i18n";
 import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../session/auth";
 import { formatEpochSecondsDateDots } from "../session/dateFormat";
 import Spinner from "../components/Spinner";
+import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import type { LinkedDeviceDto } from "../api/types";
 import "./DevicesScreen.css";
 
@@ -192,7 +193,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
         </button>
       </div>
 
-      <div className="devices-content">
+      <ScrollEdgeAffordance className="devices-content">
         {error && (
           <button type="button" className="devices-error" onClick={() => void load()}>
             {error}
@@ -258,7 +259,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
             </div>
           ))
         )}
-      </div>
+      </ScrollEdgeAffordance>
     </div>
   );
 }

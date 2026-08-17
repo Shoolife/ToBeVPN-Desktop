@@ -1629,7 +1629,10 @@ export async function saveEmail(email: string): Promise<void> {
 export async function fetchPurchasePlans(): Promise<PurchasePlansDto | null> {
   const { isLinked } = getSession();
   if (!isLinked) return null;
-  if (await pingHwidOnly().catch(() => getSubscriptionUsageBlocked())) return null;
+  // HomeScreen already performs the access heartbeat before opening the
+  // sheet, and the purchase action checks it again immediately before showing
+  // the payment QR. Repeating it here delayed the plans request and could make
+  // a temporary heartbeat failure hide otherwise available tariffs.
   const res = await apiGetPurchasePlans();
   if (!res.success || !res.data) return null;
   return sanitizePurchasePlansData(res.data, getSession().telegramId);

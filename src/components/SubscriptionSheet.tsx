@@ -113,6 +113,15 @@ interface ExitingPeriods {
   showCacheHint: boolean;
 }
 
+interface SheetDragState {
+  pointerId: number;
+  startY: number;
+  offset: number;
+  activated: boolean;
+}
+
+const SHEET_DRAG_ACTIVATION_PX = 9;
+
 function createPreviewPlan(
   id: number,
   name: string,
@@ -504,6 +513,56 @@ function planNameClass(plan: UserPlan): string {
   }
 }
 
+export function SubscriptionCurrentPlanCard({
+  currentPlanName,
+  currentPlanNameClass,
+  currentHint,
+  showLimits,
+  limitsLoading,
+  trafficLimitValue,
+  deviceLimitValue,
+}: {
+  currentPlanName: string;
+  currentPlanNameClass: string;
+  currentHint: string | null;
+  showLimits: boolean;
+  limitsLoading: boolean;
+  trafficLimitValue: string;
+  deviceLimitValue: string;
+}) {
+  return (
+    <div className="sub-current">
+      <div className="sub-current__info">
+        <div className="sub-current__label">{t("current_plan")}</div>
+        <div className={currentPlanNameClass}>{currentPlanName}</div>
+        {currentHint && <div className="sub-current__hint">{currentHint}</div>}
+      </div>
+      {showLimits && (
+        <div className="sub-current__limits">
+          {limitsLoading ? (
+            <div className="sub-current__loading">
+              <Spinner size={18} thickness={2} />
+              <span>{t("loading_data")}</span>
+            </div>
+          ) : (
+            <>
+              <div className="sub-limit">
+                <div className="sub-limit__value">{trafficLimitValue}</div>
+                <div className="sub-limit__label">{t("per_month_short")}</div>
+              </div>
+              <span className="sub-current__sep">·</span>
+              <div className="sub-limit">
+                <div className="sub-limit__value">{deviceLimitValue}</div>
+                <div className="sub-limit__label">{t("devices_label")}</div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void }) {
   const session = useSession();
   const isRu = getSavedLang() === "ru";
@@ -523,6 +582,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const [plansData, setPlansData] = useState<PurchasePlansDto | null>(null);
   const [plansFromCache, setPlansFromCache] = useState(false);
   const [plansLoading, setPlansLoading] = useState(true);
+  const [plansRefreshing, setPlansRefreshing] = useState(true);
   const [currentLimits, setCurrentLimits] = useState<CurrentLimits | null>(null);
   const [loadedLimitsKey, setLoadedLimitsKey] = useState<string | null>(null);
   const [selectedTabKey, setSelectedTabKey] = useState<string | null>(null);
@@ -535,6 +595,9 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const [closing, setClosing] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const periodsContentRef = useRef<HTMLDivElement | null>(null);
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const sheetDragRef = useRef<SheetDragState | null>(null);
+  const sheetSnapTimerRef = useRef<number | null>(null);
   const qrClosingRef = useRef(false);
   const sheetClosingRef = useRef(false);
   const purchaseOpeningRef = useRef(false);
@@ -573,19 +636,27 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       setPlansData(PREVIEW_PURCHASE_PLANS);
       setPlansFromCache(false);
       setPlansLoading(false);
+      setPlansRefreshing(false);
       return;
     }
 
     const telegramId =
       session.isLinked && session.telegramId !== null ? session.telegramId : null;
     let cancelled = false;
-    setPlansData(null);
-    setPlansFromCache(false);
     if (telegramId === null) {
+      setPlansData(null);
+      setPlansFromCache(false);
       setPlansLoading(false);
+      setPlansRefreshing(false);
       return;
     }
-    setPlansLoading(true);
+    // Render the account-scoped, display-only cache immediately. Fresh prices,
+    // discounts and payment links still always come from the live response.
+    const cachedAtStart = readCachedPurchasePlans(telegramId);
+    setPlansData(cachedAtStart);
+    setPlansFromCache(Boolean(cachedAtStart));
+    setPlansLoading(!cachedAtStart);
+    setPlansRefreshing(true);
     fetchPurchasePlans()
       .then((data) => {
         if (cancelled) return;
@@ -595,18 +666,21 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
           setPlansFromCache(false);
           return;
         }
-        const cached = readCachedPurchasePlans(telegramId);
+        const cached = cachedAtStart ?? readCachedPurchasePlans(telegramId);
         setPlansData(cached);
         setPlansFromCache(Boolean(cached));
       })
       .catch(() => {
         if (cancelled) return;
-        const cached = readCachedPurchasePlans(telegramId);
+        const cached = cachedAtStart ?? readCachedPurchasePlans(telegramId);
         setPlansData(cached);
         setPlansFromCache(Boolean(cached));
       })
       .finally(() => {
-        if (!cancelled) setPlansLoading(false);
+        if (!cancelled) {
+          setPlansLoading(false);
+          setPlansRefreshing(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -614,11 +688,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   }, [
     session.deviceId,
     session.isLinked,
-    session.panelUserUuid,
-    session.planExpiresAt,
-    session.shortUuid,
     session.telegramId,
-    session.userPlan,
   ]);
 
   // Fetch real per-user limits (matches phone's loadCurrentLimits in MainViewModel).
@@ -820,8 +890,117 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     };
   }, [plansLoading, selectedTab?.key, plansFromCache]);
 
+  const clearSheetSnapTimer = () => {
+    if (sheetSnapTimerRef.current !== null) {
+      window.clearTimeout(sheetSnapTimerRef.current);
+      sheetSnapTimerRef.current = null;
+    }
+  };
+
+  const resetSheetDragVisual = () => {
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    sheet.classList.remove("sub-sheet--dragging", "sub-sheet--snapping");
+    sheet.style.removeProperty("transform");
+    sheet.style.removeProperty("--sub-sheet-close-from");
+    sheet.style.removeProperty("--sub-sheet-snap-duration");
+  };
+
+  const startSheetDrag = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || closing || sheetClosingRef.current || qrVisible) return;
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    clearSheetSnapTimer();
+    resetSheetDragVisual();
+    sheetDragRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      offset: 0,
+      activated: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+
+  const moveSheetDrag = (event: React.PointerEvent<HTMLElement>) => {
+    const drag = sheetDragRef.current;
+    const sheet = sheetRef.current;
+    if (!drag || !sheet || drag.pointerId !== event.pointerId) return;
+    const rawOffset = Math.min(
+      sheet.offsetHeight,
+      Math.max(0, event.clientY - drag.startY),
+    );
+    if (!drag.activated) {
+      if (rawOffset < SHEET_DRAG_ACTIVATION_PX) {
+        drag.offset = 0;
+        return;
+      }
+      drag.activated = true;
+      // Once the user has started interacting, the entrance animation must
+      // never become active again. Otherwise removing the temporary drag/snap
+      // class makes CSS replay slide-up and the sheet appears to blink open.
+      sheet.classList.add("sub-sheet--settled", "sub-sheet--dragging");
+    }
+    drag.offset = rawOffset;
+    sheet.style.transform = `translateY(${drag.offset}px)`;
+    event.preventDefault();
+  };
+
+  const finishSheetDrag = (
+    event: React.PointerEvent<HTMLElement>,
+    allowClose: boolean,
+  ) => {
+    const drag = sheetDragRef.current;
+    const sheet = sheetRef.current;
+    if (!drag || !sheet || drag.pointerId !== event.pointerId) return;
+    sheetDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    // A click or a tiny hand/mouse wobble never enters visual drag mode, so it
+    // must not interrupt the sheet's opening animation or start a snap-back.
+    if (!drag.activated) {
+      resetSheetDragVisual();
+      return;
+    }
+
+    const closeThreshold = Math.min(150, Math.max(76, sheet.offsetHeight * 0.18));
+    // The boundary is authoritative: speed alone must never close the sheet.
+    // Releasing anywhere above it always springs back from that exact point.
+    const shouldClose = allowClose && drag.offset >= closeThreshold;
+    sheet.classList.remove("sub-sheet--dragging");
+    if (shouldClose) {
+      sheet.style.setProperty("--sub-sheet-close-from", `${drag.offset}px`);
+      sheet.style.removeProperty("transform");
+      handleClose();
+      return;
+    }
+
+    if (drag.offset <= 0) {
+      resetSheetDragVisual();
+      return;
+    }
+    sheet.classList.add("sub-sheet--snapping");
+    const snapDuration = Math.round(
+      Math.min(310, Math.max(210, 175 + drag.offset * 0.72)),
+    );
+    sheet.style.setProperty("--sub-sheet-snap-duration", `${snapDuration}ms`);
+    // Commit the released position before assigning the destination. Without
+    // this layout boundary WebKit can merge both writes into one frame and the
+    // sheet appears to jerk instead of returning smoothly.
+    void sheet.offsetHeight;
+    sheet.style.transform = "translateY(0px)";
+    sheetSnapTimerRef.current = window.setTimeout(() => {
+      sheetSnapTimerRef.current = null;
+      if (!sheetDragRef.current && !sheetClosingRef.current) resetSheetDragVisual();
+    }, snapDuration + 32);
+  };
+
   const handleClose = () => {
     if (sheetClosingRef.current) return;
+    clearSheetSnapTimer();
+    sheetDragRef.current = null;
     sheetClosingRef.current = true;
     purchaseAttemptRef.current += 1;
     purchaseOpeningRef.current = false;
@@ -857,6 +1036,8 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
         window.cancelAnimationFrame(tabsScrollAnimationRef.current);
         tabsScrollAnimationRef.current = null;
       }
+      clearSheetSnapTimer();
+      sheetDragRef.current = null;
     };
   }, []);
 
@@ -977,6 +1158,19 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
         ? "\u221E"
         : `XXX ${t("unit_gb")}`;
   const deviceLimitValue = deviceLimit !== null ? String(deviceLimit) : "XX";
+  const appliedDiscountPercent =
+    !plansFromCache && plansData
+      ? Math.min(
+          100,
+          Math.max(0, Math.trunc(plansData.effective_discount_percent)),
+        )
+      : 0;
+  // When cached tariffs are already visible, reserve the exact banner height
+  // while fresh account-specific prices are loading. Otherwise the discount
+  // banner is inserted later and makes the whole tariff list jump down.
+  const discountPending =
+    !plansLoading && plansRefreshing && plansFromCache;
+  const discountVisible = discountPending || appliedDiscountPercent > 0;
   const selectTab = (tab: PlanTab) => {
     if (selectedTab?.key === tab.key) {
       scrollTabTowardCenter(tab.key);
@@ -1047,58 +1241,73 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
         }
       }}
     >
-      <div className={`sub-sheet ${closing ? "sub-sheet--closing" : ""}`}>
-        <div className="sub-sheet__handle" />
+      <div
+        ref={sheetRef}
+        className={`sub-sheet ${closing ? "sub-sheet--closing" : ""}`}
+      >
+        <div
+          className="sub-sheet__handle"
+          onPointerDown={startSheetDrag}
+          onPointerMove={moveSheetDrag}
+          onPointerUp={(event) => finishSheetDrag(event, true)}
+          onPointerCancel={(event) => finishSheetDrag(event, false)}
+          aria-hidden="true"
+        />
+        <button
+          type="button"
+          className="sub-sheet__close"
+          onClick={handleClose}
+          aria-label={t("close")}
+          title={t("close")}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </button>
         <div className="sub-sheet__content">
-          <div className="sub-sheet__title">{t("subscription")}</div>
+          <div
+            className="sub-sheet__title-row"
+            onPointerDown={startSheetDrag}
+            onPointerMove={moveSheetDrag}
+            onPointerUp={(event) => finishSheetDrag(event, true)}
+            onPointerCancel={(event) => finishSheetDrag(event, false)}
+          >
+            <div className="sub-sheet__title">{t("subscription")}</div>
+          </div>
 
           {/* Current plan */}
-          <div className="sub-current">
-            <div className="sub-current__info">
-              <div className="sub-current__label">{t("current_plan")}</div>
-              <div className={currentPlanNameClass}>{currentPlanName}</div>
-              {currentHint && <div className="sub-current__hint">{currentHint}</div>}
-            </div>
-            {showLimits && (
-              <div className="sub-current__limits">
-                {limitsLoading ? (
-                  <div className="sub-current__loading">
-                    <Spinner size={18} thickness={2} />
-                    <span>{t("loading_data")}</span>
-                  </div>
-                ) : (
-                  <>
-                    <div className="sub-limit">
-                      <div className="sub-limit__value">{trafficLimitValue}</div>
-                      <div className="sub-limit__label">{t("per_month_short")}</div>
-                    </div>
-                    <span className="sub-current__sep">·</span>
-                    <div className="sub-limit">
-                      <div className="sub-limit__value">{deviceLimitValue}</div>
-                      <div className="sub-limit__label">{t("devices_label")}</div>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
+          <SubscriptionCurrentPlanCard
+            currentPlanName={currentPlanName}
+            currentPlanNameClass={currentPlanNameClass}
+            currentHint={currentHint}
+            showLimits={showLimits}
+            limitsLoading={limitsLoading}
+            trafficLimitValue={trafficLimitValue}
+            deviceLimitValue={deviceLimitValue}
+          />
 
           <div className="sub-sheet__divider" />
 
           <div className="sub-sheet__section-title">{t("available_plans")}</div>
 
-          {!plansLoading &&
-            !plansFromCache &&
-            plansData &&
-            plansData.effective_discount_percent > 0 && (
-              <div className="sub-discount-banner">
-                <span aria-hidden="true">%</span>
-                {tf(
-                  "purchase_discount_applied",
-                  Math.min(100, Math.max(0, Math.trunc(plansData.effective_discount_percent))),
-                )}
-              </div>
-            )}
+          <div
+            className={`sub-discount-slot ${discountVisible ? "sub-discount-slot--visible" : ""}`}
+            aria-hidden={!discountVisible || discountPending}
+          >
+            <div className="sub-discount-slot__inner">
+              {discountPending ? (
+                <div className="sub-discount-banner sub-discount-banner--loading">
+                  <span className="sub-discount-banner__skeleton-icon" aria-hidden="true" />
+                  <span className="sub-discount-banner__skeleton-line" aria-hidden="true" />
+                </div>
+              ) : appliedDiscountPercent > 0 ? (
+                <div className="sub-discount-banner">
+                  <span aria-hidden="true">%</span>
+                  {tf("purchase_discount_applied", appliedDiscountPercent)}
+                </div>
+              ) : null}
+            </div>
+          </div>
 
           {plansLoading ? (
             <div className="sub-sheet__loading">

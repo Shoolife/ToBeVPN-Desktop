@@ -1,12 +1,12 @@
-import { useState, useRef, useEffect, useCallback, useSyncExternalStore, type PointerEvent } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useSyncExternalStore, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow, LogicalSize, primaryMonitor } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow, LogicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
 import OnboardingScreen from "./screens/OnboardingScreen";
 import PairingScreen from "./screens/PairingScreen";
 import HomeScreen from "./screens/HomeScreen";
-import SettingsScreen from "./screens/SettingsScreen";
+import SettingsScreen, { type SettingsSection } from "./screens/SettingsScreen";
 import ServersScreen from "./screens/ServersScreen";
 import StatsScreen from "./screens/StatsScreen";
 import SpeedTestScreen from "./screens/SpeedTestScreen";
@@ -47,6 +47,24 @@ import {
   initializeDiagnostics,
   recordDiagnosticEvent,
 } from "./session/diagnostics";
+import {
+  DESIGN_WINDOW_HEIGHT,
+  DESIGN_WINDOW_WIDTH,
+  getSavedBoldText,
+  getSavedFontScale,
+  getSavedInterfaceScale,
+  getSavedOutlinedText,
+  interfaceScaleToWindowScale,
+  INTERFACE_SCALE_MAX,
+  INTERFACE_SCALE_MIN,
+  saveBoldText,
+  saveFontScale,
+  saveInterfaceScale,
+  saveOutlinedText,
+  WINDOW_RENDER_SCALE_MAX,
+  WINDOW_RENDER_SCALE_MIN,
+  WINDOW_SCALE_BASE,
+} from "./session/interfaceScale";
 import "./App.css";
 
 export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing" | "referrals" | "promocodes";
@@ -159,6 +177,12 @@ export interface SelectedServer {
 
 type Direction = "forward" | "backward" | "none";
 
+type InterfaceScaleRequest = {
+  value: number;
+  centerAfterResize: boolean;
+  revision: number;
+};
+
 export default function App({
   initialScreen = "splash",
   browserPreview = false,
@@ -167,6 +191,7 @@ export default function App({
   browserPreview?: boolean;
 }) {
   const [currentScreen, setCurrentScreen] = useState<Screen>(initialScreen);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("main");
   const startupComplete = currentScreen !== "splash";
   const [prevScreen, setPrevScreen] = useState<Screen | null>(null);
   const [direction, setDirection] = useState<Direction>("none");
@@ -184,10 +209,93 @@ export default function App({
     getUpdateRequired,
     getUpdateRequired,
   );
+  const [interfaceScaleRequest, setInterfaceScaleRequest] = useState<InterfaceScaleRequest>(
+    () => ({
+      value: getSavedInterfaceScale(),
+      centerAfterResize: true,
+      revision: 0,
+    }),
+  );
+  const [fontScale, setFontScale] = useState(getSavedFontScale);
+  const [boldText, setBoldText] = useState(getSavedBoldText);
+  const [outlinedText, setOutlinedText] = useState(getSavedOutlinedText);
+  const interfaceScaleResizeGenerationRef = useRef(0);
+  const renderedFontScaleRef = useRef(fontScale);
+  const fontScaleFrameRef = useRef<number | null>(null);
+  const fontScaleInitializedRef = useRef(false);
   const useWindowsFrame = shouldUseWindowsFrame(browserPreview);
   const timeoutRef = useRef<number | null>(null);
 
   const DURATION = 300;
+
+  const requestInterfaceScale = useCallback((value: number, centerAfterResize = false) => {
+    const normalized = saveInterfaceScale(value);
+    setInterfaceScaleRequest((current) => ({
+      value: normalized,
+      centerAfterResize,
+      revision: current.revision + 1,
+    }));
+  }, []);
+
+  const requestFontScale = useCallback((value: number) => {
+    setFontScale(saveFontScale(value));
+  }, []);
+
+  const requestBoldText = useCallback((value: boolean) => {
+    setBoldText(saveBoldText(value));
+  }, []);
+
+  const requestOutlinedText = useCallback((value: boolean) => {
+    setOutlinedText(saveOutlinedText(value));
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--app-font-weight-boost", boldText ? "300" : "0");
+    root.dataset.appOutlinedText = outlinedText ? "true" : "false";
+  }, [boldText, outlinedText]);
+
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    if (fontScaleFrameRef.current !== null) {
+      window.cancelAnimationFrame(fontScaleFrameRef.current);
+      fontScaleFrameRef.current = null;
+    }
+    if (!fontScaleInitializedRef.current) {
+      fontScaleInitializedRef.current = true;
+      renderedFontScaleRef.current = fontScale;
+      root.style.setProperty("--app-font-scale", String(fontScale));
+      return;
+    }
+
+    const from = renderedFontScaleRef.current;
+    const to = fontScale;
+    if (Math.abs(to - from) < 0.0001) return;
+    const startedAt = window.performance.now();
+    const durationMs = 210;
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = progress < 0.5
+        ? 4 * progress * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+      const value = from + (to - from) * eased;
+      renderedFontScaleRef.current = value;
+      root.style.setProperty("--app-font-scale", String(value));
+      if (progress < 1) {
+        fontScaleFrameRef.current = window.requestAnimationFrame(animate);
+      } else {
+        fontScaleFrameRef.current = null;
+      }
+    };
+    fontScaleFrameRef.current = window.requestAnimationFrame(animate);
+
+    return () => {
+      if (fontScaleFrameRef.current !== null) {
+        window.cancelAnimationFrame(fontScaleFrameRef.current);
+        fontScaleFrameRef.current = null;
+      }
+    };
+  }, [fontScale]);
 
   useEffect(() => {
     if (useWindowsFrame) document.documentElement.dataset.windowFrame = "windows";
@@ -471,77 +579,169 @@ export default function App({
     return () => stopDeviceLinkPolling();
   }, [browserPreview, startupComplete]);
 
-  // Adaptive scaling for laptops whose screen height is below the design
-  // target of 895px (1366x768 / 1280x720 / netbooks). The CSS frame is
-  // deliberately larger in unscaled pixels when needed, so after transform
-  // scaling it covers the whole native window instead of leaving side gutters.
+  // The window and the whole CSS frame share one scale. User changes resize
+  // the native window and the transformed 494x895 design together; the same
+  // path also keeps the existing small-screen adaptation for short laptops.
   useEffect(() => {
-    const DESIGN_W = 494;
-    const DESIGN_H = 895;
-    const MIN_SCALE = 0.55;
-    const SCREEN_MARGIN_PX = 80;
+    const MONITOR_WIDTH_MARGIN = 32;
+    const MONITOR_HEIGHT_MARGIN = 80;
+    const generation = ++interfaceScaleResizeGenerationRef.current;
 
-    const applyFrameLayout = () => {
-      const viewportW = Math.max(1, window.innerWidth);
-      const viewportH = Math.max(1, window.innerHeight);
-      const wScale = viewportW / DESIGN_W;
-      const hScale = viewportH / DESIGN_H;
+    const applyFrameLayoutForSize = (rawWidth: number, rawHeight: number) => {
+      const viewportW = Math.max(1, rawWidth);
+      const viewportH = Math.max(1, rawHeight);
+      const wScale = viewportW / DESIGN_WINDOW_WIDTH;
+      const hScale = viewportH / DESIGN_WINDOW_HEIGHT;
       const scale = Math.min(wScale, hScale);
-      const clamped = Math.min(1, Math.max(MIN_SCALE, scale));
+      const clamped = Math.min(
+        WINDOW_RENDER_SCALE_MAX,
+        Math.max(WINDOW_RENDER_SCALE_MIN, scale),
+      );
       document.documentElement.style.setProperty("--app-scale", String(clamped));
       document.documentElement.style.setProperty("--app-frame-width", `${viewportW / clamped}px`);
       document.documentElement.style.setProperty("--app-frame-height", `${viewportH / clamped}px`);
     };
 
+    const applyFrameLayout = () => {
+      applyFrameLayoutForSize(window.innerWidth, window.innerHeight);
+    };
+
     let unlisten: (() => void) | undefined;
+    let layoutAnimationFrame: number | null = null;
     let cancelled = false;
 
+    // Native resize events can arrive in bursts. Updating the CSS frame more
+    // than once per paint produced visible micro-jumps, especially on
+    // WebKitGTK, so coalesce every burst into a single animation frame.
+    const scheduleFrameLayout = () => {
+      if (cancelled || layoutAnimationFrame !== null) return;
+      layoutAnimationFrame = requestAnimationFrame(() => {
+        layoutAnimationFrame = null;
+        if (!cancelled) applyFrameLayout();
+      });
+    };
+
+    if (browserPreview) {
+      scheduleFrameLayout();
+      window.addEventListener("resize", scheduleFrameLayout);
+      return () => {
+        cancelled = true;
+        window.removeEventListener("resize", scheduleFrameLayout);
+        if (layoutAnimationFrame !== null) cancelAnimationFrame(layoutAnimationFrame);
+      };
+    }
+
     (async () => {
+      const win = getCurrentWindow();
+      let appliedScale = interfaceScaleRequest.value;
+
+      // Subscribe before the first native resize so the transformed CSS frame
+      // follows every intermediate window size instead of catching up only at
+      // the end (which looked like a flash on WebView2 / WebKitGTK).
       try {
-        const mon = await primaryMonitor();
-        if (!cancelled && mon) {
-          const usableH = mon.size.height / mon.scaleFactor - SCREEN_MARGIN_PX;
-          if (usableH < DESIGN_H) {
-            const scale = Math.max(MIN_SCALE, usableH / DESIGN_H);
-            const win = getCurrentWindow();
-            await win.setSize(
-              new LogicalSize(
-                Math.round(DESIGN_W * scale),
-                Math.round(DESIGN_H * scale),
-              ),
-            );
-            await win.center();
-          }
+        const handle = await win.onResized(scheduleFrameLayout);
+        if (cancelled) handle();
+        else unlisten = handle;
+      } catch {
+        // We also schedule the layout after every animation step.
+      }
+      if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+
+      try {
+        const mon = (await currentMonitor()) ?? (await primaryMonitor());
+        if (mon) {
+          const workArea = mon.workArea.size.toLogical(mon.scaleFactor);
+          const monitorFit = Math.min(
+            (workArea.width - MONITOR_WIDTH_MARGIN) / DESIGN_WINDOW_WIDTH,
+            (workArea.height - MONITOR_HEIGHT_MARGIN) / DESIGN_WINDOW_HEIGHT,
+          );
+          appliedScale = Math.min(appliedScale, monitorFit / WINDOW_SCALE_BASE);
         }
       } catch {
-        // primaryMonitor() can fail on headless / unusual setups —
-        // applyFrameLayout below still produces a sensible scale
-        // from whatever size the window ended up at.
+        // Monitor discovery can fail on headless / unusual setups. The saved
+        // scale is still safe because Tauri enforces the configured bounds.
       }
-      if (cancelled) return;
-      applyFrameLayout();
+
+      appliedScale = Math.min(
+        INTERFACE_SCALE_MAX,
+        Math.max(INTERFACE_SCALE_MIN, appliedScale),
+      );
+      if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+
+      const windowScale = interfaceScaleToWindowScale(appliedScale);
+      const startWidth = Math.max(1, window.innerWidth);
+      const startHeight = Math.max(1, window.innerHeight);
+      const targetWidth = Math.round(DESIGN_WINDOW_WIDTH * windowScale);
+      const targetHeight = Math.round(DESIGN_WINDOW_HEIGHT * windowScale);
+      const resizeDistance = Math.max(
+        Math.abs(targetWidth - startWidth),
+        Math.abs(targetHeight - startHeight),
+      );
+      // A button changes one 0.1 step and already felt smooth at 320 ms. A
+      // slider can cross several steps at once, so scale the duration with the
+      // travelled distance instead of squeezing a full-range resize into
+      // roughly the same time as one button press.
+      const durationMs = Math.min(1_050, Math.max(320, resizeDistance * 3.6));
+      const startedAt = performance.now();
+      let lastWidth = Math.round(startWidth);
+      let lastHeight = Math.round(startHeight);
+
+      while (!cancelled && generation === interfaceScaleResizeGenerationRef.current) {
+        const progress = resizeDistance <= 1
+          ? 1
+          : Math.min(1, (performance.now() - startedAt) / durationMs);
+        const eased = progress < 0.5
+          ? 4 * progress * progress * progress
+          : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+        const width = Math.round(startWidth + (targetWidth - startWidth) * eased);
+        const height = Math.round(startHeight + (targetHeight - startHeight) * eased);
+
+        if (width !== lastWidth || height !== lastHeight || progress >= 1) {
+          // Prepare the CSS frame for the exact native size before yielding to
+          // Tauri. Both changes are then painted together; waiting for the
+          // delayed webview resize event made the interface visibly chase the
+          // outer window by one or two frames.
+          applyFrameLayoutForSize(width, height);
+          try {
+            await win.setSize(new LogicalSize(width, height));
+            lastWidth = width;
+            lastHeight = height;
+          } catch {
+            // Keep the current native size and derive the frame scale from it.
+            applyFrameLayout();
+            break;
+          }
+        }
+        if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+        scheduleFrameLayout();
+        if (progress >= 1) break;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+      if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+
+      if (interfaceScaleRequest.centerAfterResize) {
+        try {
+          await win.center();
+        } catch {
+          // Resizing still succeeded; centring is a non-critical refinement.
+        }
+      }
+      if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+
+      scheduleFrameLayout();
       // Fire a second pass on the next frame: setSize() resolves before
       // the webview has finished reflowing, so window.innerHeight isn't
       // yet the new value and our first scale computation would lag by
       // one paint.
-      requestAnimationFrame(() => { if (!cancelled) applyFrameLayout(); });
-
-      try {
-        const win = getCurrentWindow();
-        const handle = await win.onResized(() => applyFrameLayout());
-        if (cancelled) handle();
-        else unlisten = handle;
-      } catch {
-        // ignore — without the listener resize won't update the scale
-        // live, but the initial fit on mount is already correct.
-      }
+      requestAnimationFrame(() => { if (!cancelled) scheduleFrameLayout(); });
     })();
 
     return () => {
       cancelled = true;
       unlisten?.();
+      if (layoutAnimationFrame !== null) cancelAnimationFrame(layoutAnimationFrame);
     };
-  }, []);
+  }, [browserPreview, interfaceScaleRequest]);
 
   const renderScreen = (screen: Screen) => {
     switch (screen) {
@@ -555,7 +755,10 @@ export default function App({
         return (
           <HomeScreen
             onLogout={() => goBack("pairing")}
-            onSettings={() => goForward("settings")}
+            onSettings={() => {
+              setSettingsSection("main");
+              goForward("settings");
+            }}
             onServers={() => goForward("servers")}
             onStats={() => goForward("stats")}
             onSpeedTest={() => goForward("speedtest")}
@@ -576,21 +779,43 @@ export default function App({
           <SettingsScreen
             onBack={() => goBack("home")}
             onLoggedOut={() => { stopDeviceLinkPolling(); forceGoToPairing(); }}
-            onDevices={() => goForward("devices")}
-            onRouting={() => goForward("routing")}
-            onReferrals={() => goForward("referrals")}
-            onPromocodes={() => goForward("promocodes")}
+            onDevices={() => {
+              setSettingsSection("advanced");
+              goForward("devices");
+            }}
+            onRouting={() => {
+              setSettingsSection("advanced");
+              goForward("routing");
+            }}
+            onReferrals={() => {
+              setSettingsSection("main");
+              goForward("referrals");
+            }}
+            onPromocodes={() => {
+              setSettingsSection("main");
+              goForward("promocodes");
+            }}
+            interfaceScale={interfaceScaleRequest.value}
+            onInterfaceScaleChange={requestInterfaceScale}
+            fontScale={fontScale}
+            onFontScaleChange={requestFontScale}
+            boldText={boldText}
+            onBoldTextChange={requestBoldText}
+            outlinedText={outlinedText}
+            onOutlinedTextChange={requestOutlinedText}
+            onSectionChange={setSettingsSection}
             initialSection={
-              browserPreview && ["main", "personalization", "advanced", "support", "about"].includes(
+              browserPreview && ["main", "personalization", "displayScale", "advanced", "support", "about"].includes(
                 new URLSearchParams(window.location.search).get("settingsSection") ?? "",
               )
                 ? (new URLSearchParams(window.location.search).get("settingsSection") as
                     | "main"
                     | "personalization"
+                    | "displayScale"
                     | "advanced"
                     | "support"
                     | "about")
-                : undefined
+                : settingsSection
             }
           />
         );

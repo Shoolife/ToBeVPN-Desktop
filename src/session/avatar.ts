@@ -1,7 +1,7 @@
 // Session-scoped cache for the user's Telegram avatar. The backend endpoint
-// (GET /api/user/avatar) is rate-limited, so we fetch the JPEG at most once
-// per app run, hold it as an object URL, and hand the same URL to every
-// screen that needs it (currently the Settings account card).
+// (GET /api/user/avatar) is rate-limited, so we share one request/result per
+// account and app run (with one bounded retry after a transient failure), hold
+// the JPEG as an object URL, and hand it to every screen that needs it.
 import { fetchUserAvatar } from "../api/client";
 import { getSession } from "./store";
 
@@ -13,12 +13,33 @@ let cacheGeneration = 0;
 function accountKey(): string | null {
   const session = getSession();
   if (!session.isLinked || session.telegramId === null) return null;
-  return JSON.stringify([
-    session.deviceId,
-    session.telegramId,
-    session.shortUuid ?? "",
-    session.panelUserUuid ?? "",
-  ]);
+  // shortUuid/panelUserUuid are filled asynchronously by subscription sync.
+  // They describe the same Telegram account, so including them here changed
+  // the key in the middle of an avatar request and could start a second,
+  // rate-limited download.  Device + Telegram identity is the stable scope.
+  return JSON.stringify([session.deviceId, session.telegramId]);
+}
+
+const AVATAR_RETRY_DELAY_MS = 900;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function fetchAvatarWithOneRetry(
+  generation: number,
+  key: string,
+): Promise<Blob | null> {
+  try {
+    return await fetchUserAvatar();
+  } catch {
+    // Do not turn one temporary network/auth/gateway failure into a blank
+    // avatar for the rest of the screen lifetime.  One bounded retry is well
+    // below the endpoint's rate limit and does not loop in the background.
+    await delay(AVATAR_RETRY_DELAY_MS);
+    if (generation !== cacheGeneration || accountKey() !== key) return null;
+    return fetchUserAvatar();
+  }
 }
 
 function revokeCachedUrl(): void {
@@ -40,7 +61,7 @@ export async function getUserAvatarUrl(): Promise<string | null> {
   let promise!: Promise<string | null>;
   promise = (async () => {
     try {
-      const blob = await fetchUserAvatar();
+      const blob = await fetchAvatarWithOneRetry(generation, key);
       if (generation !== cacheGeneration || accountKey() !== key) return null;
       if (!blob) {
         revokeCachedUrl();
