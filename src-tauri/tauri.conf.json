@@ -14,11 +14,7 @@
       {
         "title": "ToBeVPN",
         "width": 445,
-        "height": 698,
-        "minWidth": 311,
-        "maxWidth": 578,
-        "minHeight": 489,
-        "maxHeight": 908,
+        "height": 729,
         "resizable": false,
         "maximizable": false,
         "fullscreen": false,

@@ -975,7 +975,12 @@ export default function SettingsScreen({
                 ? "settings-layer--enter"
                 : "settings-layer--exit";
           return (
-            <div key={`${s}-${idx}`} className={`settings-layer ${animClass}`}>
+            // The key must not carry the index: a leaving section moves from
+            // slot 1 to slot 0, and an index-based key would tear its whole
+            // subtree down and rebuild it exactly as the cross-fade starts.
+            // On the display-scale section that meant re-running the preview,
+            // the avatar and the plan-limits request mid-animation.
+            <div key={s} className={`settings-layer ${animClass}`}>
               <ScrollEdgeAffordance
                 className={`settings-content ${s === "support" ? "settings-content--support" : ""} ${s === "displayScale" ? "settings-content--display-scale" : ""}`}
               >

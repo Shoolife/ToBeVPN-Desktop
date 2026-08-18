@@ -182,10 +182,10 @@ html, body, #root {
   background: var(--bg);
 }
 
-html[data-window-frame="windows"],
-html[data-window-frame="windows"] body,
-html[data-window-frame="windows"] #scale-frame,
-html[data-window-frame="windows"] #root {
+html[data-window-frame="desktop"],
+html[data-window-frame="desktop"] body,
+html[data-window-frame="desktop"] #scale-frame,
+html[data-window-frame="desktop"] #root {
   background: transparent;
 }
 
@@ -209,18 +209,18 @@ body {
   background: var(--bg);
 }
 
-.app--windows-frame {
+.app--desktop-frame {
   border-radius: 14px;
   border: 1px solid var(--window-frame-border);
   background: var(--bg);
 }
 
-.app--windows-frame .app__content {
+.app--desktop-frame .app__content {
   top: 34px;
   border-radius: 0 0 14px 14px;
 }
 
-.windows-titlebar {
+.desktop-titlebar {
   position: absolute;
   inset: 0 0 auto 0;
   z-index: 30;
@@ -235,7 +235,7 @@ body {
   -webkit-app-region: drag;
 }
 
-.windows-titlebar__brand {
+.desktop-titlebar__brand {
   min-width: 0;
   display: flex;
   align-items: center;
@@ -246,7 +246,7 @@ body {
   opacity: 0.92;
 }
 
-.windows-titlebar__icon {
+.desktop-titlebar__icon {
   width: 16px;
   height: 16px;
   display: block;
@@ -254,13 +254,13 @@ body {
   border-radius: 4px;
 }
 
-.windows-titlebar__controls {
+.desktop-titlebar__controls {
   height: 100%;
   display: flex;
   -webkit-app-region: no-drag;
 }
 
-.windows-titlebar__button {
+.desktop-titlebar__button {
   width: 46px;
   height: 34px;
   display: inline-flex;
@@ -274,16 +274,16 @@ body {
   transition: background 120ms, color 120ms;
 }
 
-.windows-titlebar__button:hover {
+.desktop-titlebar__button:hover {
   background: var(--surface);
   color: var(--text);
 }
 
-.windows-titlebar__button--close {
+.desktop-titlebar__button--close {
   border-top-right-radius: 14px;
 }
 
-.windows-titlebar__button--close:hover {
+.desktop-titlebar__button--close:hover {
   background: #e81123;
   color: #ffffff;
 }

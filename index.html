@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ToBeVPN</title>
     <script>
-      if (navigator.userAgent.includes("Windows")) {
-        document.documentElement.dataset.windowFrame = "windows";
+      if (navigator.userAgent.includes("Windows") || navigator.userAgent.includes("Linux")) {
+        document.documentElement.dataset.windowFrame = "desktop";
       }
     </script>
     <script src="/theme-boot.js"></script>
@@ -26,8 +26,8 @@
         height: 100%;
         overflow: hidden;
       }
-      html[data-window-frame="windows"],
-      html[data-window-frame="windows"] body {
+      html[data-window-frame="desktop"],
+      html[data-window-frame="desktop"] body {
         background: transparent;
       }
       body { display: block; }
@@ -43,7 +43,7 @@
         transform-origin: top left;
         position: relative;
       }
-      html[data-window-frame="windows"] #scale-frame {
+      html[data-window-frame="desktop"] #scale-frame {
         background: transparent;
       }
       #root { width: 100%; height: 100%; }

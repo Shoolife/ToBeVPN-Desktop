@@ -12,6 +12,18 @@ export const FONT_SCALE_DEFAULT = 1;
 export const DESIGN_WINDOW_WIDTH = 494;
 export const DESIGN_WINDOW_HEIGHT = 776;
 
+// The desktop frame paints its own titlebar inside the window, above the
+// content (see .app--desktop-frame .app__content in App.css). Without this the
+// content would be short by exactly that strip: Windows lost the bottom of the
+// subscription card while Linux, which still had a native titlebar outside the
+// client area, did not — that platform gap is what this constant closes.
+export const DESKTOP_TITLEBAR_HEIGHT = 34;
+
+// Outer window height in design pixels. The titlebar lives inside the scaled
+// frame, so it is added before the interface scale and shrinks and grows with
+// the rest of the interface.
+export const DESIGN_WINDOW_OUTER_HEIGHT = DESIGN_WINDOW_HEIGHT + DESKTOP_TITLEBAR_HEIGHT;
+
 export const WINDOW_RENDER_SCALE_MIN = INTERFACE_SCALE_MIN * WINDOW_SCALE_BASE;
 export const WINDOW_RENDER_SCALE_MAX = INTERFACE_SCALE_MAX * WINDOW_SCALE_BASE;
 

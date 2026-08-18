@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useSyncExternalStore, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { currentMonitor, getCurrentWindow, LogicalSize, primaryMonitor } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow, PhysicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
 import OnboardingScreen from "./screens/OnboardingScreen";
 import PairingScreen from "./screens/PairingScreen";
@@ -48,21 +48,19 @@ import {
   recordDiagnosticEvent,
 } from "./session/diagnostics";
 import {
-  DESIGN_WINDOW_HEIGHT,
   DESIGN_WINDOW_WIDTH,
   getSavedBoldText,
   getSavedFontScale,
   getSavedInterfaceScale,
   getSavedOutlinedText,
   interfaceScaleToWindowScale,
+  DESIGN_WINDOW_OUTER_HEIGHT,
   INTERFACE_SCALE_MAX,
   INTERFACE_SCALE_MIN,
   saveBoldText,
   saveFontScale,
   saveInterfaceScale,
   saveOutlinedText,
-  WINDOW_RENDER_SCALE_MAX,
-  WINDOW_RENDER_SCALE_MIN,
   WINDOW_SCALE_BASE,
 } from "./session/interfaceScale";
 import "./App.css";
@@ -71,11 +69,12 @@ export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" |
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
 
-function shouldUseWindowsFrame(browserPreview: boolean): boolean {
-  return !browserPreview && navigator.userAgent.includes("Windows");
+function shouldUseDesktopFrame(browserPreview: boolean): boolean {
+  return !browserPreview;
 }
 
-function WindowsTitleBar() {
+
+function DesktopTitleBar() {
   const appWindow = getCurrentWindow();
 
   const startWindowDrag = (event: PointerEvent<HTMLDivElement>) => {
@@ -85,18 +84,18 @@ function WindowsTitleBar() {
 
   return (
     <div
-      className="windows-titlebar"
+      className="desktop-titlebar"
       data-tauri-drag-region
       onPointerDown={startWindowDrag}
     >
-      <div className="windows-titlebar__brand" data-tauri-drag-region>
-        <img src={brandLogo} alt="" className="windows-titlebar__icon" draggable={false} />
+      <div className="desktop-titlebar__brand" data-tauri-drag-region>
+        <img src={brandLogo} alt="" className="desktop-titlebar__icon" draggable={false} />
         <span data-tauri-drag-region>ToBeVPN</span>
       </div>
-      <div className="windows-titlebar__controls">
+      <div className="desktop-titlebar__controls">
         <button
           type="button"
-          className="windows-titlebar__button"
+          className="desktop-titlebar__button"
           aria-label="Свернуть"
           onClick={() => void appWindow.minimize()}
         >
@@ -106,7 +105,7 @@ function WindowsTitleBar() {
         </button>
         <button
           type="button"
-          className="windows-titlebar__button windows-titlebar__button--close"
+          className="desktop-titlebar__button desktop-titlebar__button--close"
           aria-label="Закрыть"
           onClick={() => {
             void invoke("hide_main_window_to_tray").catch(() => appWindow.close());
@@ -220,7 +219,7 @@ export default function App({
   const [boldText, setBoldText] = useState(getSavedBoldText);
   const [outlinedText, setOutlinedText] = useState(getSavedOutlinedText);
   const interfaceScaleResizeGenerationRef = useRef(0);
-  const useWindowsFrame = shouldUseWindowsFrame(browserPreview);
+  const useDesktopFrame = shouldUseDesktopFrame(browserPreview);
   const timeoutRef = useRef<number | null>(null);
 
   const DURATION = 300;
@@ -274,9 +273,9 @@ export default function App({
   }, []);
 
   useEffect(() => {
-    if (useWindowsFrame) document.documentElement.dataset.windowFrame = "windows";
+    if (useDesktopFrame) document.documentElement.dataset.windowFrame = "desktop";
     else delete document.documentElement.dataset.windowFrame;
-  }, [useWindowsFrame]);
+  }, [useDesktopFrame]);
 
   useEffect(() => {
     if (browserPreview) return;
@@ -555,9 +554,11 @@ export default function App({
     return () => stopDeviceLinkPolling();
   }, [browserPreview, startupComplete]);
 
-  // The window and the whole CSS frame share one scale. User changes resize
-  // the native window and the transformed 494x895 design together; the same
-  // path also keeps the existing small-screen adaptation for short laptops.
+  // The app scale owns the physical pixel size of the native window. Using a
+  // PhysicalSize here is intentional: LogicalSize is multiplied by Windows /
+  // Linux display scaling, so the same in-app coefficient otherwise produces
+  // different windows at 100%, 133%, 150%, etc. CSS receives the corresponding
+  // logical viewport and compensates for the native DPI below.
   useEffect(() => {
     const MONITOR_WIDTH_MARGIN = 32;
     const MONITOR_HEIGHT_MARGIN = 80;
@@ -567,22 +568,36 @@ export default function App({
       const viewportW = Math.max(1, rawWidth);
       const viewportH = Math.max(1, rawHeight);
       const wScale = viewportW / DESIGN_WINDOW_WIDTH;
-      const hScale = viewportH / DESIGN_WINDOW_HEIGHT;
-      const scale = Math.min(wScale, hScale);
-      const clamped = Math.min(
-        WINDOW_RENDER_SCALE_MAX,
-        Math.max(WINDOW_RENDER_SCALE_MIN, scale),
-      );
-      document.documentElement.style.setProperty("--app-scale", String(clamped));
-      document.documentElement.style.setProperty("--app-frame-width", `${viewportW / clamped}px`);
-      document.documentElement.style.setProperty("--app-frame-height", `${viewportH / clamped}px`);
+      // The viewport spans the whole frame, titlebar included, so it is the
+      // outer design height that the vertical fit has to be measured against.
+      const hScale = viewportH / DESIGN_WINDOW_OUTER_HEIGHT;
+      // Do not clamp this value to the app's 0.7..1.3 range. On a 200% system
+      // scale, for example, a physical 1.0 app window has half as many CSS
+      // pixels and therefore needs a 0.45 render scale. Clamping it would make
+      // the content overflow even though the native window is the right size.
+      const renderScale = Math.max(0.05, Math.min(wScale, hScale));
+      document.documentElement.style.setProperty("--app-scale", String(renderScale));
+      document.documentElement.style.setProperty("--app-frame-width", `${viewportW / renderScale}px`);
+      document.documentElement.style.setProperty("--app-frame-height", `${viewportH / renderScale}px`);
+    };
+
+    const applyFrameLayoutForPhysicalSize = (
+      physicalWidth: number,
+      physicalHeight: number,
+      nativeScaleFactor: number,
+    ) => {
+      const factor = Number.isFinite(nativeScaleFactor) && nativeScaleFactor > 0
+        ? nativeScaleFactor
+        : Math.max(1, window.devicePixelRatio || 1);
+      applyFrameLayoutForSize(physicalWidth / factor, physicalHeight / factor);
     };
 
     const applyFrameLayout = () => {
       applyFrameLayoutForSize(window.innerWidth, window.innerHeight);
     };
 
-    let unlisten: (() => void) | undefined;
+    let unlistenResize: (() => void) | undefined;
+    let unlistenScale: (() => void) | undefined;
     let layoutAnimationFrame: number | null = null;
     let cancelled = false;
 
@@ -617,7 +632,7 @@ export default function App({
       try {
         const handle = await win.onResized(scheduleFrameLayout);
         if (cancelled) handle();
-        else unlisten = handle;
+        else unlistenResize = handle;
       } catch {
         // We also schedule the layout after every animation step.
       }
@@ -626,10 +641,12 @@ export default function App({
       try {
         const mon = (await currentMonitor()) ?? (await primaryMonitor());
         if (mon) {
+          // Compare logical with logical: the window target below is logical
+          // too, so a physical work area would reject valid scales on HiDPI.
           const workArea = mon.workArea.size.toLogical(mon.scaleFactor);
           const monitorFit = Math.min(
             (workArea.width - MONITOR_WIDTH_MARGIN) / DESIGN_WINDOW_WIDTH,
-            (workArea.height - MONITOR_HEIGHT_MARGIN) / DESIGN_WINDOW_HEIGHT,
+            (workArea.height - MONITOR_HEIGHT_MARGIN) / DESIGN_WINDOW_OUTER_HEIGHT,
           );
           appliedScale = Math.min(appliedScale, monitorFit / WINDOW_SCALE_BASE);
         }
@@ -645,10 +662,53 @@ export default function App({
       if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
 
       const windowScale = interfaceScaleToWindowScale(appliedScale);
-      const startWidth = Math.max(1, window.innerWidth);
-      const startHeight = Math.max(1, window.innerHeight);
-      const targetWidth = Math.round(DESIGN_WINDOW_WIDTH * windowScale);
-      const targetHeight = Math.round(DESIGN_WINDOW_HEIGHT * windowScale);
+      // The window is sized in logical pixels so it follows the desktop's
+      // display scaling: on a 200% desktop the same app scale has to cover
+      // twice as many physical pixels, otherwise the window looks half-size.
+      // setSize() is still called with a PhysicalSize derived from the live
+      // scale factor — that keeps every animation step exact and lets us
+      // reassert the size when the factor changes mid-flight.
+      const logicalWidth = DESIGN_WINDOW_WIDTH * windowScale;
+      const logicalHeight = DESIGN_WINDOW_OUTER_HEIGHT * windowScale;
+      let activeNativeScaleFactor = await win.scaleFactor().catch(
+        () => Math.max(1, window.devicePixelRatio || 1),
+      );
+      const physicalTargetFor = (factor: number) => ({
+        width: Math.round(logicalWidth * factor),
+        height: Math.round(logicalHeight * factor),
+      });
+      let { width: targetWidth, height: targetHeight } =
+        physicalTargetFor(activeNativeScaleFactor);
+      const startSize = await win.innerSize().catch(() => new PhysicalSize(
+        Math.round(window.innerWidth * activeNativeScaleFactor),
+        Math.round(window.innerHeight * activeNativeScaleFactor),
+      ));
+      const startWidth = Math.max(1, startSize.width);
+      const startHeight = Math.max(1, startSize.height);
+
+      try {
+        const handle = await win.onScaleChanged(({ payload }) => {
+          activeNativeScaleFactor = payload.scaleFactor;
+          if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+          // A new monitor means the same logical window needs a different
+          // physical size. Recompute the target instead of re-sending the old
+          // pixel count, which would shrink or blow up the window.
+          ({ width: targetWidth, height: targetHeight } =
+            physicalTargetFor(activeNativeScaleFactor));
+          applyFrameLayoutForPhysicalSize(targetWidth, targetHeight, activeNativeScaleFactor);
+          void win.setSize(new PhysicalSize(targetWidth, targetHeight)).then(
+            scheduleFrameLayout,
+            scheduleFrameLayout,
+          );
+        });
+        if (cancelled) handle();
+        else unlistenScale = handle;
+      } catch {
+        // The resize still lands on the right size on platforms without
+        // scale-change events; only mid-flight DPI switches go unnoticed.
+      }
+      if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+
       const resizeDistance = Math.max(
         Math.abs(targetWidth - startWidth),
         Math.abs(targetHeight - startHeight),
@@ -677,9 +737,9 @@ export default function App({
           // Tauri. Both changes are then painted together; waiting for the
           // delayed webview resize event made the interface visibly chase the
           // outer window by one or two frames.
-          applyFrameLayoutForSize(width, height);
+          applyFrameLayoutForPhysicalSize(width, height, activeNativeScaleFactor);
           try {
-            await win.setSize(new LogicalSize(width, height));
+            await win.setSize(new PhysicalSize(width, height));
             lastWidth = width;
             lastHeight = height;
           } catch {
@@ -709,12 +769,26 @@ export default function App({
       // the webview has finished reflowing, so window.innerHeight isn't
       // yet the new value and our first scale computation would lag by
       // one paint.
-      requestAnimationFrame(() => { if (!cancelled) scheduleFrameLayout(); });
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        scheduleFrameLayout();
+        requestAnimationFrame(() => {
+          if (cancelled) return;
+          void invoke("record_window_metrics", {
+            requestedScale: interfaceScaleRequest.value,
+            appliedScale,
+            cssWidth: window.innerWidth,
+            cssHeight: window.innerHeight,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          }).catch(() => {});
+        });
+      });
     })();
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      unlistenResize?.();
+      unlistenScale?.();
       if (layoutAnimationFrame !== null) cancelAnimationFrame(layoutAnimationFrame);
     };
   }, [browserPreview, interfaceScaleRequest]);
@@ -929,8 +1003,8 @@ export default function App({
         : "";
 
   return (
-    <main className={`app ${useWindowsFrame ? "app--windows-frame" : ""}`}>
-      {useWindowsFrame && <WindowsTitleBar />}
+    <main className={`app ${useDesktopFrame ? "app--desktop-frame" : ""}`}>
+      {useDesktopFrame && <DesktopTitleBar />}
       <div className="app__content">
       <AppErrorBoundary>
         {prevScreen && (

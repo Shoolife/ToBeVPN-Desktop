@@ -48,6 +48,11 @@ const SECURE_SESSION_ACCOUNT: &str = "device-session-v1";
 const SECURE_SESSION_TOMBSTONE: &str = "tobevpn-revoked-v1";
 const MAX_SECURE_SESSION_BYTES: usize = 64 * 1024;
 const MAX_DESKTOP_STATS_BYTES: usize = 512 * 1024;
+// The startup size comes from tauri.conf.json in logical pixels, so the window
+// follows the desktop's display scaling. The frontend then applies the saved
+// 0.7..1.3 value on top, converting to physical pixels with the live scale
+// factor. Forcing a physical size here would make the window half-size on a
+// 200% desktop.
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(target_os = "linux")]
@@ -156,7 +161,13 @@ fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
     apply_windows_rounded_corners(window);
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
+    let _ = window.set_decorations(false);
+    let _ = window.set_background_color(Some(tauri::utils::config::Color(0, 0, 0, 0)));
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
     let _ = window.set_decorations(true);
 }
@@ -188,66 +199,6 @@ fn apply_windows_rounded_corners(window: &tauri::WebviewWindow) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn is_wayland_session() -> bool {
-    std::env::var("WAYLAND_DISPLAY")
-        .map(|value| !value.is_empty())
-        .unwrap_or(false)
-        || std::env::var("XDG_SESSION_TYPE")
-            .map(|value| value.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false)
-}
-
-#[cfg(target_os = "linux")]
-fn rebuild_wayland_titlebar(window: &tauri::WebviewWindow) {
-    if !is_wayland_session() {
-        return;
-    }
-
-    if let Ok(gtk_window) = window.gtk_window() {
-        let title = gtk_window
-            .title()
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "ToBeVPN".into());
-        let layout = if gtk_window.is_resizable() {
-            "menu:minimize,maximize,close"
-        } else {
-            "menu:minimize,close"
-        };
-        let header = gtk::HeaderBar::builder()
-            .show_close_button(true)
-            .decoration_layout(layout)
-            .title(title)
-            .build();
-
-        // Wayland needs an event window around rebuilt CSD titlebars for drag.
-        // Keep it below child widgets so header buttons still receive clicks.
-        let event_box = gtk::EventBox::new();
-        event_box.set_above_child(false);
-        event_box.set_visible_window(false);
-        event_box.set_can_focus(false);
-        event_box.add(&header);
-
-        let header_weak = header.downgrade();
-        gtk_window.connect_resizable_notify(move |gtk_window| {
-            if let Some(header) = header_weak.upgrade() {
-                let layout = if gtk_window.is_resizable() {
-                    "menu:minimize,maximize,close"
-                } else {
-                    "menu:minimize,close"
-                };
-                header.set_decoration_layout(Some(layout));
-            }
-        });
-
-        gtk_window.set_titlebar(Some(&event_box));
-        gtk_window.set_sensitive(true);
-        gtk_window.set_deletable(true);
-        event_box.show_all();
-        eprintln!("[TRAY] rebuilt Wayland titlebar");
-    }
-}
-
 fn send_window_to_background(window: tauri::WebviewWindow) {
     diagnostics::record_native("Window", "Main window hidden to system tray");
     restore_window_chrome(&window);
@@ -274,12 +225,10 @@ fn refresh_window_chrome_after_show(window: tauri::WebviewWindow) {
     #[cfg(target_os = "linux")]
     {
         restore_window_chrome(&window);
-        rebuild_wayland_titlebar(&window);
 
         let window_for_refresh = window.clone();
         gtk::glib::timeout_add_local_once(Duration::from_millis(120), move || {
             restore_window_chrome(&window_for_refresh);
-            rebuild_wayland_titlebar(&window_for_refresh);
             let _ = window_for_refresh.set_skip_taskbar(false);
             let _ = window_for_refresh.set_focus();
         });
@@ -304,6 +253,33 @@ fn get_hostname() -> String {
 #[tauri::command]
 fn get_hwid() -> String {
     machine_uid::get().unwrap_or_default()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn record_window_metrics(
+    window: tauri::WebviewWindow,
+    requested_scale: f64,
+    applied_scale: f64,
+    css_width: f64,
+    css_height: f64,
+    device_pixel_ratio: f64,
+) -> Result<(), String> {
+    let inner = window
+        .inner_size()
+        .map_err(|error| format!("Could not read inner window size: {error}"))?;
+    let outer = window
+        .outer_size()
+        .map_err(|error| format!("Could not read outer window size: {error}"))?;
+    let system_scale = window
+        .scale_factor()
+        .map_err(|error| format!("Could not read window scale factor: {error}"))?;
+    let message = format!(
+        "scale requested={requested_scale:.1} applied={applied_scale:.1}; physical inner={}x{} outer={}x{}; css={css_width:.1}x{css_height:.1}; system_scale={system_scale:.3} web_dpr={device_pixel_ratio:.3}",
+        inner.width, inner.height, outer.width, outer.height,
+    );
+    eprintln!("[WINDOW] {message}");
+    diagnostics::record_native("Window", &message);
+    Ok(())
 }
 
 /// OS version string, e.g. "11" / "26.4" / "24.04".
@@ -1061,11 +1037,16 @@ pub fn run() {
             // the call is silently dropped, leaving the window stuck on screen.
             if let Some(main_window) = app.get_webview_window("main") {
                 restore_window_chrome(&main_window);
+                let _ = main_window.center();
                 let quit_for_window = quit_flag.clone();
                 let window_for_handler = main_window.clone();
                 main_window.on_window_event(move |event| match event {
-                    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                    WindowEvent::Resized(_) => {
                         #[cfg(target_os = "windows")]
+                        apply_platform_window_chrome(&window_for_handler);
+                    }
+                    WindowEvent::ScaleFactorChanged { .. } => {
+                        #[cfg(any(target_os = "windows", target_os = "linux"))]
                         apply_platform_window_chrome(&window_for_handler);
                     }
                     WindowEvent::CloseRequested { api, .. } => {
@@ -1105,6 +1086,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_hostname,
             get_hwid,
+            record_window_metrics,
             get_os_version,
             get_os_name,
             get_device_model,
