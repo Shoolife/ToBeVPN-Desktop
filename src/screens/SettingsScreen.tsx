@@ -315,8 +315,7 @@ export default function SettingsScreen({
   const interfaceReleaseFrameRef = useRef<number | null>(null);
   const fontReleaseFrameRef = useRef<number | null>(null);
   const pendingInterfacePreviewRef = useRef(previewInterfaceScale);
-  const renderedFontPreviewRef = useRef(previewFontScale);
-  const fontPreviewTargetRef = useRef(previewFontScale);
+  const pendingFontPreviewRef = useRef(previewFontScale);
 
   const updateSliderVisual = (
     slider: HTMLInputElement | null,
@@ -377,7 +376,6 @@ export default function SettingsScreen({
   };
 
   const paintFontPreviewContent = (value: number) => {
-    renderedFontPreviewRef.current = value;
     displayScalePreviewTrackRef.current?.style.setProperty(
       "--app-font-scale",
       String(value),
@@ -390,7 +388,6 @@ export default function SettingsScreen({
       window.cancelAnimationFrame(fontPreviewFrameRef.current);
       fontPreviewFrameRef.current = null;
     }
-    fontPreviewTargetRef.current = value;
     paintFontPreviewContent(value);
     updateSliderVisual(
       fontScaleSliderRef.current,
@@ -399,49 +396,6 @@ export default function SettingsScreen({
       FONT_SCALE_MIN,
       FONT_SCALE_MAX,
     );
-  };
-
-  const animateFontPreview = (value: number) => {
-    updateSliderVisual(
-      fontScaleSliderRef.current,
-      fontScaleOutputRef.current,
-      value,
-      FONT_SCALE_MIN,
-      FONT_SCALE_MAX,
-    );
-    if (
-      fontPreviewFrameRef.current !== null &&
-      Math.abs(fontPreviewTargetRef.current - value) < 0.0001
-    ) {
-      return;
-    }
-    if (fontPreviewFrameRef.current !== null) {
-      window.cancelAnimationFrame(fontPreviewFrameRef.current);
-      fontPreviewFrameRef.current = null;
-    }
-
-    const from = renderedFontPreviewRef.current;
-    fontPreviewTargetRef.current = value;
-    if (Math.abs(value - from) < 0.0001) {
-      paintFontPreviewContent(value);
-      return;
-    }
-
-    const startedAt = window.performance.now();
-    const durationMs = 210;
-    const animate = (now: number) => {
-      const progress = Math.min(1, (now - startedAt) / durationMs);
-      const eased = progress < 0.5
-        ? 4 * progress * progress * progress
-        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
-      paintFontPreviewContent(from + (value - from) * eased);
-      if (progress < 1) {
-        fontPreviewFrameRef.current = window.requestAnimationFrame(animate);
-      } else {
-        fontPreviewFrameRef.current = null;
-      }
-    };
-    fontPreviewFrameRef.current = window.requestAnimationFrame(animate);
   };
 
   const scheduleInterfacePreview = (value: number) => {
@@ -454,7 +408,12 @@ export default function SettingsScreen({
   };
 
   const scheduleFontPreview = (value: number) => {
-    animateFontPreview(value);
+    pendingFontPreviewRef.current = value;
+    if (fontPreviewFrameRef.current !== null) return;
+    fontPreviewFrameRef.current = window.requestAnimationFrame(() => {
+      fontPreviewFrameRef.current = null;
+      applyFontPreviewImmediately(pendingFontPreviewRef.current);
+    });
   };
 
   // Support FAQ scroll affordances (fading edges + ↑/↓ arrows), mirroring the
@@ -888,7 +847,10 @@ export default function SettingsScreen({
   const commitFontScale = (value: number) => {
     const normalized = normalizeFontScale(value);
     fontScaleDraggingRef.current = false;
-    animateFontPreview(normalized);
+    displayScalePreviewTrackRef.current?.classList.remove(
+      "display-scale-preview__track--font-live",
+    );
+    applyFontPreviewImmediately(normalized);
     setPreviewFontScale(normalized);
     onFontScaleChange(normalized);
   };
@@ -1314,6 +1276,9 @@ export default function SettingsScreen({
                       } as CSSProperties}
                       onPointerDown={() => {
                         fontScaleDraggingRef.current = true;
+                        displayScalePreviewTrackRef.current?.classList.add(
+                          "display-scale-preview__track--font-live",
+                        );
                       }}
                       onInput={(event) => scheduleFontPreview(
                         Math.min(

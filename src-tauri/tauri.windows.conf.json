@@ -4,12 +4,12 @@
     "windows": [
       {
         "title": "ToBeVPN",
-        "width": 494,
-        "height": 855,
-        "minWidth": 494,
-        "maxWidth": 494,
-        "minHeight": 855,
-        "maxHeight": 855,
+        "width": 445,
+        "height": 698,
+        "minWidth": 311,
+        "maxWidth": 578,
+        "minHeight": 489,
+        "maxHeight": 908,
         "resizable": false,
         "maximizable": false,
         "fullscreen": false,

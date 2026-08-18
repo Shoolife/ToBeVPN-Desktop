@@ -220,9 +220,6 @@ export default function App({
   const [boldText, setBoldText] = useState(getSavedBoldText);
   const [outlinedText, setOutlinedText] = useState(getSavedOutlinedText);
   const interfaceScaleResizeGenerationRef = useRef(0);
-  const renderedFontScaleRef = useRef(fontScale);
-  const fontScaleFrameRef = useRef<number | null>(null);
-  const fontScaleInitializedRef = useRef(false);
   const useWindowsFrame = shouldUseWindowsFrame(browserPreview);
   const timeoutRef = useRef<number | null>(null);
 
@@ -257,45 +254,24 @@ export default function App({
 
   useLayoutEffect(() => {
     const root = document.documentElement;
-    if (fontScaleFrameRef.current !== null) {
-      window.cancelAnimationFrame(fontScaleFrameRef.current);
-      fontScaleFrameRef.current = null;
-    }
-    if (!fontScaleInitializedRef.current) {
-      fontScaleInitializedRef.current = true;
-      renderedFontScaleRef.current = fontScale;
-      root.style.setProperty("--app-font-scale", String(fontScale));
-      return;
-    }
-
-    const from = renderedFontScaleRef.current;
-    const to = fontScale;
-    if (Math.abs(to - from) < 0.0001) return;
-    const startedAt = window.performance.now();
-    const durationMs = 210;
-    const animate = (now: number) => {
-      const progress = Math.min(1, (now - startedAt) / durationMs);
-      const eased = progress < 0.5
-        ? 4 * progress * progress * progress
-        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
-      const value = from + (to - from) * eased;
-      renderedFontScaleRef.current = value;
-      root.style.setProperty("--app-font-scale", String(value));
-      if (progress < 1) {
-        fontScaleFrameRef.current = window.requestAnimationFrame(animate);
-      } else {
-        fontScaleFrameRef.current = null;
-      }
-    };
-    fontScaleFrameRef.current = window.requestAnimationFrame(animate);
-
-    return () => {
-      if (fontScaleFrameRef.current !== null) {
-        window.cancelAnimationFrame(fontScaleFrameRef.current);
-        fontScaleFrameRef.current = null;
-      }
-    };
+    root.style.setProperty("--app-font-scale", String(fontScale));
   }, [fontScale]);
+
+  // Apply the saved value before the first paint, then enable native
+  // interpolation for subsequent user changes. Animating the inherited
+  // typography variable in a JavaScript RAF loop forced WebKitGTK to perform
+  // a full text layout before scheduling every next frame, which looked like
+  // throttling rather than a smooth transition.
+  useEffect(() => {
+    const root = document.documentElement;
+    const frame = window.requestAnimationFrame(() => {
+      root.dataset.appFontScaleTransition = "true";
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      delete root.dataset.appFontScaleTransition;
+    };
+  }, []);
 
   useEffect(() => {
     if (useWindowsFrame) document.documentElement.dataset.windowFrame = "windows";

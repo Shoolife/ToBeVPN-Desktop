@@ -281,7 +281,9 @@ jobs:
         run: npm ci
 
       - name: Type-check frontend
-        run: npx tsc --noEmit
+        run: |
+          npm run check:window-scale-config
+          npx tsc --noEmit
 
       - name: Check and test Rust core
         working-directory: src-tauri
@@ -545,7 +547,9 @@ jobs:
         run: npm ci
 
       - name: Type-check frontend
-        run: npx tsc --noEmit
+        run: |
+          npm run check:window-scale-config
+          npx tsc --noEmit
 
       - name: Test Windows Rust core
         working-directory: src-tauri

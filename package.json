@@ -4,6 +4,7 @@
   "version": "1.0.82",
   "type": "module",
   "scripts": {
+    "check:window-scale-config": "node scripts/check-window-scale-config.mjs",
     "inject-host": "bash scripts/inject-backend-host.sh",
     "restore-host": "bash scripts/restore-placeholder.sh",
     "dev": "npm run inject-host && vite",

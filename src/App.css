@@ -87,6 +87,10 @@
   -webkit-font-smoothing: antialiased;
 }
 
+:root[data-app-font-scale-transition="true"] {
+  transition: --app-font-scale 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 :root[data-theme="light"] {
   --bg: #ffffff;
   --surface: #eeeeee;
