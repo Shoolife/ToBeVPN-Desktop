@@ -32,7 +32,15 @@ import "./ReferralsScreen.css";
 const PAGE_SIZE = 20;
 const MIN_REFRESH_FEEDBACK_MS = 900;
 const SHEET_EXIT_MS = 300;
+const SHEET_DRAG_ACTIVATION_PX = 9;
 const MAX_TELEGRAM_ID_DIGITS = 19;
+
+interface SheetDragState {
+  pointerId: number;
+  startY: number;
+  offset: number;
+  activated: boolean;
+}
 
 type ReferralData = {
   referralUrl: string;
@@ -846,15 +854,121 @@ function InvitedFriendsSheet({
   onDismiss: () => void;
 }) {
   const [closing, setClosing] = useState(false);
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const sheetDragRef = useRef<SheetDragState | null>(null);
+  const sheetSnapTimerRef = useRef<number | null>(null);
   const closingRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
 
+  const clearSheetSnapTimer = useCallback(() => {
+    if (sheetSnapTimerRef.current !== null) {
+      window.clearTimeout(sheetSnapTimerRef.current);
+      sheetSnapTimerRef.current = null;
+    }
+  }, []);
+
+  const resetSheetDragVisual = useCallback(() => {
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    sheet.classList.remove(
+      "referrals-sheet--dragging",
+      "referrals-sheet--snapping",
+    );
+    sheet.style.removeProperty("transform");
+    sheet.style.removeProperty("--referrals-sheet-close-from");
+    sheet.style.removeProperty("--referrals-sheet-snap-duration");
+  }, []);
+
   const requestClose = useCallback(() => {
     if (closingRef.current) return;
+    clearSheetSnapTimer();
+    sheetDragRef.current = null;
     closingRef.current = true;
     setClosing(true);
     closeTimerRef.current = window.setTimeout(onDismiss, SHEET_EXIT_MS);
-  }, [onDismiss]);
+  }, [clearSheetSnapTimer, onDismiss]);
+
+  const startSheetDrag = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || closingRef.current) return;
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    clearSheetSnapTimer();
+    resetSheetDragVisual();
+    sheetDragRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      offset: 0,
+      activated: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+
+  const moveSheetDrag = (event: React.PointerEvent<HTMLElement>) => {
+    const drag = sheetDragRef.current;
+    const sheet = sheetRef.current;
+    if (!drag || !sheet || drag.pointerId !== event.pointerId) return;
+    const rawOffset = Math.min(
+      sheet.offsetHeight,
+      Math.max(0, event.clientY - drag.startY),
+    );
+    if (!drag.activated) {
+      if (rawOffset < SHEET_DRAG_ACTIVATION_PX) {
+        drag.offset = 0;
+        return;
+      }
+      drag.activated = true;
+      sheet.classList.add("referrals-sheet--settled", "referrals-sheet--dragging");
+    }
+    drag.offset = rawOffset;
+    sheet.style.transform = `translateY(${drag.offset}px)`;
+    event.preventDefault();
+  };
+
+  const finishSheetDrag = (
+    event: React.PointerEvent<HTMLElement>,
+    allowClose: boolean,
+  ) => {
+    const drag = sheetDragRef.current;
+    const sheet = sheetRef.current;
+    if (!drag || !sheet || drag.pointerId !== event.pointerId) return;
+    sheetDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (!drag.activated) {
+      resetSheetDragVisual();
+      return;
+    }
+
+    const closeThreshold = Math.min(150, Math.max(76, sheet.offsetHeight * 0.18));
+    const shouldClose = allowClose && drag.offset >= closeThreshold;
+    sheet.classList.remove("referrals-sheet--dragging");
+    if (shouldClose) {
+      sheet.style.setProperty("--referrals-sheet-close-from", `${drag.offset}px`);
+      sheet.style.removeProperty("transform");
+      requestClose();
+      return;
+    }
+
+    if (drag.offset <= 0) {
+      resetSheetDragVisual();
+      return;
+    }
+
+    sheet.classList.add("referrals-sheet--snapping");
+    const snapDuration = Math.round(
+      Math.min(310, Math.max(210, 175 + drag.offset * 0.72)),
+    );
+    sheet.style.setProperty("--referrals-sheet-snap-duration", `${snapDuration}ms`);
+    void sheet.offsetHeight;
+    sheet.style.transform = "translateY(0px)";
+    sheetSnapTimerRef.current = window.setTimeout(() => {
+      sheetSnapTimerRef.current = null;
+      if (!sheetDragRef.current && !closingRef.current) resetSheetDragVisual();
+    }, snapDuration + 32);
+  };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -867,11 +981,13 @@ function InvitedFriendsSheet({
     window.addEventListener("keydown", onKeyDown);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
+      clearSheetSnapTimer();
+      sheetDragRef.current = null;
       if (closeTimerRef.current !== null) {
         window.clearTimeout(closeTimerRef.current);
       }
     };
-  }, [requestClose]);
+  }, [clearSheetSnapTimer, requestClose]);
 
   const target = document.getElementById("overlay-root") ?? document.body;
   return createPortal(
@@ -882,13 +998,38 @@ function InvitedFriendsSheet({
       onClick={(event) => event.target === event.currentTarget && requestClose()}
     >
       <div
+        ref={sheetRef}
         className={`referrals-sheet ${closing ? "referrals-sheet--closing" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="referrals-sheet-title"
       >
-        <div className="referrals-sheet__handle" aria-hidden="true" />
-        <div className="referrals-sheet__header">
+        <div
+          className="referrals-sheet__handle"
+          onPointerDown={startSheetDrag}
+          onPointerMove={moveSheetDrag}
+          onPointerUp={(event) => finishSheetDrag(event, true)}
+          onPointerCancel={(event) => finishSheetDrag(event, false)}
+          aria-hidden="true"
+        />
+        <button
+          type="button"
+          className="referrals-sheet__close"
+          onClick={requestClose}
+          aria-label={t("close")}
+          title={t("close")}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </button>
+        <div
+          className="referrals-sheet__header"
+          onPointerDown={startSheetDrag}
+          onPointerMove={moveSheetDrag}
+          onPointerUp={(event) => finishSheetDrag(event, true)}
+          onPointerCancel={(event) => finishSheetDrag(event, false)}
+        >
           <h2 id="referrals-sheet-title">{t("referrals_invited_title")}</h2>
           <p>{invitedCountText(total)}</p>
         </div>

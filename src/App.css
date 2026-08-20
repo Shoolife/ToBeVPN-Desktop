@@ -223,7 +223,11 @@ body {
 .desktop-titlebar {
   position: absolute;
   inset: 0 0 auto 0;
-  z-index: 30;
+  /* Treat the custom titlebar like native window chrome. Bottom sheets and
+     dialogs are portalled into #overlay-root (up to z-index: 20000); keeping
+     the titlebar above that layer preserves window dragging and the native
+     minimise/close controls while an in-app modal is open. */
+  z-index: 30000;
   height: 34px;
   display: flex;
   align-items: center;

@@ -16,6 +16,15 @@ import MaterialIcon from "./MaterialIcon";
 import { isBrowserPreviewRuntime } from "../session/browserPreview";
 import "./DiagnosticsPanel.css";
 
+interface SheetDragState {
+  pointerId: number;
+  startY: number;
+  offset: number;
+  activated: boolean;
+}
+
+const SHEET_DRAG_ACTIVATION_PX = 9;
+
 function formatBytes(bytes: number): string {
   const units = getSavedLang() === "ru"
     ? { bytes: "Б", kilobytes: "КБ", megabytes: "МБ" }
@@ -93,20 +102,136 @@ function ModalFrame({
 }) {
   const isBottomSheet = placement === "bottom";
   const [closing, setClosing] = useState(false);
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  const sheetDragRef = useRef<SheetDragState | null>(null);
+  const sheetSnapTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
+
+  const clearSheetSnapTimer = useCallback(() => {
+    if (sheetSnapTimerRef.current !== null) {
+      window.clearTimeout(sheetSnapTimerRef.current);
+      sheetSnapTimerRef.current = null;
+    }
+  }, []);
+
+  const resetSheetDragVisual = useCallback(() => {
+    const modal = modalRef.current;
+    if (!modal) return;
+    modal.classList.remove(
+      "diagnostics-modal--dragging",
+      "diagnostics-modal--snapping",
+    );
+    modal.style.removeProperty("transform");
+    modal.style.removeProperty("--diagnostics-sheet-close-from");
+    modal.style.removeProperty("--diagnostics-sheet-snap-duration");
+  }, []);
 
   const requestClose = useCallback(() => {
     if (!canClose) return;
     if (closeTimerRef.current !== null) return;
+    clearSheetSnapTimer();
+    sheetDragRef.current = null;
     setClosing(true);
     closeTimerRef.current = window.setTimeout(onClose, isBottomSheet ? 300 : 180);
-  }, [canClose, isBottomSheet, onClose]);
+  }, [canClose, clearSheetSnapTimer, isBottomSheet, onClose]);
+
+  const startSheetDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isBottomSheet || !canClose || event.button !== 0 || closeTimerRef.current !== null) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest("[data-bottom-sheet-drag-handle]")) {
+      return;
+    }
+    const modal = modalRef.current;
+    if (!modal) return;
+    clearSheetSnapTimer();
+    resetSheetDragVisual();
+    sheetDragRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      offset: 0,
+      activated: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+
+  const moveSheetDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = sheetDragRef.current;
+    const modal = modalRef.current;
+    if (!drag || !modal || drag.pointerId !== event.pointerId) return;
+    const rawOffset = Math.min(
+      modal.offsetHeight,
+      Math.max(0, event.clientY - drag.startY),
+    );
+    if (!drag.activated) {
+      if (rawOffset < SHEET_DRAG_ACTIVATION_PX) {
+        drag.offset = 0;
+        return;
+      }
+      drag.activated = true;
+      modal.classList.add("diagnostics-modal--settled", "diagnostics-modal--dragging");
+    }
+    drag.offset = rawOffset;
+    modal.style.transform = `translateY(${drag.offset}px)`;
+    event.preventDefault();
+  };
+
+  const finishSheetDrag = (
+    event: React.PointerEvent<HTMLDivElement>,
+    allowClose: boolean,
+  ) => {
+    const drag = sheetDragRef.current;
+    const modal = modalRef.current;
+    if (!drag || !modal || drag.pointerId !== event.pointerId) return;
+    sheetDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (!drag.activated) {
+      resetSheetDragVisual();
+      return;
+    }
+
+    const closeThreshold = Math.min(150, Math.max(76, modal.offsetHeight * 0.18));
+    const shouldClose = allowClose && drag.offset >= closeThreshold;
+    modal.classList.remove("diagnostics-modal--dragging");
+    if (shouldClose) {
+      modal.style.setProperty("--diagnostics-sheet-close-from", `${drag.offset}px`);
+      modal.style.removeProperty("transform");
+      requestClose();
+      return;
+    }
+
+    if (drag.offset <= 0) {
+      resetSheetDragVisual();
+      return;
+    }
+
+    modal.classList.add("diagnostics-modal--snapping");
+    const snapDuration = Math.round(
+      Math.min(310, Math.max(210, 175 + drag.offset * 0.72)),
+    );
+    modal.style.setProperty("--diagnostics-sheet-snap-duration", `${snapDuration}ms`);
+    void modal.offsetHeight;
+    modal.style.transform = "translateY(0px)";
+    sheetSnapTimerRef.current = window.setTimeout(() => {
+      sheetSnapTimerRef.current = null;
+      if (!sheetDragRef.current && closeTimerRef.current === null) {
+        resetSheetDragVisual();
+      }
+    }, snapDuration + 32);
+  };
 
   useEffect(() => () => {
+    clearSheetSnapTimer();
+    sheetDragRef.current = null;
     if (closeTimerRef.current !== null) {
       window.clearTimeout(closeTimerRef.current);
     }
-  }, []);
+  }, [clearSheetSnapTimer]);
 
   const target = document.getElementById("overlay-root") ?? document.body;
   return createPortal(
@@ -115,10 +240,15 @@ function ModalFrame({
       onMouseDown={requestClose}
     >
       <div
+        ref={modalRef}
         className={`diagnostics-modal ${className} ${closing ? "diagnostics-modal--closing" : ""}`}
         role="dialog"
         aria-modal="true"
         onMouseDown={(event) => event.stopPropagation()}
+        onPointerDown={startSheetDrag}
+        onPointerMove={moveSheetDrag}
+        onPointerUp={(event) => finishSheetDrag(event, true)}
+        onPointerCancel={(event) => finishSheetDrag(event, false)}
       >
         {typeof children === "function" ? children(requestClose) : children}
       </div>
@@ -184,62 +314,83 @@ function DiagnosticHistoryDialog({
   const today = new Date().toISOString().slice(0, 10);
   return (
     <ModalFrame onClose={onClose} className="diagnostics-modal--history" placement="bottom">
-      <div className="diagnostics-sheet-handle" aria-hidden="true"><span /></div>
-      <div className="diagnostics-modal__title">{t("diagnostics_history_title")}</div>
-      <div className="diagnostics-modal__description">{t("diagnostics_history_description")}</div>
-      <div className="diagnostics-scroll-shell diagnostics-history-shell">
-        <div
-          className="diagnostics-history"
-          ref={fades.ref}
-          onScroll={fades.update}
-          style={{
-            WebkitMaskImage: `linear-gradient(to bottom, ${fades.top ? "transparent" : "#000"} 0, #000 30px, #000 calc(100% - 30px), ${fades.bottom ? "transparent" : "#000"} 100%)`,
-            maskImage: `linear-gradient(to bottom, ${fades.top ? "transparent" : "#000"} 0, #000 30px, #000 calc(100% - 30px), ${fades.bottom ? "transparent" : "#000"} 100%)`,
-          }}
-        >
-          {loading ? (
-            <div className="diagnostics-history__empty"><Spinner size={30} thickness={3} /></div>
-          ) : logs.length === 0 ? (
-            <div className="diagnostics-history__empty">{t("diagnostics_history_empty")}</div>
-          ) : logs.map((log) => (
-            <div className="diagnostics-history-item" key={log.fileName}>
-              <div className="diagnostics-history-item__icon">
-                <MaterialIcon name="descriptionOutlined" size={22} />
-              </div>
-              <div className="diagnostics-history-item__content">
-                <div className="diagnostics-history-item__date">
-                  {log.date === today ? t("diagnostics_history_today") : formatDate(log.date)}
+      {(requestClose) => (
+        <>
+          <div
+            className="diagnostics-sheet-handle"
+            data-bottom-sheet-drag-handle
+            aria-hidden="true"
+          ><span /></div>
+          <button
+            type="button"
+            className="diagnostics-sheet-close"
+            onClick={requestClose}
+            aria-label={t("close")}
+            title={t("close")}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </button>
+          <div className="diagnostics-sheet-header" data-bottom-sheet-drag-handle>
+            <div className="diagnostics-modal__title">{t("diagnostics_history_title")}</div>
+            <div className="diagnostics-modal__description">{t("diagnostics_history_description")}</div>
+          </div>
+          <div className="diagnostics-scroll-shell diagnostics-history-shell">
+            <div
+              className="diagnostics-history"
+              ref={fades.ref}
+              onScroll={fades.update}
+              style={{
+                WebkitMaskImage: `linear-gradient(to bottom, ${fades.top ? "transparent" : "#000"} 0, #000 30px, #000 calc(100% - 30px), ${fades.bottom ? "transparent" : "#000"} 100%)`,
+                maskImage: `linear-gradient(to bottom, ${fades.top ? "transparent" : "#000"} 0, #000 30px, #000 calc(100% - 30px), ${fades.bottom ? "transparent" : "#000"} 100%)`,
+              }}
+            >
+              {loading ? (
+                <div className="diagnostics-history__empty"><Spinner size={30} thickness={3} /></div>
+              ) : logs.length === 0 ? (
+                <div className="diagnostics-history__empty">{t("diagnostics_history_empty")}</div>
+              ) : logs.map((log) => (
+                <div className="diagnostics-history-item" key={log.fileName}>
+                  <div className="diagnostics-history-item__icon">
+                    <MaterialIcon name="descriptionOutlined" size={22} />
+                  </div>
+                  <div className="diagnostics-history-item__content">
+                    <div className="diagnostics-history-item__date">
+                      {log.date === today ? t("diagnostics_history_today") : formatDate(log.date)}
+                    </div>
+                    <div className="diagnostics-history-item__size">
+                      {log.date === today
+                        ? `${formatCompactDate(log.date)} · ${formatBytes(log.sizeBytes)}`
+                        : formatBytes(log.sizeBytes)}
+                    </div>
+                  </div>
+                  <button
+                    className="diagnostics-history-item__action"
+                    onClick={() => onExport(log.fileName)}
+                    title={t("diagnostics_history_export")}
+                    aria-label={t("diagnostics_history_export")}
+                  >
+                    <MaterialIcon name="shareOutlined" size={22} />
+                  </button>
+                  <button
+                    className="diagnostics-history-item__action diagnostics-history-item__action--delete"
+                    onClick={() => onDelete(log)}
+                    disabled={deleting === log.fileName}
+                    title={t("diagnostics_history_delete")}
+                    aria-label={t("diagnostics_history_delete")}
+                  >
+                    {deleting === log.fileName ? <Spinner size={18} thickness={2.5} /> : (
+                      <MaterialIcon name="deleteOutline" size={22} />
+                    )}
+                  </button>
                 </div>
-                <div className="diagnostics-history-item__size">
-                  {log.date === today
-                    ? `${formatCompactDate(log.date)} · ${formatBytes(log.sizeBytes)}`
-                    : formatBytes(log.sizeBytes)}
-                </div>
-              </div>
-              <button
-                className="diagnostics-history-item__action"
-                onClick={() => onExport(log.fileName)}
-                title={t("diagnostics_history_export")}
-                aria-label={t("diagnostics_history_export")}
-              >
-                <MaterialIcon name="shareOutlined" size={22} />
-              </button>
-              <button
-                className="diagnostics-history-item__action diagnostics-history-item__action--delete"
-                onClick={() => onDelete(log)}
-                disabled={deleting === log.fileName}
-                title={t("diagnostics_history_delete")}
-                aria-label={t("diagnostics_history_delete")}
-              >
-                {deleting === log.fileName ? <Spinner size={18} thickness={2.5} /> : (
-                  <MaterialIcon name="deleteOutline" size={22} />
-                )}
-              </button>
+              ))}
             </div>
-          ))}
-        </div>
-        <ScrollArrows top={fades.top} bottom={fades.bottom} />
-      </div>
+            <ScrollArrows top={fades.top} bottom={fades.bottom} />
+          </div>
+        </>
+      )}
     </ModalFrame>
   );
 }
