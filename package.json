@@ -1,7 +1,7 @@
 {
   "name": "tobevpn-desktop",
   "private": true,
-  "version": "1.0.83",
+  "version": "1.0.82",
   "type": "module",
   "scripts": {
     "check:window-scale-config": "node scripts/check-window-scale-config.mjs",

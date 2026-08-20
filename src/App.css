@@ -474,7 +474,7 @@ body {
   pointer-events: auto;
 }
 
-html[data-window-frame="windows"] .update-banner-overlay {
+html[data-window-frame="desktop"] .update-banner-overlay {
   top: 46px;
 }
 

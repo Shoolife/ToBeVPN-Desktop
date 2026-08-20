@@ -120,6 +120,21 @@ if (!new RegExp(`\\.app--desktop-frame \\.app__content \\{[^}]*top: ${design.tit
   );
 }
 
+// The updater is portalled below the custom titlebar. Both supported desktop
+// platforms use data-window-frame="desktop"; a platform-specific selector
+// silently leaves the banner at its generic 12px offset and under the
+// titlebar's drag layer.
+const updateBannerGap = 12;
+const expectedUpdateBannerTop = design.titlebar + updateBannerGap;
+if (!new RegExp(
+  `html\\[data-window-frame="desktop"\\] \\.update-banner-overlay \\{[^}]*top: ${expectedUpdateBannerTop}px`,
+).test(appStyles)) {
+  failures.push(
+    `${APP_STYLES}: the desktop update banner must start at ` +
+      `${expectedUpdateBannerTop}px (${design.titlebar}px titlebar + ${updateBannerGap}px gap)`,
+  );
+}
+
 const nativeSource = await readFile(NATIVE_SOURCE, "utf8");
 // A physical startup size would ignore the desktop's display scaling and open
 // the window at a fraction of its intended size on HiDPI screens.
