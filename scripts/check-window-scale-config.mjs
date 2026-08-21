@@ -5,6 +5,7 @@ const SCALE_SOURCE = "src/session/interfaceScale.ts";
 const APP_SOURCE = "src/App.tsx";
 const NATIVE_SOURCE = "src-tauri/src/lib.rs";
 const APP_STYLES = "src/App.css";
+const DOCUMENT_SOURCE = "index.html";
 const LINUX_CONFIG = "src-tauri/tauri.linux.conf.json";
 const PLATFORM_CONFIGS = [LINUX_CONFIG, "src-tauri/tauri.windows.conf.json"];
 
@@ -133,6 +134,48 @@ if (!new RegExp(
     `${APP_STYLES}: the desktop update banner must start at ` +
       `${expectedUpdateBannerTop}px (${design.titlebar}px titlebar + ${updateBannerGap}px gap)`,
   );
+}
+
+// Portalled backdrops live beside #root and therefore bypass .app's own
+// overflow clipping. The outer unscaled wrapper must be the sole clipping
+// boundary: it contains both roots without resampling the rounded edge through
+// the app's scale transform.
+const documentSource = await readFile(DOCUMENT_SOURCE, "utf8");
+const desktopClipRule = documentSource.match(
+  /html\[data-window-frame="desktop"\] #window-clip\s*\{([^}]*)\}/,
+);
+if (!desktopClipRule) {
+  failures.push(`${DOCUMENT_SOURCE}: desktop #window-clip rule is missing`);
+} else {
+  const declarations = desktopClipRule[1];
+  if (!/border-radius:\s*14px\s*;/.test(declarations)) {
+    failures.push(`${DOCUMENT_SOURCE}: desktop #window-clip must keep the 14px window radius`);
+  }
+  if (!/overflow:\s*hidden\s*;/.test(declarations)) {
+    failures.push(`${DOCUMENT_SOURCE}: desktop #window-clip must clip portalled overlays`);
+  }
+}
+
+const scaledFrameRule = documentSource.match(
+  /html\[data-window-frame="desktop"\] #scale-frame\s*\{([^}]*)\}/,
+);
+if (
+  scaledFrameRule &&
+  /border-radius:|overflow:\s*hidden/.test(scaledFrameRule[1])
+) {
+  failures.push(`${DOCUMENT_SOURCE}: transformed #scale-frame must not rasterise the outer window curve`);
+}
+
+// There must be exactly one clipping curve at the outer edge. Multiple
+// identical radii still compound their antialiased edge pixels after the
+// frame's 0.9 transform and make overlays look fractionally misaligned.
+const appFrameRule = appStyles.match(/\.app--desktop-frame\s*\{([^}]*)\}/);
+if (appFrameRule && /border(?:-radius)?:/.test(appFrameRule[1])) {
+  failures.push(`${APP_STYLES}: .app--desktop-frame must leave its outer edge to #scale-frame`);
+}
+const appContentRule = appStyles.match(/\.app--desktop-frame \.app__content\s*\{([^}]*)\}/);
+if (appContentRule && /border-radius:/.test(appContentRule[1])) {
+  failures.push(`${APP_STYLES}: desktop app content must not add a second outer-radius mask`);
 }
 
 const nativeSource = await readFile(NATIVE_SOURCE, "utf8");

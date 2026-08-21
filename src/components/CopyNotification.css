@@ -9,7 +9,7 @@
   align-items: center;
   gap: 9px;
   padding: 10px 15px;
-  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--border));
+  border: 0;
   border-radius: 13px;
   background: color-mix(in srgb, var(--surface) 94%, var(--success) 6%);
   color: var(--text);

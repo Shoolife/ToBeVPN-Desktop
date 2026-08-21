@@ -166,7 +166,7 @@
 /* Chart */
 .stats-chart {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 20px;
   padding: 20px 16px 12px 8px;
   height: 200px;
@@ -279,7 +279,7 @@
 /* Stat rows */
 .stats-row {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 14px;
   padding: 12px 16px;
 }

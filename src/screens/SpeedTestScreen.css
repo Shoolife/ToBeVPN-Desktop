@@ -130,7 +130,7 @@
 .speed-result {
   flex: 1;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 16px;
   padding: 16px 12px;
   display: flex;

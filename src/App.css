@@ -73,7 +73,6 @@
   --speed-off-bg: rgba(255, 255, 255, 0.08);
   --speed-off-border: rgba(255, 255, 255, 0.12);
   --speed-off-text: rgba(255, 255, 255, 0.62);
-  --window-frame-border: rgba(255, 255, 255, 0.1);
   --app-font-scale: 1;
   --app-font-weight-boost: 0;
   --app-text-outline-shadow: none;
@@ -143,8 +142,6 @@
   --speed-off-bg: rgba(26, 28, 30, 0.06);
   --speed-off-border: rgba(26, 28, 30, 0.12);
   --speed-off-text: rgba(26, 28, 30, 0.62);
-  --window-frame-border: rgba(26, 28, 30, 0.14);
-
   color-scheme: light;
 }
 
@@ -184,6 +181,7 @@ html, body, #root {
 
 html[data-window-frame="desktop"],
 html[data-window-frame="desktop"] body,
+html[data-window-frame="desktop"] #window-clip,
 html[data-window-frame="desktop"] #scale-frame,
 html[data-window-frame="desktop"] #root {
   background: transparent;
@@ -210,14 +208,11 @@ body {
 }
 
 .app--desktop-frame {
-  border-radius: 14px;
-  border: 1px solid var(--window-frame-border);
   background: var(--bg);
 }
 
 .app--desktop-frame .app__content {
   top: 34px;
-  border-radius: 0 0 14px 14px;
 }
 
 .desktop-titlebar {
@@ -234,7 +229,6 @@ body {
   justify-content: space-between;
   padding-left: 12px;
   background: var(--bg);
-  border-radius: 14px 14px 0 0;
   color: var(--text);
   -webkit-app-region: drag;
 }
@@ -283,10 +277,6 @@ body {
   color: var(--text);
 }
 
-.desktop-titlebar__button--close {
-  border-top-right-radius: 14px;
-}
-
 .desktop-titlebar__button--close:hover {
   background: #e81123;
   color: #ffffff;
@@ -307,7 +297,7 @@ body {
 
 .app-error__card {
   width: min(440px, 100%);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 18px;
   background: var(--surface);
   padding: 24px;
@@ -450,7 +440,7 @@ body {
 /* Cards */
 .card {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 12px;
   padding: 16px;
 }
@@ -543,7 +533,7 @@ html[data-window-frame="desktop"] .update-banner-overlay {
   grid-template-columns: 1fr 1fr;
   width: min(100%, 430px);
   padding: 4px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 12px;
   background: var(--surface);
 }
@@ -608,7 +598,7 @@ html[data-window-frame="desktop"] .update-banner-overlay {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 10px;
   padding: 8px 8px 8px 16px;
 }

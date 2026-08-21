@@ -31,6 +31,19 @@
         background: transparent;
       }
       body { display: block; }
+      #window-clip {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+      /* Keep the only outer clipping curve outside the transformed frame.
+         Rasterising the radius before a 0.9 transform leaves its edge between
+         physical pixels and makes the transparent corners look jagged. */
+      html[data-window-frame="desktop"] #window-clip {
+        background: transparent;
+        border-radius: 14px;
+        overflow: hidden;
+      }
       /* The app is designed around 494x895, but the outer frame expands in
          unscaled CSS pixels so that after transform scaling it covers the
          whole native window. This avoids side gutters on short Windows
@@ -66,9 +79,11 @@
   </head>
 
   <body>
-    <div id="scale-frame">
-      <div id="root"></div>
-      <div id="overlay-root"></div>
+    <div id="window-clip">
+      <div id="scale-frame">
+        <div id="root"></div>
+        <div id="overlay-root"></div>
+      </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

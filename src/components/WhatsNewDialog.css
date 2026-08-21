@@ -32,7 +32,7 @@ html[data-window-frame="windows"] .whats-new-overlay {
   overflow: hidden;
   overscroll-behavior: contain;
   padding: 28px 24px 22px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 24px;
   background: var(--surface);
   color: var(--text);
@@ -173,7 +173,7 @@ html[data-window-frame="windows"] .whats-new-overlay {
   align-items: flex-start;
   gap: 12px;
   padding: 14px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 16px;
   background: color-mix(in srgb, var(--surface-2) 72%, transparent);
 }

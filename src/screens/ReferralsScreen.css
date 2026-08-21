@@ -256,7 +256,7 @@
 .referrals-card {
   flex-shrink: 0;
   padding: 17px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 19px;
   background: var(--surface);
 }
@@ -535,7 +535,7 @@
   align-items: center;
   gap: 10px;
   padding: 12px 13px;
-  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+  border: 0;
   border-radius: 14px;
   background: color-mix(in srgb, var(--danger) 11%, var(--surface));
   color: var(--text);
@@ -818,7 +818,7 @@
   gap: 11px;
   min-height: 68px;
   padding: 12px 13px;
-  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  border: 0;
   border-radius: 16px;
   background: var(--sheet-card);
 }
@@ -930,7 +930,7 @@
   flex-direction: column;
   align-items: center;
   padding: 23px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 21px;
   background: var(--sheet-bg);
   box-shadow: var(--modal-shadow);
@@ -979,7 +979,7 @@
   max-height: calc(100vh - 44px);
   overflow: auto;
   padding: 23px;
-  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  border: 0;
   border-radius: 28px;
   background: var(--sheet-bg);
   box-shadow: var(--modal-shadow);

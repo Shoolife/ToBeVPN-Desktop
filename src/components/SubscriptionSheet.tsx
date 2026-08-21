@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import {
   fetchPurchasePlans,
@@ -59,6 +60,43 @@ function safePaymentUrl(value: unknown): string | null {
   try {
     const url = new URL(value.trim());
     return url.protocol === "https:" && !url.username && !url.password ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+interface TelegramOpenTargets {
+  desktopUrl: string;
+  browserUrl: string;
+}
+
+function telegramOpenTargets(value: string): TelegramOpenTargets | null {
+  try {
+    const browser = new URL(value);
+    if (
+      browser.protocol !== "https:" ||
+      browser.hostname.toLocaleLowerCase("en-US") !== "t.me" ||
+      browser.username ||
+      browser.password ||
+      browser.port
+    ) return null;
+
+    const pathParts = browser.pathname
+      .split("/")
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part));
+    if (pathParts.length !== 1 || !/^[A-Za-z0-9_]{5,64}$/.test(pathParts[0])) return null;
+
+    const desktop = new URL("tg://resolve");
+    desktop.searchParams.set("domain", pathParts[0]);
+    // Purchase links currently use `start`; retain `startapp` as well for a
+    // future Telegram Mini App flow without forwarding arbitrary parameters
+    // into the local protocol handler.
+    for (const key of ["start", "startapp"] as const) {
+      const parameter = browser.searchParams.get(key);
+      if (parameter) desktop.searchParams.set(key, parameter);
+    }
+    return { desktopUrl: desktop.toString(), browserUrl: browser.toString() };
   } catch {
     return null;
   }
@@ -592,6 +630,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const [qrPaymentUrl, setQrPaymentUrl] = useState<string | null>(null);
   const [qrIsRenewal, setQrIsRenewal] = useState(false);
   const [purchaseOpening, setPurchaseOpening] = useState(false);
+  const [telegramOpening, setTelegramOpening] = useState(false);
   const [closing, setClosing] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const periodsContentRef = useRef<HTMLDivElement | null>(null);
@@ -601,6 +640,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const qrClosingRef = useRef(false);
   const sheetClosingRef = useRef(false);
   const purchaseOpeningRef = useRef(false);
+  const telegramOpeningRef = useRef(false);
   const purchaseAttemptRef = useRef(0);
   const qrCloseTimerRef = useRef<number | null>(null);
   const dismissTimerRef = useRef<number | null>(null);
@@ -1023,6 +1063,7 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     return () => {
       purchaseAttemptRef.current += 1;
       purchaseOpeningRef.current = false;
+      telegramOpeningRef.current = false;
       if (tabTransitionTimerRef.current !== null) {
         window.clearTimeout(tabTransitionTimerRef.current);
       }
@@ -1058,6 +1099,29 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
   const selectedPaymentUrl =
     selectedRow?.paymentUrl ??
     (isRenewal && !plansFromCache ? currentLimits?.renewalUrl ?? null : null);
+  const qrTelegramTargets = qrPaymentUrl ? telegramOpenTargets(qrPaymentUrl) : null;
+  const handleOpenTelegram = async () => {
+    if (!qrTelegramTargets || telegramOpeningRef.current || qrClosingRef.current) return;
+    telegramOpeningRef.current = true;
+    setTelegramOpening(true);
+    setOpenError(null);
+    try {
+      if (isBrowserPreviewRuntime()) {
+        window.open(qrTelegramTargets.browserUrl, "_blank", "noopener,noreferrer");
+        return;
+      }
+      try {
+        await openUrl(qrTelegramTargets.desktopUrl);
+      } catch {
+        await openUrl(qrTelegramTargets.browserUrl);
+      }
+    } catch {
+      setOpenError(t("subscription_telegram_open_failed"));
+    } finally {
+      telegramOpeningRef.current = false;
+      setTelegramOpening(false);
+    }
+  };
   const handleShowQr = async () => {
     if (purchaseOpeningRef.current || sheetClosingRef.current) return;
     if (!canPurchase) {
@@ -1412,9 +1476,26 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
                 {openError}
               </div>
             )}
-            <button className="sub-qr-card__close" onClick={closeQr}>
-              {t("subscription_change_plan")}
-            </button>
+            <div className="sub-qr-card__actions">
+              {qrTelegramTargets && (
+                <button
+                  type="button"
+                  className="sub-qr-card__telegram"
+                  onClick={() => void handleOpenTelegram()}
+                  disabled={telegramOpening}
+                  aria-busy={telegramOpening}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M22 2 11 13" />
+                    <path d="m22 2-7 20-4-9-9-4Z" />
+                  </svg>
+                  {t(telegramOpening ? "subscription_opening_telegram" : "subscription_open_telegram")}
+                </button>
+              )}
+              <button type="button" className="sub-qr-card__close" onClick={closeQr}>
+                {t("subscription_change_plan")}
+              </button>
+            </div>
           </div>
         </div>
       )}

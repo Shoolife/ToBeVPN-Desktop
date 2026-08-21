@@ -790,7 +790,7 @@
 /* Cards */
 .settings-card {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 16px;
   padding: 16px;
 }
@@ -1007,7 +1007,7 @@
   width: 100%;
   min-height: 76px;
   padding: 16px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 16px;
   background: var(--surface);
   color: var(--text);
@@ -1074,7 +1074,7 @@
 
 .display-scale-preview {
   padding: 18px 16px 12px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 24px;
   background: var(--surface);
 }
@@ -1907,7 +1907,7 @@
 
 .dialog {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 20px;
   padding: 24px;
   max-width: 340px;

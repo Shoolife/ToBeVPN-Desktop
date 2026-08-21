@@ -1,6 +1,6 @@
 .update-banner {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 14px;
   padding: 10px 14px;
   display: flex;

@@ -104,7 +104,7 @@
   min-height: 146px;
   margin-top: 30px;
   padding: 17px 18px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.11);
+  border: 0;
   border-radius: 18px;
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.045)),
