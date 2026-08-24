@@ -18,14 +18,14 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
-      icon: "link",
-      titleKey: "whats_new_telegram_payment_title",
-      descriptionKey: "whats_new_telegram_payment_description",
+      icon: "schedule",
+      titleKey: "whats_new_subscription_reminder_title",
+      descriptionKey: "whats_new_subscription_reminder_description",
     },
     {
-      icon: "autoAwesome",
-      titleKey: "whats_new_clean_ui_title",
-      descriptionKey: "whats_new_clean_ui_description",
+      icon: "devices",
+      titleKey: "whats_new_desktop_polish_title",
+      descriptionKey: "whats_new_desktop_polish_description",
     },
   ],
 };

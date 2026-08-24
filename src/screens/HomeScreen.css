@@ -96,106 +96,75 @@
 }
 
 .home-sub-reminder {
-  width: 82%;
-  margin: 2px auto 12px;
-  padding: 18px;
+  width: 100%;
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   border: 0;
   border-radius: 20px;
-  background: var(--warning-soft-bg);
-  color: var(--warning);
+  background: var(--subscription-reminder-bg);
+  color: var(--subscription-reminder-accent);
   flex-shrink: 0;
-}
-
-.home-sub-reminder--expired {
-  border-color: var(--danger-soft-border);
-  background: var(--danger-soft-bg);
-  color: var(--trial-text);
-}
-
-.home-sub-reminder__icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--subtle-icon-bg);
-  flex-shrink: 0;
-}
-
-.home-sub-reminder__header {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
 }
 
 .home-sub-reminder__body {
-  flex: 1;
   min-width: 0;
+  text-align: center;
 }
 
 .home-sub-reminder__title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1.25;
   color: currentColor;
+  text-align: center;
 }
 
 .home-sub-reminder__text {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 13px;
   line-height: 1.4;
   color: var(--text-muted);
+  text-align: center;
 }
 
 .home-sub-reminder__actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
+  gap: 8px;
 }
 
 .home-sub-reminder__btn {
-  height: 32px;
+  height: 40px;
   border: none;
-  border-radius: 9px;
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 700;
+  border-radius: 12px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .home-sub-reminder__btn--primary {
+  flex: 1;
   background: var(--cta-bg);
   color: var(--cta-text);
 }
 
+.home-sub-reminder__btn--primary:hover {
+  background: var(--cta-hover);
+}
+
 .home-sub-reminder__btn--text {
   background: transparent;
-  color: var(--text-muted);
+  color: var(--subscription-reminder-secondary-text);
 }
 
 .home-sub-reminder__btn--text:hover {
   background: var(--surface-2);
   color: var(--text);
-}
-
-@media (max-width: 420px) {
-  .home-sub-reminder {
-    width: calc(100% - 32px);
-  }
-
-  .home-sub-reminder__actions {
-    justify-content: stretch;
-  }
-
-  .home-sub-reminder__btn--primary {
-    flex: 1;
-  }
 }
 
 /* Scrollable content */

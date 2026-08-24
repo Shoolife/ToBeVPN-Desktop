@@ -9,6 +9,17 @@
   font-display: swap;
 }
 
+/* The Corporate plan name supplied by the panel ends in U+1F9E6. Without a
+   bundled glyph Linux uses Noto Color Emoji while Windows uses Segoe UI Emoji,
+   so the same plan gets a visibly different icon. This one-glyph Noto subset
+   makes the server-provided icon identical on every desktop platform. */
+@font-face {
+  font-family: "ToBeVPN Plan Emoji";
+  src: url("./assets/ToBeVpnPlanEmoji.woff2") format("woff2");
+  unicode-range: U+1F9E6;
+  font-display: block;
+}
+
 @property --app-font-scale {
   syntax: "<number>";
   inherits: true;
@@ -66,6 +77,9 @@
   --warning-soft-border: rgba(255, 152, 0, 0.34);
   --danger-soft-bg: rgba(244, 67, 54, 0.13);
   --danger-soft-border: rgba(244, 67, 54, 0.36);
+  --subscription-reminder-bg: #2a1a1a;
+  --subscription-reminder-accent: #f44336;
+  --subscription-reminder-secondary-text: #ffffff;
   --subtle-icon-bg: rgba(255, 255, 255, 0.08);
   --hero-label: rgba(255, 255, 255, 0.72);
   --hero-sublabel: rgba(255, 255, 255, 0.52);
@@ -80,7 +94,7 @@
   color-scheme: dark;
   color: var(--text);
   background-color: var(--bg);
-  font-family: "Twemoji Country Flags", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-family: "Twemoji Country Flags", "ToBeVPN Plan Emoji", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   font-size: 15px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
@@ -135,6 +149,9 @@
   --warning-soft-border: rgba(178, 106, 0, 0.28);
   --danger-soft-bg: rgba(211, 47, 47, 0.1);
   --danger-soft-border: rgba(211, 47, 47, 0.26);
+  --subscription-reminder-bg: #ffebee;
+  --subscription-reminder-accent: #f44336;
+  --subscription-reminder-secondary-text: #000000;
   --subtle-icon-bg: rgba(26, 28, 30, 0.07);
   --hero-label: rgba(26, 28, 30, 0.7);
   --hero-sublabel: rgba(26, 28, 30, 0.55);
@@ -151,6 +168,20 @@
 
 :root[data-theme="light"][data-app-outlined-text="true"] {
   --app-text-outline-shadow: 0 0 3px #ffffff;
+}
+
+/* Android parity: only the expiry date changes colour. These theme-independent
+   values are the exact VpnOrange/VpnRed colours used by the phone client. */
+.subscription-expiry-date {
+  color: inherit;
+}
+
+.subscription-expiry-date--warning {
+  color: #ff9800;
+}
+
+.subscription-expiry-date--critical {
+  color: #f44336;
 }
 
 #root,

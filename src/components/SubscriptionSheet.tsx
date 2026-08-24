@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
@@ -15,6 +15,7 @@ import type { CurrentPlanDto, PurchaseDurationDto, PurchasePlanDto, PurchasePlan
 import { formatDateDots } from "../session/dateFormat";
 import { isBrowserPreviewRuntime } from "../session/browserPreview";
 import Spinner from "./Spinner";
+import SubscriptionExpiryText from "./SubscriptionExpiryText";
 import "./SubscriptionSheet.css";
 
 interface CurrentLimits {
@@ -141,6 +142,7 @@ interface PlanRow {
 interface PlanTab {
   key: string;
   title: string;
+  purchaseType: string | null;
   periods: PlanRow[];
 }
 
@@ -472,6 +474,7 @@ function buildTabs(data: PurchasePlansDto | null, isRu: boolean, masked = false)
       {
         key: "fallback",
         title: t("plan_unknown_name"),
+        purchaseType: null,
         periods: FALLBACK_PLAN_DURATIONS.map((d) => ({
           key: `fallback:${planKey(d.days)}`,
           title: planTitle(d.days),
@@ -489,6 +492,7 @@ function buildTabs(data: PurchasePlansDto | null, isRu: boolean, masked = false)
     return {
       key: String(sourcePlan.id),
       title: sourcePlan.name,
+      purchaseType: sourcePlan.purchase_type,
       periods: [...sourcePlan.durations]
         .filter((d) => d.days > 0)
         .sort((a, b) => a.order_index - b.order_index)
@@ -527,6 +531,20 @@ function samePlanName(current: string | null | undefined, selected: string | nul
   );
 }
 
+function preferredRenewalTab(
+  tabs: PlanTab[],
+  currentPlanDisplayName: string | null | undefined,
+): PlanTab | null {
+  const renewalTab = tabs.find((tab) =>
+    tab.purchaseType?.trim().toLocaleUpperCase("en-US") === "RENEW"
+  );
+  if (renewalTab) return renewalTab;
+
+  const currentName = normalizedPlanName(currentPlanDisplayName);
+  if (!currentName) return null;
+  return tabs.find((tab) => normalizedPlanName(tab.title) === currentName) ?? null;
+}
+
 function planLabel(plan: UserPlan, displayName?: string | null): string {
   if (displayName && plan !== "EXPIRED") return displayName;
   switch (plan) {
@@ -562,7 +580,7 @@ export function SubscriptionCurrentPlanCard({
 }: {
   currentPlanName: string;
   currentPlanNameClass: string;
-  currentHint: string | null;
+  currentHint: ReactNode;
   showLimits: boolean;
   limitsLoading: boolean;
   trafficLimitValue: string;
@@ -601,7 +619,13 @@ export function SubscriptionCurrentPlanCard({
   );
 }
 
-export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void }) {
+export default function SubscriptionSheet({
+  initiallySelectCurrentTariff = false,
+  onDismiss,
+}: {
+  initiallySelectCurrentTariff?: boolean;
+  onDismiss: () => void;
+}) {
   const session = useSession();
   const isRu = getSavedLang() === "ru";
   const showLimits = session.userPlan === "PAID" || session.userPlan === "ADMIN";
@@ -761,6 +785,11 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
     () => (plansLoading ? [] : buildTabs(plansData, isRu, plansFromCache || !plansData)),
     [plansData, plansFromCache, plansLoading, isRu],
   );
+  const defaultSelectedTab = useMemo(() => {
+    if (tabs.length === 0) return null;
+    if (!initiallySelectCurrentTariff) return tabs[0];
+    return preferredRenewalTab(tabs, session.planDisplayName) ?? tabs[0];
+  }, [initiallySelectCurrentTariff, session.planDisplayName, tabs]);
 
   const updateTabsOverflow = useCallback(() => {
     const scroller = tabsScrollerRef.current;
@@ -877,8 +906,8 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
 
   // Keep the selection valid as the plan shape refreshes.
   useEffect(() => {
-    if (tabs.length === 0) return;
-    const activeTab = tabs.find((tab) => tab.key === selectedTabKey) ?? tabs[0];
+    if (!defaultSelectedTab) return;
+    const activeTab = tabs.find((tab) => tab.key === selectedTabKey) ?? defaultSelectedTab;
     if (!selectedTabKey || activeTab.key !== selectedTabKey) {
       setSelectedTabKey(activeTab.key);
     }
@@ -888,11 +917,16 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
         activeTab.periods[0];
       setSelectedKey(monthRow?.key ?? null);
     }
-  }, [tabs, selectedKey, selectedTabKey]);
+  }, [
+    defaultSelectedTab,
+    tabs,
+    selectedKey,
+    selectedTabKey,
+  ]);
 
   const selectedTab = useMemo(
-    () => tabs.find((tab) => tab.key === selectedTabKey) ?? tabs[0] ?? null,
-    [tabs, selectedTabKey],
+    () => tabs.find((tab) => tab.key === selectedTabKey) ?? defaultSelectedTab,
+    [defaultSelectedTab, tabs, selectedTabKey],
   );
   const selectedRow = useMemo(
     () => selectedTab?.periods.find((r) => r.key === selectedKey) ?? selectedTab?.periods[0] ?? null,
@@ -1184,16 +1218,26 @@ export default function SubscriptionSheet({ onDismiss }: { onDismiss: () => void
       : null;
 
   // Per-status hint, mirrors phone's SubscriptionBottomSheet.
-  let currentHint: string | null = null;
+  let currentHint: ReactNode = null;
   switch (session.userPlan) {
     case "ADMIN":
-      currentHint = expiresAtFormatted
-        ? tf("plan_active_until", expiresAtFormatted)
+      currentHint = expiresAtFormatted && session.planExpiresAt !== null
+        ? (
+            <SubscriptionExpiryText
+              expiresAt={session.planExpiresAt}
+              text={tf("plan_active_until", expiresAtFormatted)}
+            />
+          )
         : null;
       break;
     case "PAID":
-      currentHint = expiresAtFormatted
-        ? tf("plan_active_until", expiresAtFormatted)
+      currentHint = expiresAtFormatted && session.planExpiresAt !== null
+        ? (
+            <SubscriptionExpiryText
+              expiresAt={session.planExpiresAt}
+              text={tf("plan_active_until", expiresAtFormatted)}
+            />
+          )
         : null;
       break;
     case "EXPIRED":

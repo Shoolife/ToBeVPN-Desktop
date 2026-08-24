@@ -44,6 +44,7 @@ import MaterialIcon, {
 import DiagnosticsPanel from "../components/DiagnosticsPanel";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { SubscriptionCurrentPlanCard } from "../components/SubscriptionSheet";
+import SubscriptionExpiryText from "../components/SubscriptionExpiryText";
 import { ServerListRow } from "./ServersScreen";
 import {
   getDiagnosticStateSnapshot,
@@ -183,6 +184,12 @@ function accentTier(plan: UserPlan, expiresAt: number | null): AccentTier {
     if (daysLeft <= 3) return "red";
     if (daysLeft <= 7) return "orange";
   }
+  return "green";
+}
+
+function planTier(plan: UserPlan): AccentTier {
+  if (plan === "EXPIRED") return "red";
+  if (plan === "FREE_TRIAL") return "orange";
   return "green";
 }
 
@@ -895,8 +902,14 @@ export default function SettingsScreen({
   }));
   const subscriptionPreviewShowsLimits =
     session.userPlan === "PAID" || session.userPlan === "ADMIN";
-  const subscriptionPreviewHint = subscriptionPreviewShowsLimits && session.planExpiresAt !== null
-    ? tf("plan_active_until", formatDateDots(session.planExpiresAt))
+  const subscriptionPreviewHint: ReactNode =
+    subscriptionPreviewShowsLimits && session.planExpiresAt !== null
+    ? (
+        <SubscriptionExpiryText
+          expiresAt={session.planExpiresAt}
+          text={tf("plan_active_until", formatDateDots(session.planExpiresAt))}
+        />
+      )
     : session.userPlan === "EXPIRED"
       ? t("plan_renew_full")
       : t("plan_limited_traffic");
@@ -1752,10 +1765,10 @@ export default function SettingsScreen({
           className={`dialog-overlay ${languageDialogClosing ? "dialog-overlay--closing" : ""}`}
           onClick={closeLanguageDialog}
         >
-          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="dialog dialog--language" onClick={(e) => e.stopPropagation()}>
             <div className="dialog__title">{t("language_restart_title")}</div>
             <div className="dialog__message">{t("language_restart_message")}</div>
-            <div className="dialog__actions">
+            <div className="dialog__actions dialog__actions--language">
               <button className="dialog__btn dialog__btn--secondary" onClick={closeLanguageDialog}>
                 {t("cancel")}
               </button>
@@ -1773,10 +1786,10 @@ export default function SettingsScreen({
           className={`dialog-overlay ${logoutClosing ? "dialog-overlay--closing" : ""}`}
           onClick={closeLogoutDialog}
         >
-          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="dialog dialog--logout" onClick={(e) => e.stopPropagation()}>
             <div className="dialog__title">{t("logout_confirm_title")}</div>
             <div className="dialog__message">{t("logout_confirm_message")}</div>
-            <div className="dialog__actions">
+            <div className="dialog__actions dialog__actions--logout">
               <button
                 className="dialog__btn dialog__btn--secondary"
                 onClick={closeLogoutDialog}
@@ -1862,7 +1875,7 @@ function SettingsAccountCard({
             )}
       </div>
       <div className="settings-account__right">
-        <span className={`settings-account__plan settings-account__plan--${tier}`}>
+        <span className={`settings-account__plan settings-account__plan--${planTier(session.userPlan)}`}>
           {planLabel(session.userPlan, session.planDisplayName)}
         </span>
         {session.telegramId !== null ? (
@@ -1880,7 +1893,8 @@ function SettingsAccountCard({
         )}
         {showExpires && (
           <span className="settings-account__expires">
-            {t("expires")} {formatDateDots(session.planExpiresAt!)}
+            {t("expires")}{" "}
+            <SubscriptionExpiryText expiresAt={session.planExpiresAt!} />
           </span>
         )}
         {session.userPlan === "EXPIRED" && (

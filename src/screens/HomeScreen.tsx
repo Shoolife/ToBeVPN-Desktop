@@ -3,6 +3,7 @@ import { exit } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
+import SubscriptionExpiryText from "../components/SubscriptionExpiryText";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import {
@@ -38,6 +39,11 @@ import {
 } from "../session/serverQuality";
 import { stableServerId } from "../session/serverSelection";
 import { formatDateDots } from "../session/dateFormat";
+import {
+  isSubscriptionReminderSnoozed,
+  readSubscriptionReminderSnooze,
+  snoozeSubscriptionReminder,
+} from "../session/subscriptionReminderSnooze";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
 
@@ -113,9 +119,14 @@ function trafficProgressColor(progress: number): string {
   return "var(--success)";
 }
 
-function planHint(plan: UserPlan, expiresAt: number | null): string {
+function planHint(plan: UserPlan, expiresAt: number | null): ReactNode {
   if (expiresAt && (plan === "PAID" || plan === "ADMIN")) {
-    return tf("plan_until", formatDateDots(expiresAt));
+    return (
+      <SubscriptionExpiryText
+        expiresAt={expiresAt}
+        text={tf("plan_until", formatDateDots(expiresAt))}
+      />
+    );
   }
   if (plan === "FREE_TRIAL") return t("free_tier_hint");
   if (plan === "EXPIRED") return t("plan_expired");
@@ -199,16 +210,15 @@ function expiringSubscriptionTitle(daysLeft: number): string {
   return `${t("subscription_expiring_prefix")} ${daysLeft} ${daysLeft === 1 ? "day" : "days"}`;
 }
 
-function subscriptionReminder(plan: UserPlan, expiresAt: number | null): { title: string; expired: boolean } | null {
+function subscriptionReminder(plan: UserPlan, expiresAt: number | null): { title: string } | null {
   if (plan === "EXPIRED") {
-    return { title: t("subscription_expired_title"), expired: true };
+    return { title: t("subscription_expired_title") };
   }
   if (plan !== "PAID" || expiresAt === null) return null;
   const msLeft = expiresAt - Date.now();
   if (msLeft < 0 || msLeft > 3 * SUBSCRIPTION_REMINDER_DAY_MS) return null;
   return {
     title: expiringSubscriptionTitle(Math.ceil(msLeft / SUBSCRIPTION_REMINDER_DAY_MS)),
-    expired: false,
   };
 }
 
@@ -288,9 +298,14 @@ export default function HomeScreen({
   const previewSubscriptionOpen =
     browserPreview && new URLSearchParams(window.location.search).get("subscription") === "1";
   const [showSubscription, setShowSubscription] = useState(previewSubscriptionOpen);
+  const [selectCurrentTariffOnSubscriptionOpen, setSelectCurrentTariffOnSubscriptionOpen] =
+    useState(false);
   const [showTrialInfo, setShowTrialInfo] = useState(false);
   const [showBlockedDialog, setShowBlockedDialog] = useState(false);
-  const [dismissedReminderKey, setDismissedReminderKey] = useState<string | null>(null);
+  const [subscriptionReminderSnooze, setSubscriptionReminderSnooze] = useState(
+    readSubscriptionReminderSnooze,
+  );
+  const [subscriptionReminderClock, setSubscriptionReminderClock] = useState(Date.now);
   const prevBlocked = useRef(subscriptionUsageBlocked);
   const [checkingSubscriptionAccess, setCheckingSubscriptionAccess] = useState(false);
   const [preparingConnection, setPreparingConnection] = useState(false);
@@ -306,13 +321,37 @@ export default function HomeScreen({
   const [ping, setPing] = useState(0);
 
   const reminder = subscriptionReminder(session.userPlan, session.planExpiresAt);
-  const reminderKey = `${session.userPlan}:${session.planExpiresAt ?? ""}`;
+  const subscriptionReminderIsSnoozed = isSubscriptionReminderSnoozed(
+    subscriptionReminderSnooze,
+    session.planExpiresAt,
+    subscriptionReminderClock,
+  );
   const showSubscriptionReminder =
     !subscriptionUsageBlocked &&
     reminder !== null &&
-    dismissedReminderKey !== reminderKey;
+    !subscriptionReminderIsSnoozed;
   const subscriptionTrafficUsedBytes = Math.max(0, session.trafficUsedBytes);
   const subscriptionTrafficLimitBytes = Math.max(0, session.trafficLimitBytes);
+
+  useEffect(() => {
+    const nowMillis = Date.now();
+    setSubscriptionReminderClock(nowMillis);
+    if (!isSubscriptionReminderSnoozed(
+      subscriptionReminderSnooze,
+      session.planExpiresAt,
+      nowMillis,
+    )) return;
+
+    const timer = window.setTimeout(
+      () => setSubscriptionReminderClock(Date.now()),
+      Math.max(1, subscriptionReminderSnooze.untilMillis - nowMillis),
+    );
+    return () => window.clearTimeout(timer);
+  }, [
+    session.planExpiresAt,
+    subscriptionReminderSnooze.expiresAtMillis,
+    subscriptionReminderSnooze.untilMillis,
+  ]);
 
   useEffect(() => {
     if (browserPreview) return;
@@ -356,11 +395,12 @@ export default function HomeScreen({
     prevBlocked.current = subscriptionUsageBlocked;
   }, [subscriptionUsageBlocked]);
 
-  const openSubscription = async () => {
+  const openSubscription = async (selectCurrentTariff = false) => {
     if (checkingSubscriptionAccess || subscriptionUsageBlocked) return;
     setCheckingSubscriptionAccess(true);
     try {
       if (!(await pingHwidOnly().catch(() => false))) {
+        setSelectCurrentTariffOnSubscriptionOpen(selectCurrentTariff);
         setShowSubscription(true);
       }
     } finally {
@@ -568,38 +608,6 @@ export default function HomeScreen({
         </button>
       )}
 
-      {showSubscriptionReminder && reminder && (
-        <div className={`home-sub-reminder ${reminder.expired ? "home-sub-reminder--expired" : ""}`}>
-          <div className="home-sub-reminder__header">
-            <div className="home-sub-reminder__icon">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="12" y1="8" x2="12" y2="12" />
-                <line x1="12" y1="16" x2="12.01" y2="16" />
-              </svg>
-            </div>
-            <div className="home-sub-reminder__body">
-              <div className="home-sub-reminder__title">{reminder.title}</div>
-              <div className="home-sub-reminder__text">{t("subscription_renew_reminder_desc")}</div>
-            </div>
-          </div>
-          <div className="home-sub-reminder__actions">
-            <button
-              className="home-sub-reminder__btn home-sub-reminder__btn--primary"
-              onClick={() => void openSubscription()}
-            >
-              {t("subscription_renew_action")}
-            </button>
-            <button
-              className="home-sub-reminder__btn home-sub-reminder__btn--text"
-              onClick={() => setDismissedReminderKey(reminderKey)}
-            >
-              {t("update_banner_later")}
-            </button>
-          </div>
-        </div>
-      )}
-
       <ScrollEdgeAffordance className="home-content">
         <div className="home-connect-area">
           <button
@@ -616,6 +624,37 @@ export default function HomeScreen({
             <div className="home__vpn-error">{vpnError}</div>
           )}
         </div>
+
+        {showSubscriptionReminder && reminder && (
+          <div className="home-sub-reminder">
+            <div className="home-sub-reminder__body">
+              <div className="home-sub-reminder__title">{reminder.title}</div>
+              <div className="home-sub-reminder__text">{t("subscription_renew_reminder_desc")}</div>
+            </div>
+            <div className="home-sub-reminder__actions">
+              <button
+                type="button"
+                className="home-sub-reminder__btn home-sub-reminder__btn--primary"
+                onClick={() => void openSubscription(true)}
+              >
+                {t("subscription_renew_action")}
+              </button>
+              <button
+                type="button"
+                className="home-sub-reminder__btn home-sub-reminder__btn--text"
+                onClick={() => {
+                  const nowMillis = Date.now();
+                  setSubscriptionReminderSnooze(
+                    snoozeSubscriptionReminder(session.planExpiresAt, nowMillis),
+                  );
+                  setSubscriptionReminderClock(nowMillis);
+                }}
+              >
+                {t("update_banner_later")}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Server card */}
         <div className={`home-card ${subscriptionUsageBlocked ? "" : "home-card--clickable"}`} onClick={subscriptionUsageBlocked ? undefined : onServers}>
@@ -748,7 +787,13 @@ export default function HomeScreen({
       </ScrollEdgeAffordance>
 
       {showSubscription && !subscriptionUsageBlocked && (
-        <SubscriptionSheet onDismiss={() => setShowSubscription(false)} />
+        <SubscriptionSheet
+          initiallySelectCurrentTariff={selectCurrentTariffOnSubscriptionOpen}
+          onDismiss={() => {
+            setShowSubscription(false);
+            setSelectCurrentTariffOnSubscriptionOpen(false);
+          }}
+        />
       )}
 
       {showBlockedDialog && (

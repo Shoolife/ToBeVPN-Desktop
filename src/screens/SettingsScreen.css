@@ -178,9 +178,14 @@
   font-weight: 700;
   padding: 7px 16px;
   border-radius: 999px;
-  color: var(--account-accent);
-  background: color-mix(in srgb, var(--account-accent) 16%, transparent);
+  --plan-accent: var(--success);
+  color: var(--plan-accent);
+  background: color-mix(in srgb, var(--plan-accent) 16%, transparent);
 }
+
+.settings-account__plan--green { --plan-accent: #4CAF50; }
+.settings-account__plan--orange { --plan-accent: #FF9800; }
+.settings-account__plan--red { --plan-accent: #F44336; }
 
 .settings-account__id {
   font-size: 14px;
@@ -1971,6 +1976,34 @@
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* Confirmation dialogs mirror the centred phone composition while retaining
+   their established button colours. */
+.dialog--language,
+.dialog--logout {
+  text-align: center;
+}
+
+.dialog--language .dialog__title,
+.dialog--language .dialog__message,
+.dialog--logout .dialog__title,
+.dialog--logout .dialog__message {
+  width: 100%;
+  text-align: center;
+}
+
+.dialog__actions--language,
+.dialog__actions--logout {
+  width: 100%;
+  justify-content: center;
+  gap: 10px;
+}
+
+.dialog__actions--language .dialog__btn,
+.dialog__actions--logout .dialog__btn {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .dialog__btn {

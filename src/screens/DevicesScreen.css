@@ -14,8 +14,7 @@
   flex-shrink: 0;
 }
 
-.devices-topbar__back,
-.devices-topbar__action {
+.devices-topbar__back {
   background: none;
   border: none;
   color: var(--text);
@@ -30,22 +29,8 @@
   flex-shrink: 0;
 }
 
-.devices-topbar__back:hover,
-.devices-topbar__action:hover {
+.devices-topbar__back:hover {
   background: var(--surface-2);
-}
-
-.devices-topbar__action:disabled {
-  cursor: default;
-  opacity: 0.7;
-}
-
-.devices-topbar__action-icon--spinning {
-  animation: devices-action-spin 0.9s linear infinite;
-}
-
-@keyframes devices-action-spin {
-  to { transform: rotate(360deg); }
 }
 
 .devices-topbar__title {
@@ -188,10 +173,69 @@
   cursor: default;
 }
 
+/* Manual refresh uses the same pulsing card placeholders as Promocodes. */
+.devices-skeleton__card {
+  min-height: 60px;
+}
+
+.devices-skeleton__icon,
+.devices-skeleton__line,
+.devices-skeleton__action {
+  display: block;
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+  animation: devices-skeleton-pulse 760ms ease-in-out infinite alternate;
+}
+
+.devices-skeleton__icon {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+}
+
+.devices-skeleton__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.devices-skeleton__line {
+  width: 106px;
+  height: 12px;
+  border-radius: 8px;
+}
+
+.devices-skeleton__line--wide {
+  width: 175px;
+  max-width: 72%;
+  height: 9px;
+  margin-top: 7px;
+}
+
+.devices-skeleton__action {
+  width: 72px;
+  height: 26px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+}
+
+@keyframes devices-skeleton-pulse {
+  from { opacity: 0.42; }
+  to { opacity: 0.9; }
+}
+
 /* Empty state */
 .devices-empty {
   font-size: 14px;
   color: var(--text-muted);
   text-align: center;
   padding: 24px 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .devices-skeleton__icon,
+  .devices-skeleton__line,
+  .devices-skeleton__action {
+    animation: none;
+    opacity: 0.66;
+  }
 }

@@ -4,10 +4,12 @@ import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../ses
 import { formatEpochSecondsDateDots } from "../session/dateFormat";
 import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
+import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import type { LinkedDeviceDto } from "../api/types";
 import "./DevicesScreen.css";
 
 type DeviceKind = "phone" | "desktop" | "tv";
+const MIN_REFRESH_FEEDBACK_MS = 800;
 
 function inferDeviceKind(dto: LinkedDeviceDto): DeviceKind {
   const type = (dto.device_type ?? "").toLowerCase();
@@ -87,12 +89,42 @@ function deviceName(dto: LinkedDeviceDto): string {
   return dto.device_name?.trim() || dto.device_model?.trim() || deviceTypeLabel(dto);
 }
 
+function DeviceCardSkeleton({ action = false }: { action?: boolean }) {
+  return (
+    <div className="devices-card devices-skeleton__card" aria-hidden="true">
+      <span className="devices-skeleton__icon" />
+      <span className="devices-skeleton__info">
+        <span className="devices-skeleton__line" />
+        <span className="devices-skeleton__line devices-skeleton__line--wide" />
+      </span>
+      {action && <span className="devices-skeleton__action" />}
+    </div>
+  );
+}
+
+function DevicesRefreshSkeleton({ showCurrent }: { showCurrent: boolean }) {
+  return (
+    <>
+      {showCurrent && (
+        <>
+          <div className="devices-section-title">{t("devices_this_device")}</div>
+          <DeviceCardSkeleton action />
+        </>
+      )}
+      <div className="devices-section-title">{t("devices_other_devices")}</div>
+      <DeviceCardSkeleton action />
+      <DeviceCardSkeleton action />
+    </>
+  );
+}
+
 export default function DevicesScreen({ onBack }: { onBack: () => void }) {
   const [devices, setDevices] = useState<LinkedDeviceDto[]>([]);
   const [maxDevices, setMaxDevices] = useState(0);
   const [currentCount, setCurrentCount] = useState<number | null>(null);
   const [currentAliases, setCurrentAliases] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [isInitialLoading, setInitialLoading] = useState(true);
+  const [isRefreshing, setRefreshing] = useState(false);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadGenerationRef = useRef(0);
@@ -100,15 +132,25 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
   const unlinkingRef = useRef(false);
   const mountedRef = useRef(true);
 
-  const load = async () => {
+  const load = async (refresh = false) => {
     const generation = ++loadGenerationRef.current;
-    setLoading(true);
+    const refreshStartedAt = refresh ? performance.now() : null;
+    setInitialLoading(!refresh);
+    setRefreshing(refresh);
     setError(null);
     try {
       const [data, aliases] = await Promise.all([
         fetchDevices(),
         getCurrentDeviceAliases(),
       ]);
+      // Match the promocodes screen: a fast response still completes a smooth,
+      // readable refresh turn instead of stopping the icon mid-frame.
+      if (refreshStartedAt !== null) {
+        const remaining = MIN_REFRESH_FEEDBACK_MS - (performance.now() - refreshStartedAt);
+        if (remaining > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, remaining));
+        }
+      }
       if (generation !== loadGenerationRef.current) return;
       setCurrentAliases(aliases);
       if (data) {
@@ -121,13 +163,16 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
         setError(t("devices_load_error"));
       }
     } finally {
-      if (generation === loadGenerationRef.current) setLoading(false);
+      if (generation === loadGenerationRef.current) {
+        setInitialLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
   useEffect(() => {
     mountedRef.current = true;
-    void load();
+    void load(false);
     return () => {
       mountedRef.current = false;
       loadGenerationRef.current += 1;
@@ -175,27 +220,17 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
           </svg>
         </button>
         <span className="devices-topbar__title">{t("devices_title")}</span>
-        <button className="devices-topbar__action" onClick={load} disabled={loading}>
-          <svg
-            className={loading ? "devices-topbar__action-icon devices-topbar__action-icon--spinning" : "devices-topbar__action-icon"}
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-          </svg>
-        </button>
+        <TopbarRefreshButton
+          label={t("refresh")}
+          loading={isInitialLoading || isRefreshing}
+          onClick={() => void load(true)}
+          disabled={isInitialLoading || isRefreshing || unlinkingId !== null}
+        />
       </div>
 
       <ScrollEdgeAffordance className="devices-content">
         {error && (
-          <button type="button" className="devices-error" onClick={() => void load()}>
+          <button type="button" className="devices-error" onClick={() => void load(true)}>
             {error}
           </button>
         )}
@@ -209,55 +244,61 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
           </span>
         </div>
 
-        {/* Current device */}
-        {currentDevice && (
-          <>
-            <div className="devices-section-title">{t("devices_this_device")}</div>
-            <div className="devices-card devices-card--current">
-              <div className="devices-card__icon">{deviceTypeIcon(currentDevice)}</div>
-              <div className="devices-card__info">
-                <div className="devices-card__name">
-                  {deviceName(currentDevice)}
-                </div>
-                <div className="devices-card__meta">
-                  {deviceTypeLabel(currentDevice)}
-                  {currentDevice.platform ? ` \u00B7 ${currentDevice.platform}` : ""}
-                </div>
-              </div>
-              <span className="devices-card__badge">{t("devices_current_badge")}</span>
-            </div>
-          </>
-        )}
-
-        {/* Other devices */}
-        <div className="devices-section-title">{t("devices_other_devices")}</div>
-        {loading ? (
+        {isInitialLoading ? (
           <div className="spinner-center">
             <Spinner size={32} />
           </div>
-        ) : otherDevices.length === 0 ? (
-          <div className="devices-empty">{t("devices_empty")}</div>
+        ) : isRefreshing ? (
+          <DevicesRefreshSkeleton showCurrent={currentDevice !== undefined} />
         ) : (
-          otherDevices.map((d) => (
-            <div key={d.device_id} className="devices-card">
-              <div className="devices-card__icon">{deviceTypeIcon(d)}</div>
-              <div className="devices-card__info">
-                <div className="devices-card__name">{deviceName(d)}</div>
-                <div className="devices-card__meta">
-                  {deviceTypeLabel(d)}
-                  {d.platform ? ` \u00B7 ${d.platform}` : ""}
-                  {d.last_seen_at ? ` \u00B7 ${formatEpochSecondsDateDots(d.last_seen_at)}` : ""}
+          <>
+            {/* Current device */}
+            {currentDevice && (
+              <>
+                <div className="devices-section-title">{t("devices_this_device")}</div>
+                <div className="devices-card devices-card--current">
+                  <div className="devices-card__icon">{deviceTypeIcon(currentDevice)}</div>
+                  <div className="devices-card__info">
+                    <div className="devices-card__name">
+                      {deviceName(currentDevice)}
+                    </div>
+                    <div className="devices-card__meta">
+                      {deviceTypeLabel(currentDevice)}
+                      {currentDevice.platform ? ` \u00B7 ${currentDevice.platform}` : ""}
+                    </div>
+                  </div>
+                  <span className="devices-card__badge">{t("devices_current_badge")}</span>
                 </div>
-              </div>
-              <button
-                className="devices-card__disconnect"
-                onClick={() => handleUnlink(d.device_id)}
-                disabled={unlinkingId !== null}
-              >
-                {t("devices_disconnect")}
-              </button>
-            </div>
-          ))
+              </>
+            )}
+
+            {/* Other devices */}
+            <div className="devices-section-title">{t("devices_other_devices")}</div>
+            {otherDevices.length === 0 ? (
+              <div className="devices-empty">{t("devices_empty")}</div>
+            ) : (
+              otherDevices.map((d) => (
+                <div key={d.device_id} className="devices-card">
+                  <div className="devices-card__icon">{deviceTypeIcon(d)}</div>
+                  <div className="devices-card__info">
+                    <div className="devices-card__name">{deviceName(d)}</div>
+                    <div className="devices-card__meta">
+                      {deviceTypeLabel(d)}
+                      {d.platform ? ` \u00B7 ${d.platform}` : ""}
+                      {d.last_seen_at ? ` \u00B7 ${formatEpochSecondsDateDots(d.last_seen_at)}` : ""}
+                    </div>
+                  </div>
+                  <button
+                    className="devices-card__disconnect"
+                    onClick={() => handleUnlink(d.device_id)}
+                    disabled={unlinkingId !== null}
+                  >
+                    {t("devices_disconnect")}
+                  </button>
+                </div>
+              ))
+            )}
+          </>
         )}
       </ScrollEdgeAffordance>
     </div>

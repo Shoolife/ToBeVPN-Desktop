@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -173,6 +173,16 @@ pub struct VpnManager {
 }
 
 impl VpnManager {
+    fn is_trusted_root_executable(path: &Path) -> bool {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        metadata.file_type().is_file()
+            && metadata.uid() == 0
+            && metadata.mode() & 0o111 != 0
+            && metadata.mode() & 0o022 == 0
+    }
+
     pub fn new(bin_dir: PathBuf, asset_dir: PathBuf) -> Self {
         Self {
             state: Arc::new(Mutex::new(VpnState::Disconnected)),
@@ -922,7 +932,7 @@ echo "OK"
         attempt: &ConnectAttempt,
     ) -> Result<(), String> {
         attempt.ensure_active()?;
-        let tun2socks_bin = self.resolve_bin("tun2socks");
+        let mut tun2socks_bin = self.resolve_bin("tun2socks");
         eprintln!(
             "[TUN] tun2socks binary: {:?} (exists: {})",
             tun2socks_bin,
@@ -934,31 +944,57 @@ echo "OK"
         eprintln!("[TUN] Using resolved bypass address");
 
         // Detect dev builds: cargo lays sidecars under target/{debug,release}/,
-        // never under one of the helper's allowed production prefixes
-        // (/usr/lib, /usr/local/lib, /opt). Asking the helper to validate
-        // such a path always fails. In that case skip the helper entirely
-        // and run the inline pkexec script — slower (password prompt every
-        // time) but actually works during local development without
-        // weakening the production whitelist that protects against the C1
-        // arbitrary-binary-as-root LPE.
+        // outside the helper's production whitelist. We may reuse the
+        // package-installed sidecar below; without one, the legacy inline
+        // pkexec fallback remains available for local development.
         let bin_dir_str = self.bin_dir.to_string_lossy();
         let is_dev_build =
             bin_dir_str.contains("/target/debug") || bin_dir_str.contains("/target/release");
 
-        if !is_dev_build {
+        // A locally-built binary normally cannot use the installed helper:
+        // allowing arbitrary executables from target/{debug,release} to run
+        // as root would turn the passwordless polkit action into an LPE. When
+        // the packaged app is installed, however, its /usr/bin/tun2socks is a
+        // fixed, root-owned executable already accepted by the helper. Reuse
+        // that sidecar for local UI/backend testing so connecting does not
+        // show an authentication dialog on every attempt.
+        let installed_tun2socks = PathBuf::from("/usr/bin/tun2socks");
+        let use_installed_sidecar_for_dev = is_dev_build
+            && Self::is_trusted_root_executable(&installed_tun2socks)
+            && Self::is_trusted_root_executable(Path::new(POLKIT_HELPER))
+            && std::fs::read_to_string(POLKIT_POLICY)
+                .map(|policy| {
+                    policy.contains("<allow_active>yes</allow_active>")
+                        && policy.contains(POLKIT_HELPER)
+                })
+                .unwrap_or(false);
+        if use_installed_sidecar_for_dev {
+            tun2socks_bin = installed_tun2socks;
+            eprintln!(
+                "[TUN] Dev build using trusted installed sidecar {:?} through polkit helper",
+                tun2socks_bin
+            );
+            diagnostic_linux!(
+                "Privilege path selected: installed helper with trusted packaged sidecar (development build)"
+            );
+        }
+
+        if !is_dev_build || use_installed_sidecar_for_dev {
             // Auto-install the polkit helper on first run (one pkexec prompt, ever).
             // Also re-installs if the embedded helper differs from what's on disk
             // (e.g. after an app update).
-            match Self::ensure_helper_installed(attempt).await {
-                Ok(true) => eprintln!("[TUN] Polkit helper ready (installed/up-to-date)"),
-                Ok(false) => eprintln!(
-                    "[TUN] Polkit helper install was skipped/failed — falling back to inline pkexec"
-                ),
-                Err(e) => {
-                    eprintln!("[TUN] Helper install error: {e} — falling back to inline pkexec")
+            if !is_dev_build {
+                match Self::ensure_helper_installed(attempt).await {
+                    Ok(true) => eprintln!("[TUN] Polkit helper ready (installed/up-to-date)"),
+                    Ok(false) => eprintln!(
+                        "[TUN] Polkit helper install was skipped/failed — falling back to inline pkexec"
+                    ),
+                    Err(e) => {
+                        eprintln!("[TUN] Helper install error: {e} — falling back to inline pkexec")
+                    }
                 }
+                attempt.ensure_active()?;
             }
-            attempt.ensure_active()?;
 
             // Prefer the installed polkit helper — passwordless via app.tobevpn.network policy.
             if std::path::Path::new(POLKIT_HELPER).exists() {
@@ -967,7 +1003,14 @@ echo "OK"
                     .start_tun_via_helper(&tun2socks_bin, &server_ip, control_bypass_ips, attempt)
                     .await
                 {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => {
+                        if !is_dev_build {
+                            diagnostic_linux!(
+                                "Privilege path selected: installed passwordless helper"
+                            );
+                        }
+                        return Ok(());
+                    }
                     Err(e) if e.contains("path not in allowed prefix") => {
                         // Helper installed by a different (production) build
                         // is rejecting our current binary path — fall back
@@ -988,6 +1031,9 @@ echo "OK"
             eprintln!(
                 "[TUN] Dev build detected (bin_dir={:?}); skipping polkit helper, using inline pkexec",
                 self.bin_dir
+            );
+            diagnostic_linux!(
+                "Privilege path selected: interactive inline pkexec (development sidecar is not trusted)"
             );
         }
 
