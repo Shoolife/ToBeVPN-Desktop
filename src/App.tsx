@@ -10,6 +10,8 @@ import SettingsScreen, { type SettingsSection } from "./screens/SettingsScreen";
 import ServersScreen from "./screens/ServersScreen";
 import StatsScreen from "./screens/StatsScreen";
 import SpeedTestScreen from "./screens/SpeedTestScreen";
+import SpeedTestHistoryScreen from "./screens/SpeedTestHistoryScreen";
+import SettingsTransferScreen from "./screens/SettingsTransferScreen";
 import DevicesScreen from "./screens/DevicesScreen";
 import RoutingScreen from "./screens/RoutingScreen";
 import ReferralsScreen from "./screens/ReferralsScreen";
@@ -65,7 +67,7 @@ import {
 } from "./session/interfaceScale";
 import "./App.css";
 
-export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing" | "referrals" | "promocodes";
+export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "speedtest-history" | "settings-transfer" | "devices" | "routing" | "referrals" | "promocodes";
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
 
@@ -845,6 +847,10 @@ export default function App({
               setSettingsSection("main");
               goForward("promocodes");
             }}
+            onSettingsTransfer={() => {
+              setSettingsSection("main");
+              goForward("settings-transfer");
+            }}
             interfaceScale={interfaceScaleRequest.value}
             onInterfaceScaleChange={requestInterfaceScale}
             fontScale={fontScale}
@@ -880,6 +886,8 @@ export default function App({
             browserPreview={browserPreview}
           />
         );
+      case "settings-transfer":
+        return <SettingsTransferScreen onBack={() => goBack("settings")} />;
       case "promocodes":
         return (
           <PromocodesScreen
@@ -984,7 +992,14 @@ export default function App({
       case "stats":
         return <StatsScreen onBack={() => goBack("home")} />;
       case "speedtest":
-        return <SpeedTestScreen onBack={() => goBack("home")} />;
+        return (
+          <SpeedTestScreen
+            onBack={() => goBack("home")}
+            onOpenHistory={() => goForward("speedtest-history")}
+          />
+        );
+      case "speedtest-history":
+        return <SpeedTestHistoryScreen onBack={() => goBack("speedtest")} />;
     }
   };
 

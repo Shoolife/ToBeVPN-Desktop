@@ -214,6 +214,7 @@ export default function SettingsScreen({
   onRouting,
   onReferrals,
   onPromocodes,
+  onSettingsTransfer,
   interfaceScale,
   onInterfaceScaleChange,
   fontScale,
@@ -231,6 +232,7 @@ export default function SettingsScreen({
   onRouting: () => void;
   onReferrals: () => void;
   onPromocodes: () => void;
+  onSettingsTransfer: () => void;
   interfaceScale: number;
   onInterfaceScaleChange: (value: number, centerAfterResize?: boolean) => void;
   fontScale: number;
@@ -1069,6 +1071,14 @@ export default function SettingsScreen({
                 iconPath="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
                 iconEvenOdd
               />
+              <CategoryTile
+                accent="#00A6C8"
+                label={t("settings_transfer_title")}
+                desc={t("settings_transfer_settings_description")}
+                onClick={onSettingsTransfer}
+                iconName="settingsBackupRestore"
+                wide
+              />
             </div>
           </>
         )}
@@ -1720,7 +1730,10 @@ export default function SettingsScreen({
             <div className="settings-card about-version-card">
               <UpdateCheckRow onWhatsNew={() => setWhatsNewOpen(true)} />
               <div className="settings-info-row">
-                <span className="settings-info-row__label about-spec-label">{t("xray")}</span>
+                <span className="settings-info-row__label about-spec-label">
+                  {/* The Store build ships its own protocol core instead of Xray. */}
+                  {import.meta.env.VITE_STORE_BUILD ? "ToBeVPN Core" : t("xray")}
+                </span>
                 <span className="settings-info-row__value">{xrayVersion}</span>
               </div>
             </div>

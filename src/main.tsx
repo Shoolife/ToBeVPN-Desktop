@@ -72,7 +72,19 @@ const previewScreens = new Set<Screen>([
   "routing",
   "referrals",
   "promocodes",
+  "speedtest",
+  "speedtest-history",
+  "settings-transfer",
 ]);
+if (browserPreview && requestedPreviewScreen === "speedtest-history" && searchParams?.get("seed") === "1") {
+  // Sample measurements for the browser preview only.
+  const now = Date.now();
+  localStorage.setItem("tobevpn_speed_test_history_v1", JSON.stringify([
+    { timestampMillis: now - 60_000, downloadMbps: 187.4, pingMs: 41, viaVpn: true },
+    { timestampMillis: now - 3_600_000, downloadMbps: 92.3, pingMs: 118, viaVpn: false },
+    { timestampMillis: now - 86_400_000, downloadMbps: 18.6, pingMs: 236, viaVpn: true },
+  ]));
+}
 const initialScreen: Screen =
   requestedPreviewScreen && previewScreens.has(requestedPreviewScreen as Screen)
     ? (requestedPreviewScreen as Screen)

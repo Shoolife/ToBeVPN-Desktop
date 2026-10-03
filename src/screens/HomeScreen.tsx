@@ -120,7 +120,8 @@ function trafficProgressColor(progress: number): string {
 }
 
 function planHint(plan: UserPlan, expiresAt: number | null): ReactNode {
-  if (expiresAt && (plan === "PAID" || plan === "ADMIN")) {
+  // A trial has an end date too (3 days); show it the same way as a paid plan.
+  if (expiresAt && (plan === "PAID" || plan === "ADMIN" || plan === "FREE_TRIAL")) {
     return (
       <SubscriptionExpiryText
         expiresAt={expiresAt}

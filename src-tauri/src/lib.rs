@@ -2,6 +2,8 @@ mod autostart;
 mod diagnostics;
 #[cfg(target_os = "linux")]
 pub mod linux_update;
+mod settings_transfer;
+mod speed_test;
 mod vpn;
 
 use keyring::{Entry, Error as KeyringError};
@@ -1115,6 +1117,9 @@ pub fn run() {
             diagnostics::list_diagnostic_logs,
             diagnostics::export_diagnostic_log,
             diagnostics::delete_diagnostic_log,
+            speed_test::start_speed_test,
+            speed_test::cancel_speed_test,
+            settings_transfer::export_settings_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -18,14 +18,19 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
-      icon: "schedule",
-      titleKey: "whats_new_subscription_reminder_title",
-      descriptionKey: "whats_new_subscription_reminder_description",
+      icon: "dataUsage",
+      titleKey: "whats_new_speedtest_v1086_title",
+      descriptionKey: "whats_new_speedtest_v1086_description",
     },
     {
-      icon: "devices",
-      titleKey: "whats_new_desktop_polish_title",
-      descriptionKey: "whats_new_desktop_polish_description",
+      icon: "refresh",
+      titleKey: "whats_new_xray_v1086_title",
+      descriptionKey: "whats_new_xray_v1086_description",
+    },
+    {
+      icon: "schedule",
+      titleKey: "whats_new_trial_date_title",
+      descriptionKey: "whats_new_trial_date_description",
     },
   ],
 };

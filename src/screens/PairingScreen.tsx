@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { QRCodeSVG } from "qrcode.react";
 import { t } from "../i18n";
+import DemoLoginDialog from "../components/DemoLoginDialog";
 import {
   authenticateWithTelegramId,
   clearPendingAuthToken,
+  completeDemoLogin,
   createDevicePairingCode,
   getPairingOpenTargets,
   createPairingCode,
@@ -13,6 +15,10 @@ import {
 } from "../session/auth";
 
 const POLL_INTERVAL_MS = 2000;
+const DEMO_LOGIN_HOLD_MS = 2000;
+// Not a real secret — it only gates a local-only stub session for store
+// review, never a backend account. See completeDemoLogin in session/auth.ts.
+const DEMO_LOGIN_PIN = "483920";
 const QR_RETRY_DELAY_MS = 3000;
 type PairingMode = "device" | "telegram";
 type CopiedTarget = "code";
@@ -35,6 +41,33 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
   const openingTelegramRef = useRef(false);
   const authenticatingRef = useRef(false);
   onPairedRef.current = onPaired;
+  const [showDemoLogin, setShowDemoLogin] = useState(false);
+  const demoHoldTimerRef = useRef<number | null>(null);
+
+  // Hidden entry point for store review: hold the title to open a PIN-gated
+  // demo login that never touches the real backend (same as the TV client).
+  const startDemoHold = () => {
+    cancelDemoHold();
+    demoHoldTimerRef.current = window.setTimeout(() => {
+      demoHoldTimerRef.current = null;
+      setShowDemoLogin(true);
+    }, DEMO_LOGIN_HOLD_MS);
+  };
+  const cancelDemoHold = () => {
+    if (demoHoldTimerRef.current !== null) {
+      clearTimeout(demoHoldTimerRef.current);
+      demoHoldTimerRef.current = null;
+    }
+  };
+  const submitDemoPin = (pin: string) => {
+    if (pin.trim() !== DEMO_LOGIN_PIN) return false;
+    flowGenerationRef.current += 1;
+    clearTimers();
+    setShowDemoLogin(false);
+    completeDemoLogin();
+    onPairedRef.current();
+    return true;
+  };
 
   const clearTimers = () => {
     if (pollTimerRef.current !== null) {
@@ -143,6 +176,7 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
       openingTelegramRef.current = false;
       authenticatingRef.current = false;
       clearTimers();
+      cancelDemoHold();
     };
   }, []);
 
@@ -277,7 +311,20 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
   return (
     <div className="screen pairing">
       <div className="pairing__header">
-        <div className="screen__title">{t("pairing_title")}</div>
+        <div
+          className="screen__title"
+          // The demo login exists only for Microsoft Store review.
+          {...(import.meta.env.VITE_STORE_BUILD
+            ? {
+                onPointerDown: startDemoHold,
+                onPointerUp: cancelDemoHold,
+                onPointerLeave: cancelDemoHold,
+                onPointerCancel: cancelDemoHold,
+              }
+            : {})}
+        >
+          {t("pairing_title")}
+        </div>
         <div className="screen__subtitle">
           {mode === "telegram" ? t("pairing_subtitle_telegram") : t("pairing_subtitle_device")}
         </div>
@@ -356,6 +403,13 @@ export default function PairingScreen({ onPaired }: { onPaired: () => void }) {
           ? t("pairing_waiting_telegram")
           : t("pairing_waiting"))}
       </div>
+
+      {showDemoLogin && (
+        <DemoLoginDialog
+          onDismiss={() => setShowDemoLogin(false)}
+          onSubmit={submitDemoPin}
+        />
+      )}
     </div>
   );
 }

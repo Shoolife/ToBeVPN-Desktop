@@ -328,7 +328,7 @@ jobs:
 
       # Built clients contain runtime configuration. Keep disposable branch
       # validation binaries on the runner; publish installers only for releases.
-      - if: startsWith(github.ref, 'refs/tags/v')
+      - if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ToBeVPN-linux-deb
@@ -578,7 +578,7 @@ jobs:
 
       # Built clients contain runtime configuration. Keep disposable branch
       # validation binaries on the runner; publish installers only for releases.
-      - if: startsWith(github.ref, 'refs/tags/v')
+      - if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           # GitHub Actions always wraps uploaded artifacts in a zip; we can't
