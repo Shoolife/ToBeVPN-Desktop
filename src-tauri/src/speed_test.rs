@@ -103,7 +103,10 @@ fn download_request(client: &Client, provider: Provider, bytes: u64) -> reqwest:
             cache_bust()
         )),
         Provider::Selectel => client
-            .get(format!("{SELECTEL_DOWNLOAD_ENDPOINT}?cacheBust={}", cache_bust()))
+            .get(format!(
+                "{SELECTEL_DOWNLOAD_ENDPOINT}?cacheBust={}",
+                cache_bust()
+            ))
             .header("Range", format!("bytes=0-{}", bytes - 1)),
     };
     builder
@@ -136,7 +139,10 @@ async fn find_reachable_provider(client: &Client, run_id: u64) -> Option<Provide
         if !is_active(run_id) {
             return None;
         }
-        if latency_probe(client, provider, Some(PREFLIGHT_TIMEOUT)).await.is_ok() {
+        if latency_probe(client, provider, Some(PREFLIGHT_TIMEOUT))
+            .await
+            .is_ok()
+        {
             return Some(provider);
         }
     }
@@ -164,7 +170,10 @@ async fn warmup(client: Client, provider: Provider, run_id: u64) -> bool {
     if !is_active(run_id) {
         return true;
     }
-    let Ok(mut response) = download_request(&client, provider, WARMUP_BYTES).send().await else {
+    let Ok(mut response) = download_request(&client, provider, WARMUP_BYTES)
+        .send()
+        .await
+    else {
         return true;
     };
     if !response.status().is_success() {
@@ -357,7 +366,11 @@ async fn run_speed_test(
     let Some(first) = find_reachable_provider(&client, run_id).await else {
         return Ok(result(
             run_id,
-            if is_active(run_id) { "no_connection" } else { "cancelled" },
+            if is_active(run_id) {
+                "no_connection"
+            } else {
+                "cancelled"
+            },
         ));
     };
 
@@ -427,12 +440,22 @@ mod tests {
             let events = events.into_inner().unwrap();
             println!(
                 "status={} provider={:?} ping={:?} mbps={:.1} events={}",
-                result.status, result.provider, result.ping_ms, result.download_mbps, events.len()
+                result.status,
+                result.provider,
+                result.ping_ms,
+                result.download_mbps,
+                events.len()
             );
             assert_eq!(result.status, "ok");
             assert!(result.download_mbps > 0.0);
             assert!(events.iter().any(|(phase, _)| *phase == "checking"));
-            assert!(events.iter().filter(|(phase, _)| *phase == "download").count() >= 30);
+            assert!(
+                events
+                    .iter()
+                    .filter(|(phase, _)| *phase == "download")
+                    .count()
+                    >= 30
+            );
         });
     }
 
@@ -447,7 +470,11 @@ mod tests {
             let cancelled_at = Instant::now();
             cancel_speed_test();
             let result = run.await.unwrap().unwrap();
-            println!("status={} stop_ms={}", result.status, cancelled_at.elapsed().as_millis());
+            println!(
+                "status={} stop_ms={}",
+                result.status,
+                cancelled_at.elapsed().as_millis()
+            );
             assert_eq!(result.status, "cancelled");
             assert!(cancelled_at.elapsed() < Duration::from_secs(2));
         });
@@ -468,7 +495,11 @@ mod tests {
                     .send()
                     .await
                     .unwrap();
-                assert!(response.status().is_success(), "{provider:?} {}", response.status());
+                assert!(
+                    response.status().is_success(),
+                    "{provider:?} {}",
+                    response.status()
+                );
                 let mut bytes = 0usize;
                 while let Some(chunk) = response.chunk().await.unwrap() {
                     bytes += chunk.len();

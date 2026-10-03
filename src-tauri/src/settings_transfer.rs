@@ -13,8 +13,8 @@ pub async fn export_settings_file(contents: String, file_name: String) -> Result
     if contents.len() > MAX_FILE_BYTES {
         return Err("Settings file is too large".into());
     }
-    let document: serde_json::Value =
-        serde_json::from_str(&contents).map_err(|_| "Settings file is not valid JSON".to_string())?;
+    let document: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|_| "Settings file is not valid JSON".to_string())?;
     if document.get("format").and_then(|v| v.as_str()) != Some(FORMAT) {
         return Err("Not a ToBeVPN settings file".into());
     }
@@ -65,7 +65,10 @@ mod tests {
 
     #[test]
     fn file_name_cannot_escape_downloads() {
-        assert_eq!(sanitize_stem("ToBeVPN-settings-2026-10-03.json"), "ToBeVPN-settings-2026-10-03");
+        assert_eq!(
+            sanitize_stem("ToBeVPN-settings-2026-10-03.json"),
+            "ToBeVPN-settings-2026-10-03"
+        );
         assert_eq!(sanitize_stem("../../etc/passwd"), "etcpasswd");
         assert_eq!(sanitize_stem("..\\..\\x"), "x");
         assert_eq!(sanitize_stem(""), "ToBeVPN-settings");
