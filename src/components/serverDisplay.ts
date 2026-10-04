@@ -93,6 +93,7 @@ const COUNTRY_NAME_TO_CODE: Record<string, string> = {
   "великобритания": "GB",
   "англия": "GB",
   "uk": "GB",
+  "ru": "RU",
   "россия": "RU",
   "russia": "RU",
   "рф": "RU",

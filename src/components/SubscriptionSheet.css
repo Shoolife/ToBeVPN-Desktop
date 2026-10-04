@@ -647,6 +647,7 @@
 .sub-sheet__buy-btn {
   width: 100%;
   height: 40px;
+  margin-top: 12px;
   border-radius: 12px;
   border: none;
   background: var(--cta-bg);

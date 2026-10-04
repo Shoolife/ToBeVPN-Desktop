@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, saveLang, type Lang, type StringKey } from "../i18n";
 import { getCurrentPlan } from "../api/client";
@@ -53,6 +53,15 @@ import {
   subscribeDiagnosticState,
 } from "../session/diagnostics";
 import brandLogo from "../assets/onboarding_logo.svg";
+import {
+  MAX_SERVER_PING_TIMEOUT_SECONDS,
+  MIN_SERVER_PING_TIMEOUT_SECONDS,
+  getServerPingTimeoutSeconds,
+  normalizeServerPingTimeoutSeconds,
+  setServerPingTimeoutSeconds,
+} from "../session/serverProbe";
+import { applyEdgeFade } from "../components/ScrollEdgeAffordance";
+import M3Slider from "../components/M3Slider";
 import "./SettingsScreen.css";
 
 const SUPPORT_URL = "https://t.me/meow_meow_vpn?direct";
@@ -214,6 +223,7 @@ export default function SettingsScreen({
   onRouting,
   onReferrals,
   onPromocodes,
+  onSettingsTransfer,
   interfaceScale,
   onInterfaceScaleChange,
   fontScale,
@@ -231,6 +241,7 @@ export default function SettingsScreen({
   onRouting: () => void;
   onReferrals: () => void;
   onPromocodes: () => void;
+  onSettingsTransfer: () => void;
   interfaceScale: number;
   onInterfaceScaleChange: (value: number, centerAfterResize?: boolean) => void;
   fontScale: number;
@@ -304,6 +315,7 @@ export default function SettingsScreen({
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
   const emailInputRef = useRef<HTMLInputElement>(null);
+  const emailCardRef = useRef<HTMLDivElement>(null);
   const languageDialogTimerRef = useRef<number | null>(null);
   const logoutDialogTimerRef = useRef<number | null>(null);
   const diagnosticHoldTimerRef = useRef<number | null>(null);
@@ -434,6 +446,7 @@ export default function SettingsScreen({
     if (!el) return;
     setFaqTopFade(el.scrollTop > 1);
     setFaqBottomFade(el.scrollTop < el.scrollHeight - el.clientHeight - 1);
+    applyEdgeFade(el);
   };
 
   // Pull an expanded card so its middle lines up with the viewport middle (as
@@ -463,12 +476,111 @@ export default function SettingsScreen({
     }
   };
 
+  // Height of the email card just before the edit form opens or closes; the
+  // layout effect below animates from it to the new height.
+  const emailCardHeightRef = useRef<number | null>(null);
+  // List scroll before the switch: once the card shrinks the browser clamps
+  // it at once, and the animation must start from where the user was.
+  const emailListScrollRef = useRef<number | null>(null);
+  const switchEmailEditing = (next: boolean) => {
+    const card = emailCardRef.current;
+    emailCardHeightRef.current = card?.offsetHeight ?? null;
+    emailListScrollRef.current = card ? scrollParentOf(card)?.scrollTop ?? null : null;
+    setEditingEmail(next);
+  };
+
+  // One animation loop drives both the card height and the list scroll, so
+  // the two never drift apart (separate animations stuttered in WebKitGTK).
+  const emailAnimationRef = useRef(0);
+  const animateEmailCard = (fromHeight: number | null, savedScroll: number | null = null) => {
+    const card = emailCardRef.current;
+    if (!card) return;
+    cancelAnimationFrame(emailAnimationRef.current);
+    card.style.height = "";
+    card.style.overflow = "";
+    // Measure and animate under the same flex rule (see below), so the final
+    // scroll position matches the layout the animation ends in.
+    card.style.flexShrink = "0";
+    const toHeight = card.offsetHeight;
+    const startHeight = fromHeight ?? toHeight;
+    const list = scrollParentOf(card);
+    // Measured with the card already at its final height.
+    const finalMaxScroll = list ? Math.max(0, list.scrollHeight - list.clientHeight) : 0;
+    if (startHeight !== toHeight) {
+      card.style.height = `${startHeight}px`;
+      // With overflow: hidden a flex item may shrink below its height; the
+      // list would then not grow and the scroll had nothing to move into.
+      card.style.overflow = "hidden";
+    }
+    if (list && savedScroll !== null) list.scrollTop = savedScroll;
+    const scrollFrom = list?.scrollTop ?? 0;
+    let scrollTo = scrollFrom;
+    if (list && toHeight >= startHeight) {
+      // Opening (or an error line): bring the card's final bottom into view.
+      const cardTop = card.getBoundingClientRect().top;
+      const listBottom = list.getBoundingClientRect().bottom;
+      const overflow = cardTop + toHeight + EMAIL_CARD_BOTTOM_CLEARANCE - listBottom;
+      if (overflow > 0) scrollTo = scrollFrom + overflow;
+    } else if (list) {
+      // Closing: the list gets shorter. Ease the scroll down to where it will
+      // end up instead of letting the browser clamp it frame by frame.
+      scrollTo = Math.min(scrollFrom, finalMaxScroll);
+    }
+    if (Math.abs(toHeight - startHeight) < 1 && scrollTo === scrollFrom) {
+      card.style.flexShrink = "";
+      return;
+    }
+    const started = performance.now();
+    const step = (now: number) => {
+      const progress = Math.min(1, (now - started) / EMAIL_CARD_ANIMATION_MS);
+      // Standard ease-in-out (Material), the curve the app uses elsewhere.
+      const eased = progress < 0.5
+        ? 4 * progress * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+      if (startHeight !== toHeight) {
+        card.style.height = `${startHeight + (toHeight - startHeight) * eased}px`;
+      }
+      if (list && scrollTo !== scrollFrom) {
+        list.scrollTop = scrollFrom + (scrollTo - scrollFrom) * eased;
+      }
+      if (progress < 1) {
+        emailAnimationRef.current = requestAnimationFrame(step);
+      } else {
+        card.style.height = "";
+        card.style.overflow = "";
+        card.style.flexShrink = "";
+      }
+    };
+    emailAnimationRef.current = requestAnimationFrame(step);
+  };
+
+  useLayoutEffect(() => {
+    const from = emailCardHeightRef.current;
+    const savedScroll = emailListScrollRef.current;
+    emailCardHeightRef.current = null;
+    emailListScrollRef.current = null;
+    if (from === null) return;
+    animateEmailCard(from, savedScroll);
+    // Only on open/close; animateEmailCard reads refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingEmail]);
+
+  // An error line makes the open form taller: bring it into view too.
+  useEffect(() => {
+    if (editingEmail && emailError) animateEmailCard(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emailError]);
+
+  useEffect(() => () => cancelAnimationFrame(emailAnimationRef.current), []);
+
   const handleEditEmail = () => {
     setEmailDraft(session.email ?? "");
     setEmailError(null);
-    setEditingEmail(true);
-    requestAnimationFrame(() => emailInputRef.current?.focus());
+    switchEmailEditing(true);
+    requestAnimationFrame(() => emailInputRef.current?.focus({ preventScroll: true }));
   };
+
+
 
   const handleSaveEmail = async () => {
     const trimmed = emailDraft.trim();
@@ -480,7 +592,7 @@ export default function SettingsScreen({
     setEmailError(null);
     try {
       await saveEmail(trimmed);
-      setEditingEmail(false);
+      switchEmailEditing(false);
     } catch {
       setEmailError(t("email_error"));
     } finally {
@@ -995,7 +1107,7 @@ export default function SettingsScreen({
             // the avatar and the plan-limits request mid-animation.
             <div key={s} className={`settings-layer ${animClass}`}>
               <ScrollEdgeAffordance
-                className={`settings-content ${s === "support" ? "settings-content--support" : ""} ${s === "displayScale" ? "settings-content--display-scale" : ""}`}
+                className={`settings-content ${s === "main" ? "settings-content--main" : ""} ${s === "support" ? "settings-content--support" : ""} ${s === "displayScale" ? "settings-content--display-scale" : ""}`}
               >
         {s === "main" && (
           <>
@@ -1068,6 +1180,14 @@ export default function SettingsScreen({
                 onClick={() => goToSection("about")}
                 iconPath="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
                 iconEvenOdd
+              />
+              <CategoryTile
+                accent="#00A6C8"
+                label={t("settings_transfer_title")}
+                desc={t("settings_transfer_settings_description")}
+                onClick={onSettingsTransfer}
+                iconName="settingsBackupRestore"
+                wide
               />
             </div>
           </>
@@ -1576,6 +1696,8 @@ export default function SettingsScreen({
               </div>
             </div>
 
+            <ServerPingTimeoutCard />
+
             {/* Routing card */}
             <div className="settings-card settings-card--clickable" onClick={onRouting}>
               <div className="settings-card__row">
@@ -1592,7 +1714,7 @@ export default function SettingsScreen({
             </div>
 
             {/* Email card */}
-            <div className="settings-card">
+            <div className="settings-card settings-card--email" ref={emailCardRef}>
               <div className="settings-card__header">{t("email_title")}</div>
               {editingEmail ? (
                 <div className="settings-email-edit">
@@ -1612,7 +1734,7 @@ export default function SettingsScreen({
                       }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") handleSaveEmail();
-                        if (e.key === "Escape") setEditingEmail(false);
+                        if (e.key === "Escape") switchEmailEditing(false);
                       }}
                       disabled={emailSaving}
                     />
@@ -1621,7 +1743,7 @@ export default function SettingsScreen({
                   <div className="settings-email-edit__actions">
                     <button
                       className="dialog__btn dialog__btn--secondary"
-                      onClick={() => setEditingEmail(false)}
+                      onClick={() => switchEmailEditing(false)}
                       disabled={emailSaving}
                     >
                       {t("cancel")}
@@ -1663,10 +1785,6 @@ export default function SettingsScreen({
                 className="support-faq"
                 ref={faqScrollRef}
                 onScroll={updateFaqFades}
-                style={{
-                  WebkitMaskImage: `linear-gradient(to bottom, ${faqTopFade ? "transparent" : "#000"} 0, #000 38px, #000 calc(100% - 38px), ${faqBottomFade ? "transparent" : "#000"} 100%)`,
-                  maskImage: `linear-gradient(to bottom, ${faqTopFade ? "transparent" : "#000"} 0, #000 38px, #000 calc(100% - 38px), ${faqBottomFade ? "transparent" : "#000"} 100%)`,
-                }}
               >
                 {FAQ.map((item) => (
                   <FaqItem
@@ -1720,7 +1838,10 @@ export default function SettingsScreen({
             <div className="settings-card about-version-card">
               <UpdateCheckRow onWhatsNew={() => setWhatsNewOpen(true)} />
               <div className="settings-info-row">
-                <span className="settings-info-row__label about-spec-label">{t("xray")}</span>
+                <span className="settings-info-row__label about-spec-label">
+                  {/* The Store build ships its own protocol core instead of Xray. */}
+                  {import.meta.env.VITE_STORE_BUILD ? "ToBeVPN Core" : t("xray")}
+                </span>
                 <span className="settings-info-row__value">{xrayVersion}</span>
               </div>
             </div>
@@ -1798,11 +1919,16 @@ export default function SettingsScreen({
                 {t("cancel")}
               </button>
               <button
-                className="dialog__btn dialog__btn--danger"
+                className={`dialog__btn dialog__btn--danger ${loggingOut ? "dialog__btn--loading" : ""}`}
                 onClick={handleLogout}
                 disabled={loggingOut}
               >
-                {t("logout")}
+                {loggingOut ? (
+                  <>
+                    <span className="dialog__btn-spinner" aria-hidden="true" />
+                    {t("logging_out")}
+                  </>
+                ) : t("logout")}
               </button>
             </div>
           </div>
@@ -2324,4 +2450,74 @@ function CategoryTile({
       <div className="settings-tile__desc">{desc}</div>
     </button>
   );
+}
+
+
+/** How long the server check waits for each server (Android: AdvancedScreen
+ *  ServerPingTimeoutCard), 5-15 s. */
+function ServerPingTimeoutCard() {
+  const [seconds, setSeconds] = useState(getServerPingTimeoutSeconds);
+  const commit = (value: number) => {
+    const normalized = normalizeServerPingTimeoutSeconds(value);
+    setSeconds(normalized);
+    setServerPingTimeoutSeconds(normalized);
+  };
+
+  return (
+    <div className="settings-card">
+      <div className="settings-card__row settings-ping-timeout__head">
+        <div className="settings-card__col">
+          <div className="settings-card__header">{t("server_ping_timeout_title")}</div>
+          <div className="settings-card__hint">{t("server_ping_timeout_description")}</div>
+        </div>
+        <span className="settings-ping-timeout__value">{tf("server_ping_timeout_value", seconds)}</span>
+      </div>
+      <div className="display-scale-slider-row settings-ping-timeout__slider">
+        <button
+          type="button"
+          className="display-scale-step"
+          disabled={seconds <= MIN_SERVER_PING_TIMEOUT_SECONDS}
+          aria-label={t("server_ping_timeout_decrease")}
+          onClick={() => commit(seconds - 1)}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 11h14v2H5z" />
+          </svg>
+        </button>
+        <M3Slider
+          min={MIN_SERVER_PING_TIMEOUT_SECONDS}
+          max={MAX_SERVER_PING_TIMEOUT_SECONDS}
+          value={seconds}
+          onChange={commit}
+          ariaLabel={t("server_ping_timeout_title")}
+          ariaValueText={tf("server_ping_timeout_value", seconds)}
+        />
+        <button
+          type="button"
+          className="display-scale-step"
+          disabled={seconds >= MAX_SERVER_PING_TIMEOUT_SECONDS}
+          aria-label={t("server_ping_timeout_increase")}
+          onClick={() => commit(seconds + 1)}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Room kept under the email card: clears the list's 38px bottom fade. */
+const EMAIL_CARD_BOTTOM_CLEARANCE = 52;
+/** Email card resize and list scroll when the edit form opens or closes. */
+const EMAIL_CARD_ANIMATION_MS = 320;
+
+function scrollParentOf(element: HTMLElement): HTMLElement | null {
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    const overflowY = getComputedStyle(node).overflowY;
+    // Not "already scrolling": the list may only overflow once the card grew.
+    if (overflowY === "auto" || overflowY === "scroll") return node;
+  }
+  return null;
 }

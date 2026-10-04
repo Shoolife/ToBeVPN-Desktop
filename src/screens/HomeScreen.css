@@ -1,8 +1,72 @@
 .home-root {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   background: var(--bg);
+}
+
+/* "Subscription activated" banner, ported from the phone's
+   PaymentSuccessBanner: over the top of the home screen, gone after a few
+   seconds (see PAYMENT_SUCCESS_VISIBLE_MS). */
+.home-payment-success {
+  --payment-bg: #17271d;
+  --payment-border: #326846;
+  --payment-fg: #e4e8e5;
+  position: absolute;
+  z-index: 20;
+  top: 8px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--payment-border);
+  background: var(--payment-bg);
+  color: var(--payment-fg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  animation: home-payment-success-in 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+:root[data-theme="light"] .home-payment-success {
+  --payment-bg: #eaf7ee;
+  --payment-border: #b7dfc4;
+  --payment-fg: #16221a;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+.home-payment-success__icon {
+  flex-shrink: 0;
+  color: var(--success);
+}
+
+.home-payment-success__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.home-payment-success__title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.home-payment-success__desc {
+  margin-top: 1px;
+  font-size: 12px;
+  opacity: 0.78;
+}
+
+.home-payment-success--leaving {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+@keyframes home-payment-success-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* Top bar */

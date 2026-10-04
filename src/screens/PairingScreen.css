@@ -1,0 +1,532 @@
+/* Sign-in screens, ported from the TV client (AuthComponents.kt): a white QR
+   plate with a soft green halo, green accent words, a code chip, a pulsing
+   status dot and full-width action buttons. The window is portrait, so the
+   TV's two columns stack: QR on top, text and buttons below. */
+
+.auth-screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /* The generic .screen padding would add to the scroll area's own padding. */
+  padding: 0;
+  box-sizing: border-box;
+  background: var(--bg);
+}
+
+.auth-screen__content {
+  flex: 1;
+  min-height: 0;
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 28px 24px 20px;
+}
+
+.auth-screen__content > * {
+  flex-shrink: 0;
+}
+
+/* Step change (chooser <-> a sign-in way): the app's screen timing (300ms,
+   same easing), but a pure crossfade. The QR sits in the same place on every
+   step, so the app's scale-in/scale-out made two QR codes of different sizes
+   overlap and visibly jitter. The old step is a static copy laid over the new
+   one while it fades out. */
+.auth-screen {
+  position: relative;
+}
+
+.auth-step-enter {
+  animation: auth-step-in 300ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.auth-step-exit {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  background: var(--bg);
+  animation: auth-step-out 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes auth-step-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes auth-step-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* QR plate with a halo: a wide, faint green glow that reads as blur. */
+.auth-qr-panel {
+  margin: 14px 0 6px;
+  border-radius: 14px;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--success) 18%, transparent),
+    0 0 26px 6px color-mix(in srgb, var(--success) 20%, transparent),
+    0 0 60px 16px color-mix(in srgb, var(--success) 9%, transparent);
+}
+
+/* Our own app: the halo takes the logo's teal-to-blue gradient. */
+.auth-qr-panel--tobevpn {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, #00deac 22%, transparent),
+    0 0 26px 6px color-mix(in srgb, #00deac 20%, transparent),
+    0 0 60px 16px color-mix(in srgb, #0fa2ed 14%, transparent);
+}
+
+.auth-qr-plate {
+  width: 220px;
+  height: 220px;
+  box-sizing: border-box;
+  padding: 10px;
+  border-radius: 12px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.auth-qr-plate svg {
+  width: 100%;
+  height: 100%;
+}
+
+.auth-qr-plate__state {
+  color: #111;
+  font-size: 14px;
+  text-align: center;
+}
+
+/* Install screen: the plate and the Google Play badge share one dark panel. */
+.auth-qr-panel--store {
+  padding: 10px;
+  border-radius: 20px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-qr-panel--store .auth-qr-plate {
+  width: 196px;
+  height: 196px;
+}
+
+.auth-store-badge {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 2px;
+}
+
+.auth-store-badge__logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.auth-store-badge__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.auth-store-badge__hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.auth-store-badge__name {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.auth-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid rgba(0, 0, 0, 0.12);
+  border-top-color: #111;
+  animation: auth-spin 0.9s linear infinite;
+}
+
+@keyframes auth-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* "Sign-in via Telegram bot" capsule under the QR. Clickable on desktop,
+   where Telegram can be opened directly. */
+.auth-telegram-caption {
+  margin-top: 16px;
+  width: 240px;
+  min-height: 46px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: background 120ms, transform 120ms;
+}
+
+.auth-telegram-caption:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.auth-telegram-caption:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.auth-telegram-caption:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.auth-title {
+  margin: 22px 0 0;
+  width: 100%;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--text);
+  text-align: left;
+  user-select: none;
+}
+
+.auth-accent {
+  color: var(--success);
+}
+
+.auth-text {
+  margin: 10px 0 0;
+  width: 100%;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.auth-hint {
+  margin: 10px 0 0;
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+/* "Sign-in code: HKJDH15DDE" with the code in green. */
+.auth-code-chip {
+  margin-top: 14px;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px 10px 18px;
+  border-radius: 12px;
+  /* The chip only appears on the ToBeVPN-app step: logo colours, as the QR halo. */
+  border: 1px solid color-mix(in srgb, #08c0cd 55%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 50%, transparent);
+  box-shadow: 0 0 18px 2px color-mix(in srgb, #0fa2ed 14%, transparent);
+}
+
+.auth-code-chip__label {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.auth-code-chip__value {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #08c0cd;
+  user-select: all;
+}
+
+.auth-code-chip__copy {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.auth-code-chip__copy:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* Green dot with a slow ripple: confirmation happens on the phone, so this
+   is the only sign the screen is still listening. */
+.auth-status {
+  --dot: var(--success);
+  margin-top: 14px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* ToBeVPN-app step: the waiting dot takes the logo colours too. */
+.auth-status--tobevpn {
+  --dot: #00deac;
+}
+
+.auth-status--tobevpn .auth-status__dot {
+  background: linear-gradient(135deg, #00deac, #0fa2ed);
+}
+
+.auth-status--error {
+  --dot: var(--danger);
+}
+
+.auth-status--tobevpn.auth-status--error .auth-status__dot {
+  background: var(--danger);
+}
+
+.auth-status__dot {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  margin: 0 3px;
+  border-radius: 50%;
+  background: var(--dot);
+  flex-shrink: 0;
+}
+
+.auth-status__dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--dot);
+  animation: auth-ripple 1600ms linear infinite;
+}
+
+.auth-status--error .auth-status__dot::after {
+  animation: none;
+  opacity: 0;
+}
+
+@keyframes auth-ripple {
+  from { transform: scale(1); opacity: 0.45; }
+  to { transform: scale(2.4); opacity: 0; }
+}
+
+.auth-actions {
+  margin-top: 18px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Pairing steps: Back (and Retry) are compact buttons, not full-width rows. */
+.auth-actions--inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.auth-actions--inline .auth-btn {
+  width: auto;
+  padding-right: 24px;
+}
+
+.auth-btn {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 18px;
+  box-sizing: border-box;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 35%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, transform 120ms;
+}
+
+.auth-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--text);
+}
+
+.auth-btn:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.auth-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.auth-btn--primary {
+  background: var(--success);
+  border-color: var(--success);
+  color: #fff;
+}
+
+.auth-btn--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--success) 88%, #fff);
+  border-color: #fff;
+}
+
+/* Groups: QR block and text column. Portrait stacks them. */
+.auth-visual,
+.auth-body {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.auth-visual {
+  flex-shrink: 0;
+}
+
+/* Landscape sign-in window, laid out like the TV: QR on the left (about 60%
+   of the window height, as on the TV), text and buttons on the right. */
+.auth-screen--wide .auth-screen__content {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 46px;
+  padding: 16px 22px;
+}
+
+/* One fixed box for the QR column on every step, so the QR does not jump
+   between the install step (panel with a badge) and the pairing steps
+   (bare plate, maybe a Telegram capsule). 378 = 350 plate + 2 x 14 panel
+   padding; the height fits the install panel with its badge. */
+.auth-screen--wide .auth-visual {
+  flex: 0 0 auto;
+  width: 378px;
+  height: 434px;
+  justify-content: flex-start;
+}
+
+/* The bare plate sits where the plate inside the install panel does. */
+.auth-screen--wide .auth-qr-panel:not(.auth-qr-panel--store) {
+  margin-top: 14px;
+}
+
+.auth-screen--wide .auth-body {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  align-items: stretch;
+}
+
+.auth-screen--wide .auth-qr-panel {
+  margin: 0;
+  border-radius: 20px;
+}
+
+/* Same QR size on every sign-in step as on the install step. */
+.auth-screen--wide .auth-qr-plate {
+  width: 350px;
+  height: 350px;
+  padding: 18px;
+  border-radius: 18px;
+}
+
+.auth-screen--wide .auth-qr-panel--store {
+  padding: 14px;
+  border-radius: 26px;
+  gap: 14px;
+}
+
+/* Same space above the badge (gap) and below it (panel padding). */
+.auth-screen--wide .auth-store-badge {
+  padding-bottom: 0;
+}
+
+.auth-screen--wide .auth-qr-panel--store .auth-qr-plate {
+  width: 350px;
+  height: 350px;
+}
+
+.auth-screen--wide .auth-store-badge svg {
+  width: 36px;
+  height: 36px;
+}
+
+.auth-screen--wide .auth-store-badge__logo {
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+}
+
+.auth-screen--wide .auth-store-badge__hint {
+  font-size: 13px;
+}
+
+.auth-screen--wide .auth-store-badge__name {
+  font-size: 21px;
+}
+
+.auth-screen--wide .auth-telegram-caption {
+  width: 350px;
+  min-height: 54px;
+  font-size: 17px;
+}
+
+.auth-screen--wide .auth-telegram-caption svg {
+  width: 30px;
+  height: 30px;
+}
+
+.auth-screen--wide .auth-title {
+  margin-top: 0;
+  font-size: 34px;
+}
+
+.auth-screen--wide .auth-text {
+  margin-top: 12px;
+  font-size: 16px;
+}
+
+.auth-screen--wide .auth-hint {
+  font-size: 14px;
+}
+
+.auth-screen--wide .auth-code-chip__label,
+.auth-screen--wide .auth-status {
+  font-size: 16px;
+}
+
+.auth-screen--wide .auth-code-chip__value {
+  font-size: 24px;
+}
+
+.auth-screen--wide .auth-actions {
+  margin-top: 20px;
+  gap: 12px;
+}
+
+.auth-screen--wide .auth-btn {
+  min-height: 54px;
+  font-size: 17px;
+}

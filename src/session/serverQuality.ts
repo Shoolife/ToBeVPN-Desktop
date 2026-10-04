@@ -450,6 +450,44 @@ export async function selectBestVpnServer(
   return selected;
 }
 
+/**
+ * After an end-to-end check (session/serverProbe.ts) only servers that
+ * carried a real request are candidates: an open TCP port alone must never
+ * make a server the automatic choice. Ranked like selectBestVpnServer, with
+ * the measured profile delay as the ping.
+ */
+export function selectBestVerifiedVpnServer(
+  servers: VpnServer[],
+  verifiedDelays: Map<string, number>,
+): MeasuredVpnServer | null {
+  const records = readState().records;
+  const now = Date.now();
+  const ranked = servers
+    .filter(isAvailableServer)
+    .map((server) => {
+      const delay = verifiedDelays.get(server.id) ?? -1;
+      return delay > 0
+        ? { server: { ...server, ping: delay }, score: qualityScore(delay, records[qualityKey(server)], now) }
+        : null;
+    })
+    .filter((entry): entry is { server: MeasuredVpnServer; score: number } => entry !== null)
+    .sort(
+      (a, b) =>
+        a.score - b.score ||
+        a.server.ping - b.server.ping ||
+        a.server.name.localeCompare(b.server.name),
+    );
+  const selected = ranked[0]?.server ?? null;
+  recordDiagnosticEvent(
+    "Servers-Auto",
+    selected
+      ? `Verified server selection completed; candidates=${servers.length}, verified=${ranked.length}, selected_delay_ms=${selected.ping}`
+      : `Verified server selection found no confirmed server; candidates=${servers.length}`,
+    selected ? "D" : "W",
+  );
+  return selected;
+}
+
 export function recordServerConnectionSuccess(server: ServerQualityIdentity): Promise<void> {
   return updateRecord(server, (current, now) => ({
     ...current,

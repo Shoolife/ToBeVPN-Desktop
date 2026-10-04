@@ -42,13 +42,45 @@
 }
 
 /* Content */
-.devices-content {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 16px 24px;
+/* Fixed part: counter, this device, "Other devices" title. */
+.devices-fixed {
+  flex-shrink: 0;
+  padding: 16px 16px 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.devices-spinner {
+  flex: 1;
+}
+
+/* Only the other devices scroll. */
+.devices-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.devices-list > * {
+  flex-shrink: 0;
+}
+
+/* Spacers instead of padding (WebKit drops the bottom padding of a scrolling
+   flex column); each also gets the 10px gap: 10px under the section title,
+   24px below the last card. */
+.devices-list::before {
+  content: "";
+  flex: 0 0 0;
+}
+
+.devices-list::after {
+  content: "";
+  flex: 0 0 14px;
 }
 
 .devices-error {

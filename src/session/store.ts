@@ -199,6 +199,31 @@ export function clearDeviceSession() {
   });
 }
 
+// Local-only identity for store review (see completeDemoLogin in auth.ts).
+// Never registered on the backend, so every account request is skipped.
+export const DEMO_TELEGRAM_ID = -1;
+
+export function isDemoSession(s: Session = current): boolean {
+  return s.isLinked && s.telegramId === DEMO_TELEGRAM_ID;
+}
+
+export function markDemoIdentity() {
+  invalidateSessionWork();
+  updateSession({
+    isLinked: true,
+    telegramId: DEMO_TELEGRAM_ID,
+    shortUuid: null,
+    panelUserUuid: null,
+    userPlan: "FREE_TRIAL",
+    planDisplayName: null,
+    planExpiresAt: null,
+    isAdminProfile: false,
+    trafficLimitBytes: 0,
+    trafficUsedBytes: 0,
+    email: null,
+  });
+}
+
 export function getSessionSecrets(s: Session = current): SessionSecrets | null {
   if (
     typeof s.accessToken !== "string" ||

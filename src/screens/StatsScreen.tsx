@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { t, getSavedLang } from "../i18n";
+import { formatDecimal, t, getSavedLang } from "../i18n";
 import {
   getDayStats,
   getWeekStats,
@@ -18,9 +18,9 @@ function formatBytes(bytes: number): string {
   const mb = isRu ? "МБ" : "MB";
   const gb = isRu ? "ГБ" : "GB";
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} ${kb}`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} ${mb}`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ${gb}`;
+  if (bytes < 1024 * 1024) return `${formatDecimal(bytes / 1024, 1)} ${kb}`;
+  if (bytes < 1024 * 1024 * 1024) return `${formatDecimal(bytes / (1024 * 1024), 1)} ${mb}`;
+  return `${formatDecimal(bytes / (1024 * 1024 * 1024), 2)} ${gb}`;
 }
 
 function shortBytes(bytes: number): string {
@@ -28,7 +28,7 @@ function shortBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${Math.floor(bytes / 1024)}K`;
   if (bytes < 1024 * 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))}M`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}G`;
+  return `${formatDecimal(bytes / (1024 * 1024 * 1024), 1)}G`;
 }
 
 function formatTime(seconds: number): string {

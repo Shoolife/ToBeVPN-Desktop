@@ -55,10 +55,44 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  overflow-y: scroll;
-  scrollbar-width: none;
-  padding: 4px 40px 28px 16px;
-  margin-right: -24px;
+  overflow: hidden;
+  padding: 4px 16px 0;
+}
+
+.promocodes-content > * {
+  flex-shrink: 0;
+}
+
+/* Only the applied codes scroll (with "Load more" at the end). */
+.promocodes-content > .scroll-edge-affordance {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0 -16px;
+}
+
+.promocodes-history-scroll {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 16px;
+}
+
+.promocodes-history-scroll > * {
+  flex-shrink: 0;
+}
+
+/* Spacers instead of padding (WebKit drops the bottom padding of a scrolling
+   flex column); each also gets the 12px gap. */
+.promocodes-history-scroll::before {
+  content: "";
+  flex: 0 0 0;
+  margin-bottom: -12px;
+}
+
+.promocodes-history-scroll::after {
+  content: "";
+  flex: 0 0 16px;
 }
 
 .promocodes-content::-webkit-scrollbar {

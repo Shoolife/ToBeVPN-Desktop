@@ -21,6 +21,31 @@
   height: 0;
 }
 
+/* overlayFade: the same 38px fade as the mask, painted over the content in
+   the screen background colour. */
+.scroll-edge-affordance__fade {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  height: 38px;
+  pointer-events: none;
+}
+
+/* A few solid pixels at the edge: the app frame is scaled, so the clipped
+   row edge can land on a fractional pixel and peek out as a thin line. */
+.scroll-edge-affordance__fade--top {
+  top: -1px;
+  opacity: var(--edge-fade-top, 0);
+  background: linear-gradient(to bottom, var(--bg) 0, var(--bg) 4px, transparent);
+}
+
+.scroll-edge-affordance__fade--bottom {
+  bottom: -1px;
+  opacity: var(--edge-fade-bottom, 0);
+  background: linear-gradient(to top, var(--bg) 0, var(--bg) 4px, transparent);
+}
+
 .scroll-edge-affordance__arrow {
   position: absolute;
   z-index: 3;

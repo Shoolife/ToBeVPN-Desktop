@@ -8,9 +8,15 @@
   opacity: 1;
 }
 
+/* Window still hidden: hold every entrance animation at its first frame. */
+.splash-root--waiting,
+.splash-root--waiting * {
+  animation-play-state: paused !important;
+}
+
 .splash-root--leaving {
   opacity: 0;
-  transition: opacity 400ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: opacity 600ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .splash-content {
@@ -19,6 +25,95 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+
+.splash-brand,
+.splash-side {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Landscape startup window: the icon with the name under it on the left,
+   a larger status card alone on the right. */
+.splash-root--wide .splash-content {
+  flex-direction: row;
+  justify-content: center;
+  gap: 56px;
+}
+
+.splash-root--wide .splash-brand {
+  width: auto;
+  flex-shrink: 0;
+}
+
+.splash-root--wide .splash-shield-wrap {
+  width: 305px;
+  height: 305px;
+}
+
+.splash-root--wide .splash-text {
+  margin-top: 8px;
+}
+
+.splash-root--wide .splash-title {
+  font-size: 44px;
+}
+
+.splash-root--wide .splash-tagline {
+  font-size: 17px;
+}
+
+.splash-root--wide .splash-side {
+  width: 440px;
+}
+
+.splash-root--wide .startup-status-card {
+  width: 100%;
+  min-height: 206px;
+  margin-top: 0;
+  padding: 26px 26px 24px;
+  border-radius: 24px;
+}
+
+.splash-root--wide .startup-status-card__header {
+  gap: 16px;
+}
+
+.splash-root--wide .startup-status-card__icon {
+  flex: 0 0 52px;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+}
+
+.splash-root--wide .startup-status-card__icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.splash-root--wide .startup-status-card__label {
+  font-size: 11px;
+}
+
+.splash-root--wide .startup-status-card__title {
+  font-size: 22px;
+}
+
+.splash-root--wide .startup-status-card__description {
+  margin-top: 16px;
+  font-size: 15px;
+}
+
+.splash-root--wide .startup-status-card__progress {
+  height: 6px;
+  margin-top: 20px;
+}
+
+.splash-root--wide .startup-status-card__meta {
+  margin-top: 8px;
+  font-size: 13px;
 }
 
 .splash-shield-wrap {
@@ -49,27 +144,25 @@
   transform: scale(0.85);
   opacity: 0;
   animation:
-    splash-shield-scale 600ms cubic-bezier(0.4, 0, 0.2, 1) forwards,
-    splash-shield-fade 400ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    splash-shield-scale 1100ms cubic-bezier(0.4, 0, 0.2, 1) forwards,
+    splash-shield-fade 800ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
+/* Slide distances are in the shield's SVG units (2400 per box side). */
 .splash-chevron-main {
-  stroke: #ffffff;
-  transform: translateX(-40px);
+  transform: translateX(-960px);
   opacity: 0;
   animation:
-    splash-chevron-slide 500ms cubic-bezier(0.4, 0, 0.2, 1) 300ms forwards,
-    splash-chevron-fade 400ms cubic-bezier(0.4, 0, 0.2, 1) 300ms forwards;
+    splash-chevron-slide 1000ms cubic-bezier(0.4, 0, 0.2, 1) 600ms forwards,
+    splash-chevron-fade 800ms cubic-bezier(0.4, 0, 0.2, 1) 600ms forwards;
 }
 
 .splash-chevron-trail {
-  stroke: #ffffff;
-  stroke-opacity: 0.4;
-  transform: translateX(-24px);
+  transform: translateX(-576px);
   opacity: 0;
   animation:
-    splash-chevron-trail-slide 500ms cubic-bezier(0.4, 0, 0.2, 1) 300ms forwards,
-    splash-chevron-fade 400ms cubic-bezier(0.4, 0, 0.2, 1) 300ms forwards;
+    splash-chevron-trail-slide 1000ms cubic-bezier(0.4, 0, 0.2, 1) 600ms forwards,
+    splash-chevron-fade 800ms cubic-bezier(0.4, 0, 0.2, 1) 600ms forwards;
 }
 
 .splash-text {
@@ -78,25 +171,25 @@
   transform: translateY(20px);
   opacity: 0;
   animation:
-    splash-text-rise 500ms cubic-bezier(0.4, 0, 0.2, 1) 600ms forwards,
-    splash-text-fade 500ms cubic-bezier(0.4, 0, 0.2, 1) 600ms forwards;
+    splash-text-rise 900ms cubic-bezier(0.4, 0, 0.2, 1) 1200ms forwards,
+    splash-text-fade 900ms cubic-bezier(0.4, 0, 0.2, 1) 1200ms forwards;
 }
 
+/* Same type as the sign-in titles (.auth-title): app font, bold, no tracking. */
 .splash-title {
   font-size: 54px;
-  font-weight: 300;
+  font-weight: 700;
+  line-height: 1.15;
   color: #ffffff;
-  letter-spacing: 8px;
-  font-family: Inter, system-ui, sans-serif;
 }
 
+/* App font like the sign-in description text (.auth-text). */
 .splash-tagline {
-  margin-top: 12px;
-  font-size: 20px;
-  font-weight: 300;
-  color: rgba(255, 255, 255, 0.5);
-  letter-spacing: 4px;
-  font-family: Inter, system-ui, sans-serif;
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.55);
 }
 
 .startup-status-card {
@@ -116,7 +209,7 @@
   -webkit-backdrop-filter: blur(18px);
   opacity: 0;
   transform: translateY(14px);
-  animation: startup-card-enter 480ms cubic-bezier(0.2, 0.8, 0.2, 1) 760ms forwards;
+  animation: startup-card-enter 800ms cubic-bezier(0.2, 0.8, 0.2, 1) 1500ms forwards;
   transition: border-color 180ms ease, background 180ms ease;
 }
 
@@ -267,15 +360,6 @@
   );
 }
 
-:root[data-theme="light"] .splash-chevron-main {
-  stroke: #6b7280;
-}
-
-:root[data-theme="light"] .splash-chevron-trail {
-  stroke: #6b7280;
-  stroke-opacity: 0.35;
-}
-
 :root[data-theme="light"] .splash-title {
   color: #102a43;
 }
@@ -357,12 +441,12 @@
 }
 
 @keyframes splash-chevron-slide {
-  from { transform: translateX(-40px); }
+  from { transform: translateX(-960px); }
   to   { transform: translateX(0); }
 }
 
 @keyframes splash-chevron-trail-slide {
-  from { transform: translateX(-24px); }
+  from { transform: translateX(-576px); }
   to   { transform: translateX(0); }
 }
 

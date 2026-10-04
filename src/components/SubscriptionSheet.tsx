@@ -1213,7 +1213,8 @@ export default function SubscriptionSheet({
   const currentPlanName = planLabel(session.userPlan, session.planDisplayName);
   const currentPlanNameClass = planNameClass(session.userPlan);
   const expiresAtFormatted =
-    session.planExpiresAt && (session.userPlan === "PAID" || session.userPlan === "ADMIN")
+    session.planExpiresAt &&
+    (session.userPlan === "PAID" || session.userPlan === "ADMIN" || session.userPlan === "FREE_TRIAL")
       ? formatDateDots(session.planExpiresAt)
       : null;
 
@@ -1244,6 +1245,15 @@ export default function SubscriptionSheet({
       currentHint = t("plan_renew_full");
       break;
     case "FREE_TRIAL":
+      currentHint = expiresAtFormatted && session.planExpiresAt !== null
+        ? (
+            <SubscriptionExpiryText
+              expiresAt={session.planExpiresAt}
+              text={tf("plan_active_until", expiresAtFormatted)}
+            />
+          )
+        : t("plan_limited_traffic");
+      break;
     default:
       currentHint = t("plan_limited_traffic");
       break;
@@ -1484,8 +1494,6 @@ export default function SubscriptionSheet({
               </div>
             </div>
           )}
-
-          <div className="sub-sheet__hint">{t("payment_via_telegram")}</div>
 
           <button
             className="sub-sheet__buy-btn"

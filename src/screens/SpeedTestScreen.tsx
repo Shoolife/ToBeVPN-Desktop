@@ -1,434 +1,313 @@
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { t } from "../i18n";
 import { useVpnRuntime } from "../session/vpnState";
-import { recordDiagnosticEvent } from "../session/diagnostics";
+import {
+  downloadColor,
+  pingColor,
+  useSpeedTestHistory,
+  type SpeedTestPhase,
+} from "../session/speedTest";
+import {
+  isSpeedTestRunning,
+  resetSpeedTestRun,
+  startSpeedTestRun,
+  useSpeedTestRun,
+} from "../session/speedTestRun";
+import MaterialIcon from "../components/MaterialIcon";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import "./SpeedTestScreen.css";
 
-type Phase = "idle" | "ping" | "download" | "done";
+// Same layout and animation as the Android client's SpeedTestScreen.
+// The old 200 Mbps scale saturated below modern tariffs; 500 Mbps keeps a
+// 300 Mbps result readable, as on the phone.
+const MAX_SPEED = 500;
 
-const MAX_SPEED = 200; // Mbps
+export default function SpeedTestScreen({
+  onBack,
+  onOpenHistory,
+}: {
+  onBack: () => void;
+  onOpenHistory: () => void;
+}) {
+  // The run lives in session/speedTestRun, so it keeps going while History is
+  // open, as on the phone.
+  const state = useSpeedTestRun();
+  const history = useSpeedTestHistory();
 
-// Continuous-download endpoints rotated through during the 10-second window.
-// Cloudflare's /__down?bytes=N serves up to ~1 GB chunks — we use multiple
-// distinct sizes so nothing gets cached between iterations and the test
-// reflects real bandwidth instead of a single warm cache hit. Mirrors phone's
-// rotation through Maven Central jars (icu4j, guava).
-const DOWNLOAD_URLS = [
-  "https://speed.cloudflare.com/__down?bytes=104857600",   // 100 MB
-  "https://speed.cloudflare.com/__down?bytes=52428800",    // 50 MB
-  "https://speed.cloudflare.com/__down?bytes=26214400",    // 25 MB
-];
-const PING_URL = "https://speed.cloudflare.com/__down?bytes=1";
-const PING_COUNT = 3;
-const TEST_DURATION_MS = 10_000;
-const PING_REQUEST_TIMEOUT_MS = 5_000;
-const DOWNLOAD_REQUEST_TIMEOUT_MS = 4_000;
-const FAILED_REQUEST_BACKOFF_MS = 120;
-
-async function withAbortTimeout<T>(
-  parentSignal: AbortSignal,
-  timeoutMs: number,
-  operation: (signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  const controller = new AbortController();
-  const forwardAbort = () => controller.abort(parentSignal.reason);
-  if (parentSignal.aborted) forwardAbort();
-  else parentSignal.addEventListener("abort", forwardAbort, { once: true });
-  const timeoutId = window.setTimeout(
-    () => controller.abort(new Error("Request timed out")),
-    Math.max(1, timeoutMs),
-  );
-  try {
-    return await operation(controller.signal);
-  } finally {
-    window.clearTimeout(timeoutId);
-    parentSignal.removeEventListener("abort", forwardAbort);
-  }
-}
-
-function abortableDelay(signal: AbortSignal, delayMs: number): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const timeoutId = window.setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, delayMs);
-    const onAbort = () => {
-      window.clearTimeout(timeoutId);
-      resolve();
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-function gaugeColor(speed: number): string {
-  if (speed < 10) return "var(--danger)";
-  if (speed < 30) return "var(--warning)";
-  if (speed < 60) return "var(--success)";
-  return "var(--info)";
-}
-
-function pingColorClass(ping: number): string {
-  if (ping <= 0) return "speed-result__value--muted";
-  if (ping <= 100) return "speed-result__value--green";
-  if (ping <= 200) return "speed-result__value--orange";
-  return "speed-result__value--red";
-}
-
-// SVG arc helper — 240° sweep from 150° to 30° (through bottom going clockwise through top).
-// In SVG with clockwise rotation, start angle 150° (bottom-left), sweep 240°.
-function describeArc(cx: number, cy: number, r: number, startAngleDeg: number, endAngleDeg: number): string {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const sx = cx + r * Math.cos(toRad(startAngleDeg));
-  const sy = cy + r * Math.sin(toRad(startAngleDeg));
-  const ex = cx + r * Math.cos(toRad(endAngleDeg));
-  const ey = cy + r * Math.sin(toRad(endAngleDeg));
-  const sweep = endAngleDeg - startAngleDeg;
-  const largeArc = sweep > 180 ? 1 : 0;
-  return `M ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey}`;
-}
-
-export default function SpeedTestScreen({ onBack }: { onBack: () => void }) {
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [currentSpeed, setCurrentSpeed] = useState(0);
-  const [ping, setPing] = useState(-1);
-  const [download, setDownload] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const runningRef = useRef(false);
-
-  // Mirrors phone's `viaVpn` StateFlow. On desktop tun2socks captures all
-  // traffic from the webview through TUN when connected, so any fetch() here
-  // automatically goes through the tunnel — but we still surface the indicator
-  // so users understand which path the result reflects.
+  // On desktop the OS routes the Rust process through the tunnel when the VPN
+  // is up, so the badge only tells the user which path the result reflects.
   const { connected: vpnConnected } = useVpnRuntime();
 
-  useEffect(() => () => { abortRef.current?.abort(); }, []);
+  const startTest = () => void startSpeedTestRun(vpnConnected);
+  const resetTest = resetSpeedTestRun;
 
-  const measurePing = async (signal: AbortSignal): Promise<number> => {
-    const ping = async (): Promise<number | null> => {
-      const start = performance.now();
-      try {
-        await withAbortTimeout(signal, PING_REQUEST_TIMEOUT_MS, async (requestSignal) => {
-          const res = await fetch(PING_URL, {
-            cache: "no-store",
-            signal: requestSignal,
-          });
-          if (!res.ok) throw new Error(`Ping request failed: ${res.status}`);
-          await res.arrayBuffer();
-        });
-        return Math.round(performance.now() - start);
-      } catch {
-        return null;
-      }
-    };
-
-    // Warmup — primes DNS / TLS / connection cache so the first measured
-    // request reflects steady-state latency.
-    if ((await ping()) === null) return -1;
-
-    const results: number[] = [];
-    for (let i = 0; i < PING_COUNT; i++) {
-      if (signal.aborted) return -1;
-      const ms = await ping();
-      if (ms !== null) results.push(ms);
-    }
-    if (results.length === 0) return -1;
-    results.sort((a, b) => a - b);
-    return results[Math.floor(results.length / 2)];
-  };
-
-  // Mirrors phone's measureDownload: deadline-driven loop that keeps reading
-  // bytes from rotating endpoints for TEST_DURATION_MS, reporting live speed
-  // every ~200ms. Compared to a fixed-size single-fetch this is more accurate
-  // on fast links (where 25MB is over in 1s) and resilient to a single
-  // endpoint stalling mid-test.
-  const measureDownload = async (
-    signal: AbortSignal,
-    onProgress: (mbps: number) => void,
-  ): Promise<number> => {
-    const startTime = performance.now();
-    const deadline = startTime + TEST_DURATION_MS;
-    let totalBytes = 0;
-    let lastReport = startTime;
-    let urlIndex = 0;
-
-    while (performance.now() < deadline && !signal.aborted) {
-      const url = DOWNLOAD_URLS[urlIndex % DOWNLOAD_URLS.length];
-      urlIndex++;
-
-      try {
-        const remainingMs = Math.max(1, deadline - performance.now());
-        await withAbortTimeout(
-          signal,
-          Math.min(DOWNLOAD_REQUEST_TIMEOUT_MS, remainingMs),
-          async (requestSignal) => {
-            const res = await fetch(url, {
-              signal: requestSignal,
-              cache: "no-store",
-            });
-            if (!res.ok || !res.body) {
-              throw new Error(`Download request failed: ${res.status}`);
-            }
-
-            const reader = res.body.getReader();
-            try {
-              while (performance.now() < deadline && !requestSignal.aborted) {
-                // The per-request controller also bounds a stalled read().
-                // Without it WebView fetch can remain pending forever after a
-                // route change, sleep/resume, or a half-open HTTP connection.
-                const { done, value } = await reader.read();
-                if (done) break;
-                totalBytes += value.byteLength;
-                const now = performance.now();
-                if (now - lastReport >= 200) {
-                  const elapsedSec = (now - startTime) / 1000;
-                  if (elapsedSec > 0) {
-                    onProgress((totalBytes * 8) / (elapsedSec * 1_000_000));
-                  }
-                  lastReport = now;
-                }
-              }
-            } finally {
-              // Do not await cancel(): some WebView implementations keep its
-              // promise pending with the same broken transport as read().
-              void reader.cancel().catch(() => {});
-            }
-          },
-        );
-      } catch {
-        // A fast DNS/TLS failure used to create a hot loop for the full test
-        // duration. Back off briefly before rotating to the next endpoint.
-        await abortableDelay(signal, FAILED_REQUEST_BACKOFF_MS);
-        continue;
-      }
-    }
-
-    const elapsedSec = (performance.now() - startTime) / 1000;
-    return elapsedSec > 0 ? (totalBytes * 8) / (elapsedSec * 1_000_000) : 0;
-  };
-
-  const startTest = async () => {
-    if (runningRef.current) return;
-    runningRef.current = true;
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setCurrentSpeed(0);
-    setPing(-1);
-    setDownload(0);
-    setError(null);
-    setPhase("ping");
-    recordDiagnosticEvent(
-      "SpeedTest",
-      `Manual speed test started; path=${vpnConnected ? "vpn" : "direct"}`,
-    );
-
-    try {
-      const pingMs = await measurePing(controller.signal);
-      if (controller.signal.aborted) return;
-      if (pingMs < 0) {
-        recordDiagnosticEvent("SpeedTest", "Manual speed test failed during latency measurement", "W");
-        setError(t("speed_no_connection"));
-        setPhase("done");
-        return;
-      }
-      setPing(pingMs);
-
-      setPhase("download");
-      const finalMbps = await measureDownload(controller.signal, (mbps) => {
-        if (abortRef.current === controller && !controller.signal.aborted) {
-          setCurrentSpeed(mbps);
-        }
-      });
-      if (controller.signal.aborted) return;
-
-      if (finalMbps <= 0) {
-        setError(t("speed_measure_failed"));
-      }
-      setDownload(finalMbps);
-      setCurrentSpeed(finalMbps);
-      setPhase("done");
-      recordDiagnosticEvent(
-        "SpeedTest",
-        `Manual speed test completed; ping_ms=${pingMs}, download_mbps=${finalMbps.toFixed(2)}, path=${vpnConnected ? "vpn" : "direct"}`,
-      );
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        recordDiagnosticEvent("SpeedTest", `Manual speed test failed: ${String(error)}`, "E");
-        setError(t("speed_measure_failed"));
-        setPhase("done");
-      }
-    } finally {
-      // An aborted, older run must not unlock the button while a newer run is
-      // active. Only the controller that still owns the slot may release it.
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-        runningRef.current = false;
-      }
-    }
-  };
-
-  const resetTest = () => {
-    const controller = abortRef.current;
-    abortRef.current = null;
-    controller?.abort();
-    if (controller) recordDiagnosticEvent("SpeedTest", "Manual speed test stopped by the user", "W");
-    runningRef.current = false;
-    setPhase("idle");
-    setCurrentSpeed(0);
-    setError(null);
-  };
-
-  const handleBtnClick = () => {
-    if (phase === "idle" || phase === "done") startTest();
-    else resetTest();
-  };
-
-  const fraction = Math.min(currentSpeed / MAX_SPEED, 1);
-  const arcColor = gaugeColor(currentSpeed);
-
-  // Gauge geometry
-  const size = 320;
-  const stroke = 18;
-  const pad = stroke / 2 + 8;
-  const cx = size / 2;
-  const cy = size / 2;
-  const r = (size - pad * 2) / 2;
-
-  // Arc spans from 150° to 30° (clockwise through 180° → 270° → 0° → 30°), sweep = 240°
-  const startAngle = 150;
-  const fullEnd = 150 + 240; // 390 ≡ 30
-  const valueEnd = 150 + 240 * fraction;
-
-  const trackPath = describeArc(cx, cy, r, startAngle, fullEnd);
-  const valuePath = fraction > 0.001 ? describeArc(cx, cy, r, startAngle, valueEnd) : "";
-
-  // Needle
-  const needleAngleDeg = startAngle + 240 * fraction;
-  const needleRad = (needleAngleDeg * Math.PI) / 180;
-  const needleLen = r - stroke - 16;
-  const needleX = cx + needleLen * Math.cos(needleRad);
-  const needleY = cy + needleLen * Math.sin(needleRad);
-
-  // Ticks
-  const ticks = Array.from({ length: 11 }, (_, i) => {
-    const angle = startAngle + (240 * i) / 10;
-    const rad = (angle * Math.PI) / 180;
-    const innerR = r - stroke / 2 - 6;
-    const outerR = r - stroke / 2 - 2;
-    return {
-      x1: cx + innerR * Math.cos(rad),
-      y1: cy + innerR * Math.sin(rad),
-      x2: cx + outerR * Math.cos(rad),
-      y2: cy + outerR * Math.sin(rad),
-    };
-  });
+  const running = isSpeedTestRunning(state);
+  const successful = state.phase === "done" && state.error === null && state.download > 0;
+  const showStages = state.error === null &&
+    (state.phase === "ping" || state.phase === "download" || state.phase === "done");
 
   const phaseText =
-    error ? error
-    : phase === "idle" ? t("speed_press_start")
-    : phase === "ping" ? t("speed_measuring_ping")
-    : phase === "download" ? t("speed_downloading")
+    state.error ? state.error
+    : state.phase === "idle" ? t("speed_press_start")
+    : state.phase === "checking" ? t("speed_checking_connection")
+    : state.phase === "ping" ? t("speed_measuring_ping")
+    : state.phase === "download" ? t("speed_downloading")
     : t("speed_done");
 
-  const btnText =
-    phase === "idle" || phase === "done" ? t("speed_start_test") : t("speed_stop");
+  const pingText = state.ping > 0 ? String(state.ping) : "—";
+  const downloadText = state.download > 0 ? state.download.toFixed(1) : "—";
 
   return (
     <div className="speed-root">
       <div className="speed-topbar">
-        <button className="speed-topbar__back" onClick={onBack}>
+        <button className="speed-topbar__back" onClick={onBack} aria-label={t("back")}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="15 18 9 12 15 6" />
           </svg>
         </button>
         <span className="speed-topbar__title">{t("speed_test_title")}</span>
-        <span
-          className={`speed-vpn-badge ${vpnConnected ? "speed-vpn-badge--on" : "speed-vpn-badge--off"}`}
-          title={vpnConnected ? t("speed_via_vpn") : t("speed_direct")}
-        >
+        <span className={`speed-vpn-badge ${vpnConnected ? "speed-vpn-badge--on" : "speed-vpn-badge--off"}`}>
           {vpnConnected ? t("speed_via_vpn") : t("speed_direct")}
         </span>
       </div>
 
       <ScrollEdgeAffordance className="speed-content">
-        <div className="speed-gauge">
-          <svg className="speed-gauge__svg" width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-            {/* Track */}
-            <path
-              d={trackPath}
-              fill="none"
-              stroke="var(--surface-2)"
-              strokeWidth={stroke}
-              strokeLinecap="round"
+        <div className="speed-main">
+          <SpeedGauge
+            speed={state.currentSpeed}
+            phase={state.phase}
+            hasError={state.error !== null}
+            successful={successful}
+          />
+
+          <div
+            key={`${state.phase}:${state.error ?? ""}`}
+            className={`speed-phase ${state.error ? "speed-phase--error" : ""} ${successful ? "speed-phase--done" : ""}`}
+          >
+            {phaseText}
+          </div>
+
+          <div className={`speed-stages ${showStages ? "speed-stages--visible" : ""}`} aria-hidden={!showStages}>
+            <StageChip
+              label={t("speed_ping")}
+              active={state.phase === "ping"}
+              completed={state.phase === "download" || state.phase === "done"}
             />
-            {/* Value arc */}
-            {valuePath && (
-              <path
-                d={valuePath}
-                fill="none"
-                stroke={arcColor}
-                strokeWidth={stroke}
-                strokeLinecap="round"
-                style={{ transition: "stroke 300ms" }}
-              />
-            )}
-            {/* Ticks */}
-            {ticks.map((tk, i) => (
-              <line
-                key={i}
-                x1={tk.x1} y1={tk.y1} x2={tk.x2} y2={tk.y2}
-                stroke="var(--surface-2)"
-                strokeWidth={2}
-              />
-            ))}
-            {/* Needle */}
-            {phase !== "idle" && (
-              <>
-                <line
-                  x1={cx} y1={cy} x2={needleX} y2={needleY}
-                  stroke={arcColor}
-                  strokeWidth={3}
-                  strokeLinecap="round"
-                />
-                <circle cx={cx} cy={cy} r={6} fill={arcColor} />
-              </>
-            )}
-          </svg>
-          <div className="speed-gauge__center">
-            <span className="speed-gauge__value">
-              {phase === "idle" ? "0" : currentSpeed.toFixed(1)}
-            </span>
-            <span className="speed-gauge__unit">{t("speed_unit_mbps")}</span>
+            <StageChip
+              label={t("speed_download")}
+              active={state.phase === "download"}
+              completed={state.phase === "done"}
+            />
+          </div>
+
+          <div className="speed-results">
+            <ResultCard
+              label={t("speed_ping")}
+              value={pingText}
+              unit={t("speed_unit_ms")}
+              color={pingColor(state.ping)}
+            />
+            <ResultCard
+              label={t("speed_download")}
+              value={downloadText}
+              unit={t("speed_unit_mbps")}
+              color={state.download > 0 ? downloadColor(state.download) : "var(--text-muted)"}
+            />
           </div>
         </div>
 
-        <div className="speed-phase">{phaseText}</div>
+        <button className="speed-history-btn" onClick={onOpenHistory}>
+          <MaterialIcon name="history" size={20} />
+          <span className="speed-history-btn__label">{t("speed_history_title")}</span>
+          {history.length > 0 && <span className="speed-history-btn__count">{history.length}</span>}
+        </button>
 
-        <div className="speed-results">
-          <div className="speed-result">
-            <span className="speed-result__label">{t("speed_ping")}</span>
-            <span className={`speed-result__value ${pingColorClass(ping)}`}>
-              {ping >= 0 ? ping : "—"}
-            </span>
-            <span className="speed-result__unit">{t("speed_unit_ms")}</span>
-          </div>
-          <div className="speed-result">
-            <span className="speed-result__label">{t("speed_download")}</span>
-            <span className={`speed-result__value ${download > 0 ? "speed-result__value--green" : "speed-result__value--muted"}`}>
-              {download > 0 ? download.toFixed(1) : "—"}
-            </span>
-            <span className="speed-result__unit">{t("speed_unit_mbps")}</span>
-          </div>
-        </div>
-
-        <button className="speed-start-btn" onClick={handleBtnClick}>
-          {btnText}
+        <button className="speed-start-btn" onClick={running ? resetTest : startTest}>
+          {running ? t("speed_stop") : t("speed_start_test")}
         </button>
       </ScrollEdgeAffordance>
+    </div>
+  );
+}
+
+function describeArc(cx: number, cy: number, r: number, startDeg: number, endDeg: number): string {
+  const rad = (d: number) => (d * Math.PI) / 180;
+  const sx = cx + r * Math.cos(rad(startDeg));
+  const sy = cy + r * Math.sin(rad(startDeg));
+  const ex = cx + r * Math.cos(rad(endDeg));
+  const ey = cy + r * Math.sin(rad(endDeg));
+  const largeArc = endDeg - startDeg > 180 ? 1 : 0;
+  return `M ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey}`;
+}
+
+const easeInOut = (x: number) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
+
+/**
+ * Animated gauge: the value eases over 420 ms, the ping phase sweeps the
+ * needle back and forth, and a successful run ends with a burst and a check.
+ */
+function SpeedGauge({
+  speed,
+  phase,
+  hasError,
+  successful,
+}: {
+  speed: number;
+  phase: SpeedTestPhase;
+  hasError: boolean;
+  successful: boolean;
+}) {
+  const target = Math.min(Math.max(speed / MAX_SPEED, 0), 1);
+  const [fraction, setFraction] = useState(target);
+  const [scan, setScan] = useState(0.06);
+  const fromRef = useRef(target);
+  const shownRef = useRef(target);
+
+  useEffect(() => {
+    fromRef.current = shownRef.current;
+    const start = performance.now();
+    let frame = 0;
+    const step = (now: number) => {
+      const k = Math.min((now - start) / 420, 1);
+      const value = fromRef.current + (target - fromRef.current) * easeInOut(k);
+      shownRef.current = value;
+      setFraction(value);
+      if (k < 1) frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [target]);
+
+  useEffect(() => {
+    if (phase !== "ping") return;
+    const start = performance.now();
+    let frame = 0;
+    const step = (now: number) => {
+      const cycle = ((now - start) / 900) % 2;
+      const k = easeInOut(cycle <= 1 ? cycle : 2 - cycle);
+      setScan(0.06 + 0.88 * k);
+      frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [phase]);
+
+  const inactive = phase === "idle" || phase === "checking" || hasError;
+  const runningVisual = phase === "ping" || phase === "download";
+  const visual = phase === "ping" ? scan : fraction;
+  const color =
+    phase === "ping" ? "var(--info)"
+    : speed < 25 ? "var(--danger)"
+    : speed < 75 ? "var(--warning)"
+    : speed < 150 ? "var(--success)"
+    : "var(--info)";
+
+  const size = 280;
+  const stroke = 16;
+  const pad = stroke / 2 + 8;
+  const c = size / 2;
+  const r = (size - pad * 2) / 2;
+  const startAngle = 150;
+  const sweep = 240;
+  const needleRad = ((startAngle + sweep * visual) * Math.PI) / 180;
+  const needleLen = r - stroke - 16;
+
+  return (
+    <div className={`speed-gauge ${inactive ? "speed-gauge--inactive" : ""}`}>
+      <svg className="speed-gauge__svg" width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        {runningVisual && <circle className="speed-gauge__pulse" cx={c} cy={c} r={size * 0.43} />}
+        <path
+          d={describeArc(c, c, r, startAngle, startAngle + sweep)}
+          fill="none"
+          stroke="var(--surface-2)"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+        />
+        {visual > 0.001 && (
+          <path
+            d={describeArc(c, c, r, startAngle, startAngle + sweep * visual)}
+            fill="none"
+            stroke={color}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            style={{ transition: "stroke 300ms" }}
+          />
+        )}
+        {Array.from({ length: 11 }, (_, i) => {
+          const rad = ((startAngle + (sweep * i) / 10) * Math.PI) / 180;
+          const inner = r - stroke / 2 - 6;
+          const outer = r - stroke / 2 - 2;
+          return (
+            <line
+              key={i}
+              x1={c + inner * Math.cos(rad)} y1={c + inner * Math.sin(rad)}
+              x2={c + outer * Math.cos(rad)} y2={c + outer * Math.sin(rad)}
+              stroke="var(--surface-2)"
+              strokeWidth={2}
+            />
+          );
+        })}
+        {!inactive && (
+          <>
+            <line
+              x1={c} y1={c}
+              x2={c + needleLen * Math.cos(needleRad)} y2={c + needleLen * Math.sin(needleRad)}
+              stroke={color}
+              strokeWidth={3}
+              strokeLinecap="round"
+            />
+            <circle cx={c} cy={c} r={6} fill={color} />
+          </>
+        )}
+        {successful && (
+          <g className="speed-gauge__burst">
+            {Array.from({ length: 12 }, (_, i) => {
+              const angle = ((i * 30 - 90) * Math.PI) / 180;
+              return (
+                <circle
+                  key={i}
+                  className="speed-gauge__particle"
+                  cx={c + r * 0.82 * Math.cos(angle)}
+                  cy={c + r * 0.82 * Math.sin(angle)}
+                  r={2.8}
+                  style={{ ["--dx" as string]: `${r * 0.22 * Math.cos(angle)}px`, ["--dy" as string]: `${r * 0.22 * Math.sin(angle)}px` }}
+                />
+              );
+            })}
+          </g>
+        )}
+      </svg>
+      <div className="speed-gauge__center">
+        <span className="speed-gauge__value">{inactive ? "0" : speed.toFixed(1)}</span>
+        <span className="speed-gauge__unit">{t("speed_unit_mbps")}</span>
+      </div>
+      {successful && (
+        <span className="speed-gauge__check" aria-hidden="true">
+          <MaterialIcon name="checkCircle" size={26} />
+        </span>
+      )}
+    </div>
+  );
+}
+
+function StageChip({ label, active, completed }: { label: string; active: boolean; completed: boolean }) {
+  const state = completed ? "done" : active ? "active" : "idle";
+  return (
+    <div className={`speed-stage speed-stage--${state}`}>
+      {completed
+        ? <MaterialIcon name="checkCircle" size={17} />
+        : <span className="speed-stage__dot" />}
+      <span className="speed-stage__label">{label}</span>
+    </div>
+  );
+}
+
+function ResultCard({ label, value, unit, color }: { label: string; value: string; unit: string; color: string }) {
+  return (
+    <div className="speed-result">
+      <span className="speed-result__label">{label}</span>
+      <span key={value} className="speed-result__value" style={{ color }}>{value}</span>
+      <span className="speed-result__unit">{unit}</span>
     </div>
   );
 }

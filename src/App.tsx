@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useSyncExternalStore, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { currentMonitor, getCurrentWindow, PhysicalSize, primaryMonitor } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
 import OnboardingScreen from "./screens/OnboardingScreen";
 import PairingScreen from "./screens/PairingScreen";
@@ -10,6 +10,9 @@ import SettingsScreen, { type SettingsSection } from "./screens/SettingsScreen";
 import ServersScreen from "./screens/ServersScreen";
 import StatsScreen from "./screens/StatsScreen";
 import SpeedTestScreen from "./screens/SpeedTestScreen";
+import { stopSpeedTestRun } from "./session/speedTestRun";
+import SpeedTestHistoryScreen from "./screens/SpeedTestHistoryScreen";
+import SettingsTransferScreen from "./screens/SettingsTransferScreen";
 import DevicesScreen from "./screens/DevicesScreen";
 import RoutingScreen from "./screens/RoutingScreen";
 import ReferralsScreen from "./screens/ReferralsScreen";
@@ -26,6 +29,7 @@ import {
   type VpnServer,
 } from "./session/auth";
 import { isPaired, useSession } from "./session/store";
+import { markMainWindowPresented } from "./session/windowPresentation";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
 import { hasSameVpnConfig, isSameServerSelection } from "./session/serverSelection";
 import { connectVpn, disconnectVpn, getVpnRuntime } from "./session/vpnState";
@@ -55,6 +59,8 @@ import {
   getSavedOutlinedText,
   interfaceScaleToWindowScale,
   DESIGN_WINDOW_OUTER_HEIGHT,
+  DESIGN_WIDE_WINDOW_OUTER_HEIGHT,
+  DESIGN_WIDE_WINDOW_WIDTH,
   INTERFACE_SCALE_MAX,
   INTERFACE_SCALE_MIN,
   saveBoldText,
@@ -65,7 +71,7 @@ import {
 } from "./session/interfaceScale";
 import "./App.css";
 
-export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "devices" | "routing" | "referrals" | "promocodes";
+export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "speedtest-history" | "settings-transfer" | "devices" | "routing" | "referrals" | "promocodes";
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
 
@@ -119,6 +125,10 @@ function DesktopTitleBar() {
     </div>
   );
 }
+
+// Fade-out before a portrait <-> landscape window resize (matches the
+// .app__content transition in App.css).
+const WINDOW_MORPH_FADE_MS = 200;
 
 function hasSeenOnboarding(): boolean {
   try {
@@ -219,6 +229,9 @@ export default function App({
   const [boldText, setBoldText] = useState(getSavedBoldText);
   const [outlinedText, setOutlinedText] = useState(getSavedOutlinedText);
   const interfaceScaleResizeGenerationRef = useRef(0);
+  // Sign-in is shown in a landscape window, as on the TV, when it fits.
+  // `wideApplied` reports what the window actually became.
+  const [wideApplied, setWideApplied] = useState(false);
   const useDesktopFrame = shouldUseDesktopFrame(browserPreview);
   const timeoutRef = useRef<number | null>(null);
 
@@ -349,6 +362,20 @@ export default function App({
   const navigate = useCallback((to: Screen, dir: Direction) => {
     if (animating) return;
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    // Going to or from the landscape sign-in window: fade the current screen
+    // out first and only then switch, so the next screen never flashes at the
+    // old window size. The resize effect reveals it after the window changed.
+    if (!browserPreview && (to === "pairing") !== wideApplied) {
+      document.documentElement.dataset.windowMorph = "1";
+      setAnimating(true);
+      timeoutRef.current = window.setTimeout(() => {
+        setPrevScreen(null);
+        setDirection("none");
+        setCurrentScreen(to);
+        setAnimating(false);
+      }, WINDOW_MORPH_FADE_MS);
+      return;
+    }
     setPrevScreen(currentScreen);
     setDirection(dir);
     setCurrentScreen(to);
@@ -358,7 +385,7 @@ export default function App({
       setDirection("none");
       setAnimating(false);
     }, DURATION);
-  }, [currentScreen, animating]);
+  }, [currentScreen, animating, browserPreview, wideApplied]);
 
   useEffect(() => {
     return () => { if (timeoutRef.current) clearTimeout(timeoutRef.current); };
@@ -389,11 +416,21 @@ export default function App({
   // Force-reset to pairing screen — bypasses animating guard and closures.
   const forceGoToPairing = useCallback(() => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    setPrevScreen(null);
-    setDirection("none");
-    setAnimating(false);
-    setCurrentScreen("pairing");
-  }, []);
+    const show = () => {
+      setPrevScreen(null);
+      setDirection("none");
+      setAnimating(false);
+      setCurrentScreen("pairing");
+    };
+    if (browserPreview || wideApplied) {
+      show();
+      return;
+    }
+    // Same fade-out first as navigate() before the window turns landscape.
+    document.documentElement.dataset.windowMorph = "1";
+    setAnimating(true);
+    timeoutRef.current = window.setTimeout(show, WINDOW_MORPH_FADE_MS);
+  }, [browserPreview, wideApplied]);
 
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
@@ -559,18 +596,29 @@ export default function App({
   // Linux display scaling, so the same in-app coefficient otherwise produces
   // different windows at 100%, 133%, 150%, etc. CSS receives the corresponding
   // logical viewport and compensates for the native DPI below.
+  // The splash already opens landscape when it will hand over to sign-in
+  // (stored session not linked, onboarding seen), so the window does not
+  // flip from portrait to landscape right after the startup animation.
+  const [splashLeadsToPairing] = useState(() => !isPaired() && hasSeenOnboarding());
+  const wantWideWindow =
+    currentScreen === "pairing" || (currentScreen === "splash" && splashLeadsToPairing);
+  // The window's contents stay transparent until the first resize, which is
+  // applied instantly, so the app appears already in its final shape.
+  const startupResizeRef = useRef(true);
   useEffect(() => {
     const MONITOR_WIDTH_MARGIN = 32;
     const MONITOR_HEIGHT_MARGIN = 80;
     const generation = ++interfaceScaleResizeGenerationRef.current;
+    let designWidth = wantWideWindow ? DESIGN_WIDE_WINDOW_WIDTH : DESIGN_WINDOW_WIDTH;
+    let designOuterHeight = wantWideWindow ? DESIGN_WIDE_WINDOW_OUTER_HEIGHT : DESIGN_WINDOW_OUTER_HEIGHT;
 
     const applyFrameLayoutForSize = (rawWidth: number, rawHeight: number) => {
       const viewportW = Math.max(1, rawWidth);
       const viewportH = Math.max(1, rawHeight);
-      const wScale = viewportW / DESIGN_WINDOW_WIDTH;
+      const wScale = viewportW / designWidth;
       // The viewport spans the whole frame, titlebar included, so it is the
       // outer design height that the vertical fit has to be measured against.
-      const hScale = viewportH / DESIGN_WINDOW_OUTER_HEIGHT;
+      const hScale = viewportH / designOuterHeight;
       // Do not clamp this value to the app's 0.7..1.3 range. On a 200% system
       // scale, for example, a physical 1.0 app window has half as many CSS
       // pixels and therefore needs a 0.45 render scale. Clamping it would make
@@ -613,6 +661,9 @@ export default function App({
     };
 
     if (browserPreview) {
+      markMainWindowPresented();
+      delete document.documentElement.dataset.windowMorph;
+      setWideApplied(wantWideWindow);
       scheduleFrameLayout();
       window.addEventListener("resize", scheduleFrameLayout);
       return () => {
@@ -644,11 +695,17 @@ export default function App({
           // Compare logical with logical: the window target below is logical
           // too, so a physical work area would reject valid scales on HiDPI.
           const workArea = mon.workArea.size.toLogical(mon.scaleFactor);
-          const monitorFit = Math.min(
-            (workArea.width - MONITOR_WIDTH_MARGIN) / DESIGN_WINDOW_WIDTH,
-            (workArea.height - MONITOR_HEIGHT_MARGIN) / DESIGN_WINDOW_OUTER_HEIGHT,
-          );
-          appliedScale = Math.min(appliedScale, monitorFit / WINDOW_SCALE_BASE);
+          const fitFor = (width: number, outerHeight: number) => Math.min(
+            (workArea.width - MONITOR_WIDTH_MARGIN) / width,
+            (workArea.height - MONITOR_HEIGHT_MARGIN) / outerHeight,
+          ) / WINDOW_SCALE_BASE;
+          // A landscape sign-in window that would have to shrink below the
+          // smallest scale does not fit this monitor: stay portrait instead.
+          if (wantWideWindow && fitFor(designWidth, designOuterHeight) < INTERFACE_SCALE_MIN) {
+            designWidth = DESIGN_WINDOW_WIDTH;
+            designOuterHeight = DESIGN_WINDOW_OUTER_HEIGHT;
+          }
+          appliedScale = Math.min(appliedScale, fitFor(designWidth, designOuterHeight));
         }
       } catch {
         // Monitor discovery can fail on headless / unusual setups. The saved
@@ -668,8 +725,9 @@ export default function App({
       // setSize() is still called with a PhysicalSize derived from the live
       // scale factor — that keeps every animation step exact and lets us
       // reassert the size when the factor changes mid-flight.
-      const logicalWidth = DESIGN_WINDOW_WIDTH * windowScale;
-      const logicalHeight = DESIGN_WINDOW_OUTER_HEIGHT * windowScale;
+      const logicalWidth = designWidth * windowScale;
+      const logicalHeight = designOuterHeight * windowScale;
+      const wide = designWidth === DESIGN_WIDE_WINDOW_WIDTH;
       let activeNativeScaleFactor = await win.scaleFactor().catch(
         () => Math.max(1, window.devicePixelRatio || 1),
       );
@@ -685,6 +743,14 @@ export default function App({
       ));
       const startWidth = Math.max(1, startSize.width);
       const startHeight = Math.max(1, startSize.height);
+      // Switching between portrait and landscape keeps the window centred on
+      // the same spot instead of growing from its top-left corner.
+      const layoutChanged = Math.abs(startWidth - targetWidth) > startWidth * 0.25;
+      const startPosition = layoutChanged
+        ? await win.outerPosition().catch(() => null)
+        : null;
+      const anchorX = startPosition ? startPosition.x + startWidth / 2 : 0;
+      const anchorY = startPosition ? startPosition.y + startHeight / 2 : 0;
 
       try {
         const handle = await win.onScaleChanged(({ payload }) => {
@@ -717,13 +783,30 @@ export default function App({
       // slider can cross several steps at once, so scale the duration with the
       // travelled distance instead of squeezing a full-range resize into
       // roughly the same time as one button press.
-      const durationMs = Math.min(1_050, Math.max(320, resizeDistance * 3.6));
+      const startupResize = startupResizeRef.current;
+      startupResizeRef.current = false;
+      const durationMs = startupResize
+        ? 0
+        : Math.min(1_050, Math.max(320, resizeDistance * 3.6));
+      // Portrait <-> landscape and interface scale changes: fade the screen
+      // out first, change the window over an empty frame with the loader
+      // (background and titlebar stay), then fade the screen back in already
+      // laid out for the new size. For a layout change navigate() normally
+      // has faded the screen out already.
+      const morph = !startupResize && (layoutChanged || resizeDistance > 1);
+      if (morph && document.documentElement.dataset.windowMorph !== "1") {
+        document.documentElement.dataset.windowMorph = "1";
+        await new Promise<void>((resolve) => window.setTimeout(resolve, WINDOW_MORPH_FADE_MS));
+        if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+      }
+      setWideApplied(wide);
+
       const startedAt = performance.now();
       let lastWidth = Math.round(startWidth);
       let lastHeight = Math.round(startHeight);
 
       while (!cancelled && generation === interfaceScaleResizeGenerationRef.current) {
-        const progress = resizeDistance <= 1
+        const progress = resizeDistance <= 1 || durationMs === 0
           ? 1
           : Math.min(1, (performance.now() - startedAt) / durationMs);
         const eased = progress < 0.5
@@ -740,6 +823,12 @@ export default function App({
           applyFrameLayoutForPhysicalSize(width, height, activeNativeScaleFactor);
           try {
             await win.setSize(new PhysicalSize(width, height));
+            if (startPosition) {
+              await win.setPosition(new PhysicalPosition(
+                Math.round(anchorX - width / 2),
+                Math.max(0, Math.round(anchorY - height / 2)),
+              )).catch(() => {});
+            }
             lastWidth = width;
             lastHeight = height;
           } catch {
@@ -763,6 +852,14 @@ export default function App({
         }
       }
       if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
+
+      if (startupResize) {
+        applyFrameLayout();
+        markMainWindowPresented();
+      }
+      // Every run that finishes reveals the screen, including one that took
+      // over from a morph cancelled half-way.
+      delete document.documentElement.dataset.windowMorph;
 
       scheduleFrameLayout();
       // Fire a second pass on the next frame: setSize() resolves before
@@ -791,16 +888,16 @@ export default function App({
       unlistenScale?.();
       if (layoutAnimationFrame !== null) cancelAnimationFrame(layoutAnimationFrame);
     };
-  }, [browserPreview, interfaceScaleRequest]);
+  }, [browserPreview, interfaceScaleRequest, wantWideWindow]);
 
   const renderScreen = (screen: Screen) => {
     switch (screen) {
       case "splash":
-        return <SplashScreen onDone={handleSplashDone} browserPreview={browserPreview} />;
+        return <SplashScreen onDone={handleSplashDone} browserPreview={browserPreview} wide={wideApplied} />;
       case "onboarding":
         return <OnboardingScreen onContinue={handleOnboardingComplete} />;
       case "pairing":
-        return <PairingScreen onPaired={handlePaired} />;
+        return <PairingScreen onPaired={handlePaired} wide={wideApplied} />;
       case "home":
         return (
           <HomeScreen
@@ -845,6 +942,10 @@ export default function App({
               setSettingsSection("main");
               goForward("promocodes");
             }}
+            onSettingsTransfer={() => {
+              setSettingsSection("main");
+              goForward("settings-transfer");
+            }}
             interfaceScale={interfaceScaleRequest.value}
             onInterfaceScaleChange={requestInterfaceScale}
             fontScale={fontScale}
@@ -880,6 +981,8 @@ export default function App({
             browserPreview={browserPreview}
           />
         );
+      case "settings-transfer":
+        return <SettingsTransferScreen onBack={() => goBack("settings")} />;
       case "promocodes":
         return (
           <PromocodesScreen
@@ -938,6 +1041,16 @@ export default function App({
                 });
               }
             }}
+            onAutomaticRefreshed={(vpnServer) => {
+              // A full check finished while AUTO is on: keep its best server
+              // for the next connection. No navigation and no reconnect, as on
+              // the phone (persistBestStandardServer).
+              if (!automaticServerSelectionRef.current || !isAvailableVpnServer(vpnServer)) return;
+              const server = toSelectedServer(vpnServer);
+              selectedServerRef.current = server;
+              setSelectedServer(server);
+              saveLastServer(server);
+            }}
             onSelectAutomatic={(vpnServer) => {
               if (!isAvailableVpnServer(vpnServer)) return;
               const server = toSelectedServer(vpnServer);
@@ -984,7 +1097,17 @@ export default function App({
       case "stats":
         return <StatsScreen onBack={() => goBack("home")} />;
       case "speedtest":
-        return <SpeedTestScreen onBack={() => goBack("home")} />;
+        return (
+          <SpeedTestScreen
+            onBack={() => {
+              stopSpeedTestRun();
+              goBack("home");
+            }}
+            onOpenHistory={() => goForward("speedtest-history")}
+          />
+        );
+      case "speedtest-history":
+        return <SpeedTestHistoryScreen onBack={() => goBack("speedtest")} />;
     }
   };
 

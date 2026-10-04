@@ -515,7 +515,9 @@ export default function PromocodesScreen({
         />
       </header>
 
-      <ScrollEdgeAffordance as="main" className="promocodes-content">
+      {/* Activation, discount and the history title stay put; only the list of
+          applied promo codes scrolls. */}
+      <main className="promocodes-content">
         {!authenticated ? (
           <CenteredState
             title={t("promocodes_auth_title")}
@@ -628,6 +630,7 @@ export default function PromocodesScreen({
               <p>{t("promocodes_history_description")}</p>
             </section>
 
+            <ScrollEdgeAffordance className="promocodes-history-scroll">
             {isRefreshing ? (
               <HistorySkeleton />
             ) : data.items.length === 0 ? (
@@ -668,9 +671,10 @@ export default function PromocodesScreen({
                 {t(isLoadingMore ? "promocodes_loading_more" : "promocodes_load_more")}
               </button>
             )}
+            </ScrollEdgeAffordance>
           </>
         )}
-      </ScrollEdgeAffordance>
+      </main>
 
       {activationResult && (
         <SuccessDialog result={activationResult} onDismiss={() => setActivationResult(null)} />

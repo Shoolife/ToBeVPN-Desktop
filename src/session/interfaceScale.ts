@@ -24,6 +24,13 @@ export const DESKTOP_TITLEBAR_HEIGHT = 34;
 // the rest of the interface.
 export const DESIGN_WINDOW_OUTER_HEIGHT = DESIGN_WINDOW_HEIGHT + DESKTOP_TITLEBAR_HEIGHT;
 
+// Landscape frame for the sign-in screens, laid out like the TV client (QR on
+// the left, text and buttons on the right). Used only while signing in and
+// only when it fits the monitor; otherwise sign-in stays portrait.
+export const DESIGN_WIDE_WINDOW_WIDTH = 960;
+export const DESIGN_WIDE_WINDOW_HEIGHT = 540;
+export const DESIGN_WIDE_WINDOW_OUTER_HEIGHT = DESIGN_WIDE_WINDOW_HEIGHT + DESKTOP_TITLEBAR_HEIGHT;
+
 export const WINDOW_RENDER_SCALE_MIN = INTERFACE_SCALE_MIN * WINDOW_SCALE_BASE;
 export const WINDOW_RENDER_SCALE_MAX = INTERFACE_SCALE_MAX * WINDOW_SCALE_BASE;
 

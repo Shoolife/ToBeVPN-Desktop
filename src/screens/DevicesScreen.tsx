@@ -102,22 +102,6 @@ function DeviceCardSkeleton({ action = false }: { action?: boolean }) {
   );
 }
 
-function DevicesRefreshSkeleton({ showCurrent }: { showCurrent: boolean }) {
-  return (
-    <>
-      {showCurrent && (
-        <>
-          <div className="devices-section-title">{t("devices_this_device")}</div>
-          <DeviceCardSkeleton action />
-        </>
-      )}
-      <div className="devices-section-title">{t("devices_other_devices")}</div>
-      <DeviceCardSkeleton action />
-      <DeviceCardSkeleton action />
-    </>
-  );
-}
-
 export default function DevicesScreen({ onBack }: { onBack: () => void }) {
   const [devices, setDevices] = useState<LinkedDeviceDto[]>([]);
   const [maxDevices, setMaxDevices] = useState(0);
@@ -228,7 +212,9 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
         />
       </div>
 
-      <ScrollEdgeAffordance className="devices-content">
+      {/* Counter, this device and the section title stay put; only the list
+          of other devices scrolls. */}
+      <div className="devices-fixed">
         {error && (
           <button type="button" className="devices-error" onClick={() => void load(true)}>
             {error}
@@ -244,16 +230,17 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
           </span>
         </div>
 
-        {isInitialLoading ? (
-          <div className="spinner-center">
-            <Spinner size={32} />
-          </div>
-        ) : isRefreshing ? (
-          <DevicesRefreshSkeleton showCurrent={currentDevice !== undefined} />
-        ) : (
+        {!isInitialLoading && (
           <>
             {/* Current device */}
-            {currentDevice && (
+            {isRefreshing ? (
+              currentDevice !== undefined && (
+                <>
+                  <div className="devices-section-title">{t("devices_this_device")}</div>
+                  <DeviceCardSkeleton action />
+                </>
+              )
+            ) : currentDevice && (
               <>
                 <div className="devices-section-title">{t("devices_this_device")}</div>
                 <div className="devices-card devices-card--current">
@@ -272,35 +259,48 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
               </>
             )}
 
-            {/* Other devices */}
             <div className="devices-section-title">{t("devices_other_devices")}</div>
-            {otherDevices.length === 0 ? (
-              <div className="devices-empty">{t("devices_empty")}</div>
-            ) : (
-              otherDevices.map((d) => (
-                <div key={d.device_id} className="devices-card">
-                  <div className="devices-card__icon">{deviceTypeIcon(d)}</div>
-                  <div className="devices-card__info">
-                    <div className="devices-card__name">{deviceName(d)}</div>
-                    <div className="devices-card__meta">
-                      {deviceTypeLabel(d)}
-                      {d.platform ? ` \u00B7 ${d.platform}` : ""}
-                      {d.last_seen_at ? ` \u00B7 ${formatEpochSecondsDateDots(d.last_seen_at)}` : ""}
-                    </div>
-                  </div>
-                  <button
-                    className="devices-card__disconnect"
-                    onClick={() => handleUnlink(d.device_id)}
-                    disabled={unlinkingId !== null}
-                  >
-                    {t("devices_disconnect")}
-                  </button>
-                </div>
-              ))
-            )}
           </>
         )}
-      </ScrollEdgeAffordance>
+      </div>
+
+      {isInitialLoading ? (
+        <div className="spinner-center devices-spinner">
+          <Spinner size={32} />
+        </div>
+      ) : (
+        <ScrollEdgeAffordance className="devices-list" overlayFade>
+          {isRefreshing ? (
+            <>
+              <DeviceCardSkeleton action />
+              <DeviceCardSkeleton action />
+            </>
+          ) : otherDevices.length === 0 ? (
+            <div className="devices-empty">{t("devices_empty")}</div>
+          ) : (
+            otherDevices.map((d) => (
+              <div key={d.device_id} className="devices-card">
+                <div className="devices-card__icon">{deviceTypeIcon(d)}</div>
+                <div className="devices-card__info">
+                  <div className="devices-card__name">{deviceName(d)}</div>
+                  <div className="devices-card__meta">
+                    {deviceTypeLabel(d)}
+                    {d.platform ? ` \u00B7 ${d.platform}` : ""}
+                    {d.last_seen_at ? ` \u00B7 ${formatEpochSecondsDateDots(d.last_seen_at)}` : ""}
+                  </div>
+                </div>
+                <button
+                  className="devices-card__disconnect"
+                  onClick={() => handleUnlink(d.device_id)}
+                  disabled={unlinkingId !== null}
+                >
+                  {t("devices_disconnect")}
+                </button>
+              </div>
+            ))
+          )}
+        </ScrollEdgeAffordance>
+      )}
     </div>
   );
 }

@@ -236,6 +236,13 @@ body {
   inset: 0;
   overflow: hidden;
   background: var(--bg);
+  transition: opacity 200ms ease;
+}
+
+/* Window changing between portrait and landscape: the frame resizes empty and
+   the screen fades back in afterwards (see App.tsx, windowMorph). */
+html[data-window-morph] .app__content {
+  opacity: 0;
 }
 
 .app--desktop-frame {

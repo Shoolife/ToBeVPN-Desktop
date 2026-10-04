@@ -298,6 +298,83 @@
   background: rgba(255, 255, 255, 0.82);
 }
 
+/* Not measured yet: the chip keeps its size and shows a spinner (Android
+   LoadingPingChip). */
+.server-item__ping--loading {
+  min-height: 38px;
+  box-sizing: border-box;
+}
+
+.server-item__ping-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+  border-top-color: var(--text-muted);
+  animation: server-ping-spin 0.8s linear infinite;
+}
+
+@keyframes server-ping-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* "Checked N of M" card above the list while the full check runs; the
+   grid-rows trick animates it open and closed (Android AnimatedVisibility). */
+.servers-probe {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: scale(0.97);
+  transform-origin: top center;
+  flex-shrink: 0;
+  transition:
+    grid-template-rows 340ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 240ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.servers-probe--open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: none;
+}
+
+.servers-probe__inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.servers-probe__card {
+  margin: 4px 16px 8px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: var(--surface-2);
+}
+
+.servers-probe__text {
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+  color: var(--text);
+}
+
+.servers-probe__track {
+  position: relative;
+  margin-top: 8px;
+  height: 7px;
+  border-radius: 99px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-muted) 22%, transparent);
+}
+
+.servers-probe__fill {
+  height: 100%;
+  min-width: 7px;
+  border-radius: 99px;
+  background: var(--success);
+  transition: width 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 .server-item__ping-value {
   font-size: 16px;
   font-weight: 700;
@@ -320,7 +397,7 @@
 }
 
 .server-item__ping-unavailable {
-  max-width: 90px;
+  max-width: 120px;
   font-size: 12px;
   font-weight: 600;
   color: var(--danger);

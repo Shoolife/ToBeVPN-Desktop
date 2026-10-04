@@ -15,6 +15,7 @@ import Spinner from "./Spinner";
 import MaterialIcon from "./MaterialIcon";
 import { isBrowserPreviewRuntime } from "../session/browserPreview";
 import "./DiagnosticsPanel.css";
+import { applyEdgeFade } from "./ScrollEdgeAffordance";
 
 interface SheetDragState {
   pointerId: number;
@@ -69,7 +70,7 @@ function ScrollArrows({ top, bottom }: { top: boolean; bottom: boolean }) {
   );
 }
 
-function useScrollFades(open: boolean) {
+function useScrollFades(open: boolean, fadePx: number) {
   const ref = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(false);
   const [bottom, setBottom] = useState(false);
@@ -78,6 +79,7 @@ function useScrollFades(open: boolean) {
     if (!element) return;
     setTop(element.scrollTop > 1);
     setBottom(element.scrollTop < element.scrollHeight - element.clientHeight - 1);
+    applyEdgeFade(element, fadePx);
   };
   useEffect(() => {
     if (!open) return;
@@ -258,7 +260,7 @@ function ModalFrame({
 }
 
 function DiagnosticsInfoDialog({ onClose }: { onClose: () => void }) {
-  const fades = useScrollFades(true);
+  const fades = useScrollFades(true, 34);
   return (
     <ModalFrame onClose={onClose} className="diagnostics-modal--info">
       {(requestClose) => (
@@ -272,10 +274,6 @@ function DiagnosticsInfoDialog({ onClose }: { onClose: () => void }) {
               className="diagnostics-info-scroll"
               ref={fades.ref}
               onScroll={fades.update}
-              style={{
-                WebkitMaskImage: `linear-gradient(to bottom, ${fades.top ? "transparent" : "#000"} 0, #000 34px, #000 calc(100% - 34px), ${fades.bottom ? "transparent" : "#000"} 100%)`,
-                maskImage: `linear-gradient(to bottom, ${fades.top ? "transparent" : "#000"} 0, #000 34px, #000 calc(100% - 34px), ${fades.bottom ? "transparent" : "#000"} 100%)`,
-              }}
             >
               <p>{t("diagnostics_info_manual")}</p>
               <p>{t("diagnostics_info_persistence")}</p>
@@ -310,7 +308,7 @@ function DiagnosticHistoryDialog({
   onExport: (fileName: string) => void;
   onDelete: (log: DiagnosticLogFileInfo) => void;
 }) {
-  const fades = useScrollFades(true);
+  const fades = useScrollFades(true, 30);
   const today = new Date().toISOString().slice(0, 10);
   return (
     <ModalFrame onClose={onClose} className="diagnostics-modal--history" placement="bottom">
@@ -341,10 +339,6 @@ function DiagnosticHistoryDialog({
               className="diagnostics-history"
               ref={fades.ref}
               onScroll={fades.update}
-              style={{
-                WebkitMaskImage: `linear-gradient(to bottom, ${fades.top ? "transparent" : "#000"} 0, #000 30px, #000 calc(100% - 30px), ${fades.bottom ? "transparent" : "#000"} 100%)`,
-                maskImage: `linear-gradient(to bottom, ${fades.top ? "transparent" : "#000"} 0, #000 30px, #000 calc(100% - 30px), ${fades.bottom ? "transparent" : "#000"} 100%)`,
-              }}
             >
               {loading ? (
                 <div className="diagnostics-history__empty"><Spinner size={30} thickness={3} /></div>

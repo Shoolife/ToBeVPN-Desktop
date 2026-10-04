@@ -275,30 +275,7 @@ fn build_inbounds() -> Value {
 }
 
 fn build_outbounds(server: &ServerConfig) -> Value {
-    let mut user: serde_json::Map<String, Value> = serde_json::Map::new();
-    user.insert("id".into(), json!(server.uuid));
-    user.insert("level".into(), json!(8));
-    user.insert("encryption".into(), json!("none"));
-    if !server.flow.is_empty() {
-        user.insert("flow".into(), json!(server.flow));
-    }
-
-    let mut proxy = json!({
-        "tag": "proxy",
-        "protocol": "vless",
-        "settings": {
-            "vnext": [{
-                "address": server.address,
-                "port": server.port,
-                "users": [user]
-            }]
-        },
-        "streamSettings": build_stream_settings(server)
-    });
-
-    if server.network != "xhttp" {
-        proxy["mux"] = json!({ "enabled": false, "concurrency": -1 });
-    }
+    let proxy = build_proxy_outbound(server, "proxy");
 
     let mut direct = json!({
         "tag": "direct",
@@ -322,6 +299,37 @@ fn build_outbounds(server: &ServerConfig) -> Value {
             "settings": { "response": { "type": "http" } }
         }
     ])
+}
+
+/// The VLESS outbound for one server. Shared by the tunnel config and the
+/// server check (server_probe.rs), so a check exercises exactly the profile
+/// a connection would use.
+pub fn build_proxy_outbound(server: &ServerConfig, tag: &str) -> Value {
+    let mut user: serde_json::Map<String, Value> = serde_json::Map::new();
+    user.insert("id".into(), json!(server.uuid));
+    user.insert("level".into(), json!(8));
+    user.insert("encryption".into(), json!("none"));
+    if !server.flow.is_empty() {
+        user.insert("flow".into(), json!(server.flow));
+    }
+
+    let mut proxy = json!({
+        "tag": tag,
+        "protocol": "vless",
+        "settings": {
+            "vnext": [{
+                "address": server.address,
+                "port": server.port,
+                "users": [user]
+            }]
+        },
+        "streamSettings": build_stream_settings(server)
+    });
+
+    if server.network != "xhttp" {
+        proxy["mux"] = json!({ "enabled": false, "concurrency": -1 });
+    }
+    proxy
 }
 
 fn build_stream_settings(server: &ServerConfig) -> Value {

@@ -101,7 +101,13 @@ if (!appSource.includes("mon.workArea.size.toLogical(")) {
 }
 // The titlebar sits inside the scaled frame, so its compensation has to be
 // part of the design height rather than a constant added afterwards.
-if (!appSource.includes("DESIGN_WINDOW_OUTER_HEIGHT * windowScale")) {
+// The sign-in screens may use a landscape frame; both frames must still use an
+// outer (titlebar-including) design height.
+const scalesOuterHeight =
+  appSource.includes("DESIGN_WINDOW_OUTER_HEIGHT * windowScale") ||
+  (appSource.includes("designOuterHeight * windowScale") &&
+    /let designOuterHeight = wantWideWindow \? DESIGN_WIDE_WINDOW_OUTER_HEIGHT : DESIGN_WINDOW_OUTER_HEIGHT;/.test(appSource));
+if (!scalesOuterHeight) {
   failures.push(`${APP_SOURCE}: window height must scale the outer design height`);
 }
 if (appSource.includes("DESIGN_WINDOW_HEIGHT")) {

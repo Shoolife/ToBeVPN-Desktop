@@ -678,6 +678,11 @@ impl VpnManager {
         }
     }
 
+    /// The bundled Xray, also used by the server check (server_probe.rs).
+    pub fn xray_binary(&self) -> PathBuf {
+        self.resolve_bin("xray")
+    }
+
     /// Locate a sidecar binary. Tauri renames externalBin to drop the triple
     /// suffix in production, but in dev it stays — handle both.
     fn resolve_bin(&self, name: &str) -> PathBuf {

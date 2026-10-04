@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { exit } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { t, tf, getSavedLang, type StringKey } from "../i18n";
+import { t, tf, formatDecimal, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
 import SubscriptionExpiryText from "../components/SubscriptionExpiryText";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
@@ -46,6 +46,8 @@ import {
 } from "../session/subscriptionReminderSnooze";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
+import MaterialIcon from "../components/MaterialIcon";
+import { dismissPaymentSuccess, usePaymentSuccessVisible } from "../session/notifications";
 
 function countryName(code: string | null | undefined): string {
   if (!code) return "";
@@ -91,9 +93,9 @@ function formatSessionBytes(bytes: number): string {
   const isRu = getSavedLang() === "ru";
   const gb = isRu ? "ГБ" : "GB";
   const mb = isRu ? "МБ" : "MB";
-  if (bytes < 1024 * 1024) return `0,00 ${mb}`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} ${mb}`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ${gb}`;
+  if (bytes < 1024 * 1024) return `${formatDecimal(0, 2)} ${mb}`;
+  if (bytes < 1024 * 1024 * 1024) return `${formatDecimal(bytes / (1024 * 1024), 1)} ${mb}`;
+  return `${formatDecimal(bytes / (1024 * 1024 * 1024), 2)} ${gb}`;
 }
 
 function formatElapsed(seconds: number): string {
@@ -109,8 +111,8 @@ function formatTrafficBytes(bytes: number): string {
   const gb = isRu ? "ГБ" : "GB";
   const mb = isRu ? "МБ" : "MB";
   if (bytes < 1024 * 1024) return `0 ${mb}`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} ${mb}`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} ${gb}`;
+  if (bytes < 1024 * 1024 * 1024) return `${formatDecimal(bytes / (1024 * 1024), 1)} ${mb}`;
+  return `${formatDecimal(bytes / (1024 * 1024 * 1024), 1)} ${gb}`;
 }
 
 function trafficProgressColor(progress: number): string {
@@ -120,7 +122,8 @@ function trafficProgressColor(progress: number): string {
 }
 
 function planHint(plan: UserPlan, expiresAt: number | null): ReactNode {
-  if (expiresAt && (plan === "PAID" || plan === "ADMIN")) {
+  // A trial has an end date too (3 days); show it the same way as a paid plan.
+  if (expiresAt && (plan === "PAID" || plan === "ADMIN" || plan === "FREE_TRIAL")) {
     return (
       <SubscriptionExpiryText
         expiresAt={expiresAt}
@@ -576,8 +579,11 @@ export default function HomeScreen({
       ? "home__status-label--on"
       : "";
 
+  const paymentSuccessVisible = usePaymentSuccessVisible();
+
   return (
     <div className="home-root">
+      {paymentSuccessVisible && <PaymentSuccessBanner onDismiss={dismissPaymentSuccess} />}
       <div className="home-topbar">
         <div className="home-topbar__brand">
           <span className="home-topbar__title">ToBeVPN</span>
@@ -917,11 +923,11 @@ function UpdateRequiredDialog() {
       ? Math.min(updateState.progress.downloaded / updateState.progress.total, 1)
       : 0;
   const downloadedMb = downloading
-    ? (updateState.progress.downloaded / (1024 * 1024)).toFixed(1)
-    : "0.0";
+    ? formatDecimal(updateState.progress.downloaded / (1024 * 1024), 1)
+    : formatDecimal(0, 1);
   const totalMb =
     downloading && updateState.progress.total > 0
-      ? (updateState.progress.total / (1024 * 1024)).toFixed(1)
+      ? formatDecimal(updateState.progress.total / (1024 * 1024), 1)
       : null;
   const indeterminate = downloading && updateState.progress.indeterminate;
 
@@ -1014,6 +1020,42 @@ function UpdateRequiredDialog() {
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** Green "Subscription activated" banner over the top of the home screen;
+ *  disappears by itself after a few seconds. */
+const PAYMENT_SUCCESS_VISIBLE_MS = 6000;
+const PAYMENT_SUCCESS_EXIT_MS = 300;
+
+function PaymentSuccessBanner({ onDismiss }: { onDismiss: () => void }) {
+  const [leaving, setLeaving] = useState(false);
+  const onDismissRef = useRef(onDismiss);
+  onDismissRef.current = onDismiss;
+
+  useEffect(() => {
+    const leaveTimer = window.setTimeout(() => setLeaving(true), PAYMENT_SUCCESS_VISIBLE_MS);
+    const doneTimer = window.setTimeout(
+      () => onDismissRef.current(),
+      PAYMENT_SUCCESS_VISIBLE_MS + PAYMENT_SUCCESS_EXIT_MS,
+    );
+    return () => {
+      window.clearTimeout(leaveTimer);
+      window.clearTimeout(doneTimer);
+    };
+  }, []);
+
+  return (
+    <div
+      className={`home-payment-success ${leaving ? "home-payment-success--leaving" : ""}`}
+      role="status"
+    >
+      <MaterialIcon name="checkCircle" size={22} className="home-payment-success__icon" />
+      <div className="home-payment-success__text">
+        <div className="home-payment-success__title">{t("payment_success_title")}</div>
+        <div className="home-payment-success__desc">{t("payment_success_description")}</div>
       </div>
     </div>
   );

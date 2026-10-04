@@ -36,6 +36,8 @@ import {
   getSessionGeneration,
   getSessionSecrets,
   invalidateSessionWork,
+  isDemoSession,
+  markDemoIdentity,
   markLinkedIdentity,
   subscribeSession,
   updateSession,
@@ -53,6 +55,7 @@ import {
   reconnectVpnWithFreshSubscription,
 } from "./vpnState";
 import { isBrowserPreviewRuntime } from "./browserPreview";
+import { dismissPaymentSuccess, notifyPaymentSucceeded } from "./notifications";
 import {
   fetchSubscriptionProfile,
   pingSubscriptionUrl,
@@ -867,6 +870,17 @@ export async function pollDevicePairing(code: string): Promise<DevicePairingPoll
  * Deep-link auth already binds the current device-session server-side.
  * We only need to seed local identity and refresh subscription metadata.
  */
+/**
+ * Signs this install in with a local-only identity that the backend never
+ * sees. Reached only through a hidden gesture on the pairing screen so a
+ * store reviewer can get past the Telegram login wall, mirroring the TV
+ * client. Every screen behind it shows an empty subscription and server list.
+ */
+export function completeDemoLogin(): void {
+  clearPendingAuthToken();
+  markDemoIdentity();
+}
+
 export async function authenticateWithTelegramId(
   telegramId: number,
   preferredShortUuid?: string | null,
@@ -918,6 +932,7 @@ export async function authenticateWithTelegramId(
  */
 export async function syncSubscription(opts: { force?: boolean } = {}): Promise<void> {
   const { force = false } = opts;
+  if (isDemoSession()) return;
   const generation = getSessionGeneration();
   if (syncInFlight && syncInFlightGeneration === generation) return syncInFlight;
   if (!force) {
@@ -1202,6 +1217,7 @@ async function runPendingPurchaseRefresh(
     if (!isCurrent()) return;
     if (paymentLooksApplied(initial, getSession())) {
       clearPendingPurchase();
+      notifyPaymentSucceeded();
       return;
     }
     await sleepMs(PURCHASE_REFRESH_INTERVAL_MS);
@@ -1215,6 +1231,7 @@ async function runPendingPurchaseRefresh(
     if (!isCurrent()) return;
     if (paymentLooksApplied(initial, getSession())) {
       clearPendingPurchase();
+      notifyPaymentSucceeded();
       return;
     }
   }
@@ -1387,7 +1404,7 @@ export function startDeviceLinkPolling() {
   const tick = async () => {
     if (generation !== linkPollGeneration) return;
     const session = getSession();
-    if (!session.isLinked) {
+    if (!session.isLinked || isDemoSession(session)) {
       stopDeviceLinkPolling();
       return;
     }
@@ -1455,7 +1472,7 @@ export async function logout(): Promise<void> {
     // ignore — proceed even if backend already stopped
   }
   if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
-  if (isLinked) {
+  if (isLinked && !isDemoSession()) {
     try {
       await unlinkCurrentDevice();
     } catch {
@@ -1477,6 +1494,7 @@ export async function logout(): Promise<void> {
   if (shortUuid) writeCachedSubscriptionUrl(shortUuid, null);
   clearSubSyncTimestamp();
   clearDeviceSession();
+  dismissPaymentSuccess();
 }
 
 // --- Pass-through helpers used by screens ---

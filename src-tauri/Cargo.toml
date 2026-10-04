@@ -1,6 +1,6 @@
 [package]
 name = "tobevpn-desktop"
-version = "1.0.85"
+version = "1.0.86"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -40,6 +40,7 @@ base64 = "0.22"
 infer = "0.19"
 minisign-verify = "0.2"
 tempfile = "3"
+tauri-plugin-notification = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
@@ -48,6 +49,8 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tauri-plugin-autostart = "2"
+# Linux notifications go through notify-rust directly (see notifications.rs).
+notify-rust = "4.11"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

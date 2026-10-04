@@ -2,6 +2,10 @@ mod autostart;
 mod diagnostics;
 #[cfg(target_os = "linux")]
 pub mod linux_update;
+mod notifications;
+mod server_probe;
+mod settings_transfer;
+mod speed_test;
 mod vpn;
 
 use keyring::{Entry, Error as KeyringError};
@@ -32,7 +36,7 @@ use vpn::state::{PingHostMapping, TrafficStats, VpnState};
 use vpn::ConnectAttempt;
 
 /// Shared VPN manager state.
-struct AppVpn(Arc<Mutex<Option<VpnManager>>>);
+pub(crate) struct AppVpn(pub(crate) Arc<Mutex<Option<VpnManager>>>);
 
 /// Serializes start/stop pipelines so a user mashing the Connect button
 /// can't fire three concurrent xray spawns. Held for the duration of one
@@ -469,8 +473,21 @@ fn detect_hardware_model() -> Option<String> {
     None
 }
 
+/// Debug builds only, with TOBEVPN_DEV_ISOLATED set: lets a dev copy run next
+/// to an installed ToBeVPN for UI checks. It keeps its own keyring entry and
+/// stats file, skips the stale-VPN cleanup and refuses VPN start/stop, so the
+/// running app's session and tunnel are never touched.
+fn dev_isolated() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("TOBEVPN_DEV_ISOLATED").is_some()
+}
+
 fn secure_session_entry() -> Result<Entry, String> {
-    Entry::new(SECURE_SESSION_SERVICE, SECURE_SESSION_ACCOUNT)
+    let service = if dev_isolated() {
+        "network.tobevpn.desktop.devtest"
+    } else {
+        SECURE_SESSION_SERVICE
+    };
+    Entry::new(service, SECURE_SESSION_ACCOUNT)
         .map_err(|e| format!("Could not open secure session storage: {e}"))
 }
 
@@ -523,7 +540,14 @@ fn clear_secure_session() -> Result<(), String> {
 fn desktop_stats_path() -> Result<PathBuf, String> {
     dirs::data_local_dir()
         .ok_or_else(|| "Could not resolve the per-user local data directory".to_string())
-        .map(|directory| directory.join("ToBeVPN").join("stats.json"))
+        .map(|directory| {
+            let folder = if dev_isolated() {
+                "ToBeVPN-devtest"
+            } else {
+                "ToBeVPN"
+            };
+            directory.join(folder).join("stats.json")
+        })
 }
 
 fn validate_desktop_stats_payload(payload: &str) -> Result<(), String> {
@@ -793,6 +817,9 @@ async fn start_vpn(
     state: tauri::State<'_, AppVpn>,
     pipeline: tauri::State<'_, VpnPipelineLock>,
 ) -> Result<(), String> {
+    if dev_isolated() {
+        return Err("VPN is disabled in an isolated dev instance".into());
+    }
     // Validate untrusted renderer/backend data before touching native network
     // state. This is intentionally structural and allows private/IPv6 servers.
     server.validate()?;
@@ -819,6 +846,9 @@ async fn stop_vpn(
     state: tauri::State<'_, AppVpn>,
     pipeline: tauri::State<'_, VpnPipelineLock>,
 ) -> Result<(), String> {
+    if dev_isolated() {
+        return Err("VPN is disabled in an isolated dev instance".into());
+    }
     // Stop invalidates a start immediately, even while that start still owns
     // the serialized native pipeline.
     ConnectAttempt::cancel_current(&pipeline.generation);
@@ -900,6 +930,7 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Deep-link `tobevpn://open` handling: we deliberately do NOT use
             // tauri-plugin-deep-link. Its init() writes a user-level
@@ -1067,23 +1098,31 @@ pub fn run() {
 
             // Windows and Linux create the window hidden to avoid an early
             // unstyled flash. Once setup is complete every launch, including
-            // an OS autostart launch, presents the main window.
+            // an OS autostart launch, presents the main window. Its contents
+            // stay transparent until the UI has given it the startup size
+            // (see src/session/windowPresentation.ts). Showing the window
+            // only after the UI loaded instead made GTK pin its height.
             show_main_window(app.handle());
 
             // Recover from a previous unclean shutdown (crash / SIGKILL / dev HMR
             // restart). If leftover ip rules + TUN are present, internet is broken
             // until they're removed. Run the cleanup off the setup thread so the
             // window opens immediately even if pkexec takes a moment.
-            tauri::async_runtime::spawn(async move {
-                let guard = shared.lock().await;
-                if let Some(mgr) = guard.as_ref() {
-                    mgr.cleanup_stale_state().await;
-                }
-            });
+            if !dev_isolated() {
+                tauri::async_runtime::spawn(async move {
+                    let guard = shared.lock().await;
+                    if let Some(mgr) = guard.as_ref() {
+                        mgr.cleanup_stale_state().await;
+                    }
+                });
+            }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            notifications::show_system_notification,
+            server_probe::probe_server_profiles,
+            server_probe::cancel_server_probe,
             get_hostname,
             get_hwid,
             record_window_metrics,
@@ -1115,6 +1154,9 @@ pub fn run() {
             diagnostics::list_diagnostic_logs,
             diagnostics::export_diagnostic_log,
             diagnostics::delete_diagnostic_log,
+            speed_test::start_speed_test,
+            speed_test::cancel_speed_test,
+            settings_transfer::export_settings_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

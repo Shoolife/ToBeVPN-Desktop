@@ -4,6 +4,7 @@ import { t } from "../i18n";
 import { CURRENT_RELEASE_NOTES, type ReleaseHighlight } from "../releaseNotes";
 import MaterialIcon from "./MaterialIcon";
 import "./WhatsNewDialog.css";
+import { applyEdgeFade } from "./ScrollEdgeAffordance";
 
 const CLOSE_ANIMATION_MS = 180;
 
@@ -33,6 +34,7 @@ export default function WhatsNewDialog({ onClose }: { onClose: () => void }) {
     if (!element) return;
     setListTopFade(element.scrollTop > 1);
     setListBottomFade(element.scrollTop < element.scrollHeight - element.clientHeight - 1);
+    applyEdgeFade(element, 34);
   }, []);
 
   useEffect(() => {
@@ -129,10 +131,6 @@ export default function WhatsNewDialog({ onClose }: { onClose: () => void }) {
             className="whats-new-dialog__list"
             ref={listRef}
             onScroll={updateListFades}
-            style={{
-              WebkitMaskImage: `linear-gradient(to bottom, ${listTopFade ? "transparent" : "#000"} 0, #000 34px, #000 calc(100% - 34px), ${listBottomFade ? "transparent" : "#000"} 100%)`,
-              maskImage: `linear-gradient(to bottom, ${listTopFade ? "transparent" : "#000"} 0, #000 34px, #000 calc(100% - 34px), ${listBottomFade ? "transparent" : "#000"} 100%)`,
-            }}
           >
             {CURRENT_RELEASE_NOTES.highlights.map((highlight) => (
               <Highlight key={highlight.titleKey} highlight={highlight} />

@@ -751,6 +751,11 @@ impl VpnManager {
         *self.state.lock().await = state;
     }
 
+    /// The bundled Xray, also used by the server check (server_probe.rs).
+    pub fn xray_binary(&self) -> PathBuf {
+        self.resolve_bin("xray")
+    }
+
     fn resolve_bin(&self, name: &str) -> PathBuf {
         let plain = self.bin_dir.join(name);
         if plain.exists() {

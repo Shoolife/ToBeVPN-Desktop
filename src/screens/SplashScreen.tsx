@@ -9,6 +9,7 @@ import {
   type DesktopUpdateState,
 } from "../session/updateStore";
 import "./SplashScreen.css";
+import { mainWindowPresented } from "../session/windowPresentation";
 
 type StartupPhase = "checking" | "starting" | "failed" | "relaunching";
 type StartupIcon = "check" | "download" | "install" | "launch" | "restart" | "warning";
@@ -29,9 +30,12 @@ interface StartupPresentation {
 export default function SplashScreen({
   onDone,
   browserPreview = false,
+  wide = false,
 }: {
   onDone: () => void;
   browserPreview?: boolean;
+  /** Landscape window (startup that leads to sign-in): shield left, text right. */
+  wide?: boolean;
 }) {
   const onDoneRef = useRef(onDone);
   const updateState = useUpdateState();
@@ -39,6 +43,18 @@ export default function SplashScreen({
     !browserPreview && getAutoUpdateEnabled() ? "checking" : "starting",
   );
   const [leaving, setLeaving] = useState(false);
+  const [presented, setPresented] = useState(false);
+
+  // Keep the entrance animation paused while the native window is hidden.
+  useEffect(() => {
+    let active = true;
+    void mainWindowPresented.then(() => {
+      if (active) setPresented(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     onDoneRef.current = onDone;
@@ -53,7 +69,8 @@ export default function SplashScreen({
     let doneTimer: number | null = null;
 
     void (async () => {
-      const startedAt = performance.now();
+      // The hold time counts from when the window is actually on screen.
+      const presentedAt = mainWindowPresented.then(() => performance.now());
 
       if (getAutoUpdateEnabled()) {
         setPhase("checking");
@@ -70,6 +87,10 @@ export default function SplashScreen({
 
         if (updateResult === "failed") {
           setPhase("failed");
+          // An offline check can fail before the window is even shown; the
+          // error must stay on screen for its full hold time.
+          await mainWindowPresented;
+          if (cancelled) return;
           await new Promise<void>((resolve) => {
             failureTimer = window.setTimeout(resolve, STARTUP_FAILURE_HOLD_MS);
           });
@@ -91,6 +112,8 @@ export default function SplashScreen({
       }
       if (cancelled) return;
 
+      const startedAt = await presentedAt;
+      if (cancelled) return;
       const remainingDelay = Math.max(
         0,
         SPLASH_HOLD_MS - (performance.now() - startedAt),
@@ -119,61 +142,54 @@ export default function SplashScreen({
   );
 
   return (
-    <div className={`splash-root ${leaving ? "splash-root--leaving" : ""}`}>
+    <div className={`splash-root ${wide ? "splash-root--wide" : ""} ${presented ? "" : "splash-root--waiting"} ${leaving ? "splash-root--leaving" : ""}`}>
       <div className="splash-content">
+        <div className="splash-brand">
         <div className="splash-shield-wrap">
           <div className="splash-glow" />
-          <svg viewBox="0 0 100 100" className="splash-shield">
+          {/* The app icon's own shield and chevrons (assets/onboarding_logo.svg),
+              framed so the shield keeps the same size in the 300px box. */}
+          <svg viewBox="-176 -176 2400 2400" className="splash-shield">
             <defs>
               <linearGradient
                 id="shieldGradient"
-                x1="22%"
-                y1="12%"
-                x2="78%"
-                y2="88%"
+                x1="549.891"
+                y1="218.152"
+                x2="1560.96"
+                y2="1587.11"
+                gradientUnits="userSpaceOnUse"
               >
-                <stop offset="0%" stopColor="#00E5A0" />
-                <stop offset="50%" stopColor="#00BCD4" />
-                <stop offset="100%" stopColor="#2196F3" />
+                <stop offset="0" stopColor="#00deac" />
+                <stop offset="1" stopColor="#0fa2ed" />
               </linearGradient>
             </defs>
             <path
               className="splash-shield-path"
-              d="M50,12 C55,12 78,18 78,22 C78,50 72,68 50,88 C28,68 22,50 22,22 C22,18 45,12 50,12 Z"
-              stroke="url(#shieldGradient)"
-              strokeWidth="1.6"
-              fill="none"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+              fill="url(#shieldGradient)"
+              d="M1020.62 114.132c5.15-1.058 11.58 1.784 16.72 3.698 48.85 18.194 97.69 36.573 146.49 54.87l291.69 109.375 148.85 55.858c22.61 8.47 62.9 22.22 83.09 32.606 2.6 9.345 4.48 38.251 5.55 49.565 3.71 37.306 6.91 74.662 9.58 112.058 17.95 249.523 25.16 638.098-73.79 866.698-86.26 199.28-277.42 347.51-460.86 453.51a1593 1593 0 0 1-121.21 63.59c-12.68 5.92-26.86 12.9-39.78 18-6.35 3.18-43.234-16.67-51.296-20.53a1684 1684 0 0 1-85.397-43.57c-188.935-103.19-405.597-268.34-491.104-470.94-51.14-121.18-72.569-281.31-79.821-412.507-.532-12.659-2.996-26.079-3.165-38.648-.443-33.112-.164-65.467-3.572-98.502-1.354-13.131-.543-29.009-.674-42.335-.223-22.862 3.079-46.157 3.116-69.117.491-24.979.45-49.81.826-74.77.162-10.73 2.43-22.414 2.758-33.076 1.24-40.362 4.397-80.241 7.64-120.467l7.994-90.383c1.108-11.615 2.528-39.21 6.222-48.438 8.059-6.148 47.52-19.617 59.299-24.04l112.175-42.013z"
             />
             <path
               className="splash-chevron-trail"
-              d="M34,41 L46,50 L34,59"
-              stroke="#FFFFFF"
-              strokeOpacity="0.4"
-              strokeWidth="1.35"
-              fill="none"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+              fill="#7ee1e5"
+              d="M590.122 726.17c12.033-.873 21.129-.744 31.257 7.116 24.701 19.171 48.739 39.299 72.952 59.101l136.731 111.927 73.019 59.656c20.632 16.838 51.4 34.59 48.577 64.32a40.1 40.1 0 0 1-10.801 23.66c-8.411 9-27.246 23.53-37.496 31.86l-64.466 52.65c-71.099 58.29-143.662 119.01-215.462 176.22-10.466 7.15-20.336 11.31-33.338 9.37a43 43 0 0 1-28.656-17.84 41.21 41.21 0 0 1-6.693-32.41c2.036-9.78 4.542-14.39 11.568-21.09 15.167-14.48 32.737-27.95 49.007-41.25l89.945-73.63 88.104-72.05c12.784-10.46 36.531-31 49.305-39.27L657.674 872.397l-56.325-46.004c-11.302-9.223-23.61-18.454-33.879-28.723-25.091-25.092-11.201-63.934 22.652-71.5"
             />
             <path
               className="splash-chevron-main"
-              d="M44,38 L60,50 L44,62"
-              stroke="#FFFFFF"
-              strokeWidth="1.9"
-              fill="none"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+              fill="#fefefe"
+              d="M824.792 618.376c3.726.264 7.433.74 11.104 1.427 11.614 2.133 19.989 6.167 29.146 13.557 19.951 16.102 39.586 33.512 59.087 50.203l118.851 101.926 148.78 127.424c15.78 13.506 76.14 62.944 85.27 76.884a63.23 63.23 0 0 1 8.31 48.593c-2.57 11.13-9.11 22.97-17.44 30.65-24.71 22.76-51.58 44.87-77.11 66.73l-151.22 129.69-120.74 103.43c-16.468 14.11-47.033 42.33-63.987 52.77-45.527 23.33-96.587-10.76-93.643-61.13 1.973-33.75 33.521-53.64 57.303-73.94l64.424-55.15 241.873-207.19c-24.35-23.17-62.11-53.521-88.32-75.985L865.073 801.251l-52.177-44.493c-22.363-18.954-47.921-35.776-51.561-67.076a61.88 61.88 0 0 1 13.329-46.088c13.53-17.028 29.239-22.964 50.128-25.218"
             />
           </svg>
         </div>
 
-        <div className="splash-text">
-          <div className="splash-title">ToBeVPN</div>
-          <div className="splash-tagline">{t("splash_tagline")}</div>
+          <div className="splash-text">
+            <div className="splash-title">ToBeVPN</div>
+            <div className="splash-tagline">{t("splash_tagline")}</div>
+          </div>
         </div>
 
-        <StartupStatusCard presentation={presentation} />
+        <div className="splash-side">
+          <StartupStatusCard presentation={presentation} />
+        </div>
       </div>
     </div>
   );
@@ -436,6 +452,6 @@ function formatMegabytes(bytes: number): string {
   }).format(bytes / (1024 * 1024));
 }
 
-const SPLASH_HOLD_MS = 1600;
-const SPLASH_EXIT_MS = 400;
+const SPLASH_HOLD_MS = 3200;
+const SPLASH_EXIT_MS = 600;
 const STARTUP_FAILURE_HOLD_MS = 1800;
