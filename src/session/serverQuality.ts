@@ -460,6 +460,8 @@ export function selectBestVerifiedVpnServer(
   servers: VpnServer[],
   verifiedDelays: Map<string, number>,
 ): MeasuredVpnServer | null {
+  // Nothing checked yet: the caller falls back to the TCP ranking.
+  if (verifiedDelays.size === 0) return null;
   const records = readState().records;
   const now = Date.now();
   const ranked = servers

@@ -678,6 +678,23 @@ impl VpnManager {
         }
     }
 
+    /// The physical adapter to bind traffic that must not enter the tunnel
+    /// (the server check); the same alias the direct outbound uses. None
+    /// while no tunnel is up.
+    pub async fn tunnel_bypass_interface(&self) -> Option<String> {
+        if !matches!(
+            self.get_state().await,
+            VpnState::Connected | VpnState::Connecting
+        ) {
+            return None;
+        }
+        let route = get_default_route()?;
+        route
+            .interface_alias
+            .clone()
+            .or_else(|| windows_routes::interface_alias_by_index(route.interface_index))
+    }
+
     /// The bundled Xray, also used by the server check (server_probe.rs).
     pub fn xray_binary(&self) -> PathBuf {
         self.resolve_bin("xray")

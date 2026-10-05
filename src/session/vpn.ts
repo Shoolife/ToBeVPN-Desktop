@@ -1,7 +1,8 @@
 // VPN engine bridge — calls Rust Tauri commands for xray-core + tun2socks.
 import { invoke } from "@tauri-apps/api/core";
 import { CONTROL_PLANE_BYPASS_HOSTS } from "../api/config";
-import { loadRoutingSettings, type RoutingMode } from "./routingSettings";
+import { loadRoutingServiceDomains } from "./routingDatabase";
+import { loadRoutingSettings, serviceRoutingLists, type RoutingMode } from "./routingSettings";
 
 export interface ServerVpnConfig {
   address: string;
@@ -17,6 +18,11 @@ export interface ServerVpnConfig {
   path?: string;
   mode?: string;
   spx?: string;
+  host?: string;
+  alpn?: string;
+  header_type?: string;
+  service_name?: string;
+  extra?: string;
   bypass_hosts?: string[];
   routing_mode?: RoutingMode;
   select_all_services?: boolean;
@@ -24,6 +30,52 @@ export interface ServerVpnConfig {
   excluded_service_domains?: string[];
   direct_domains?: string[];
   proxy_domains?: string[];
+}
+
+/** Every profile field the native side needs to build the outbound. One
+ *  place, so a new transport field cannot be forgotten at a call site. */
+export interface ServerProfileFields {
+  address: string;
+  port: number;
+  uuid: string;
+  flow?: string | null;
+  security?: string | null;
+  sni?: string | null;
+  fingerprint?: string | null;
+  public_key?: string | null;
+  short_id?: string | null;
+  network?: string | null;
+  path?: string | null;
+  mode?: string | null;
+  spx?: string | null;
+  host?: string | null;
+  alpn?: string | null;
+  header_type?: string | null;
+  service_name?: string | null;
+  extra?: string | null;
+}
+
+export function serverProfileConfig(server: ServerProfileFields): ServerVpnConfig {
+  return {
+    address: server.address,
+    port: server.port,
+    uuid: server.uuid,
+    flow: server.flow ?? "",
+    security: server.security ?? "",
+    sni: server.sni ?? "",
+    fingerprint: server.fingerprint ?? "",
+    public_key: server.public_key ?? "",
+    short_id: server.short_id ?? "",
+    network: server.network ?? "",
+    path: server.path ?? "",
+    mode: server.mode ?? "",
+    spx: server.spx ?? "",
+    host: server.host ?? "",
+    alpn: server.alpn ?? "",
+    header_type: server.header_type ?? "",
+    service_name: server.service_name ?? "",
+    extra: server.extra ?? "",
+  };
 }
 
 export type VpnStatus = "Disconnected" | "Connecting" | "Connected" | "Disconnecting" | "Error";
@@ -40,14 +92,20 @@ export interface TrafficStats {
 
 export async function startVpn(server: ServerVpnConfig): Promise<void> {
   const routing = loadRoutingSettings();
+  // "Selective" needs the service database to send the domains whose state
+  // differs from their zone; without it the stored lists still work.
+  const database = routing.mode === "selective"
+    ? await loadRoutingServiceDomains().catch(() => null)
+    : null;
+  const services = serviceRoutingLists(routing, database);
   await invoke("start_vpn", {
     server: {
       ...server,
       bypass_hosts: CONTROL_PLANE_BYPASS_HOSTS,
       routing_mode: routing.mode,
       select_all_services: routing.selectAllServices,
-      selected_service_domains: routing.selectedServiceDomains,
-      excluded_service_domains: routing.excludedServiceDomains,
+      selected_service_domains: services.selected,
+      excluded_service_domains: services.excluded,
       direct_domains: routing.directDomains,
       proxy_domains: routing.proxyDomains,
     },

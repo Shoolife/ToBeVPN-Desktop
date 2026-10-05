@@ -10,6 +10,7 @@ import {
   getVpnState as engineGetState,
   getTrafficStats,
   type ServerVpnConfig,
+  serverProfileConfig,
 } from "./vpn";
 import {
   sessionStart as statsSessionStart,
@@ -37,9 +38,11 @@ import {
   recordServerTraffic,
   recordServerTunnelFailure,
   recordServerTunnelHealthy,
+  selectBestVerifiedVpnServer,
   selectBestVpnServer,
 } from "./serverQuality";
 import { recordDiagnosticEvent } from "./diagnostics";
+import { getCachedProfileDelays } from "./serverProbe";
 
 // Poll access blocking frequently while keeping the device `last_seen_at`
 // heartbeat at its normal cadence. /api/device/register is the only
@@ -147,21 +150,7 @@ interface ActiveTunnelProbe {
 let activeTunnelProbe: ActiveTunnelProbe | null = null;
 
 function toServerVpnConfig(server: Awaited<ReturnType<typeof fetchVpnServers>>[number]): ServerVpnConfig {
-  return {
-    address: server.address,
-    port: server.port,
-    uuid: server.uuid,
-    flow: server.flow,
-    security: server.security,
-    sni: server.sni,
-    fingerprint: server.fingerprint,
-    public_key: server.public_key,
-    short_id: server.short_id,
-    network: server.network,
-    path: server.path,
-    mode: server.mode,
-    spx: server.spx,
-  };
+  return serverProfileConfig(server);
 }
 
 function canUseStaleServerConfig(server: ServerVpnConfig): boolean {
@@ -204,10 +193,15 @@ async function refreshServerConfigAfterAccessCheck(
     throw new Error(t("servers_empty"));
   }
   const automatic = loadAutomaticServerSelection();
+  const excludedId = options.avoidCurrentInAuto ? stableServerId(server) : undefined;
+  const verifiedCandidates = excludedId
+    ? availableServers.filter((candidate) => stableServerId(candidate) !== excludedId)
+    : availableServers;
+  // AUTO: a server confirmed by the last full check first (Android:
+  // VpnConnectionManager), then the TCP ranking.
   const fresh = automatic
-    ? await selectBestVpnServer(availableServers, {
-        excludeServerId: options.avoidCurrentInAuto ? stableServerId(server) : undefined,
-      })
+    ? selectBestVerifiedVpnServer(verifiedCandidates, getCachedProfileDelays(verifiedCandidates)) ??
+      await selectBestVpnServer(availableServers, { excludeServerId: excludedId })
     : availableServers.find(
         (candidate) =>
           candidate.address === server.address &&

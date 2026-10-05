@@ -23,6 +23,11 @@ export interface ServerVpnConfigIdentity {
   path?: string | null;
   mode?: string | null;
   spx?: string | null;
+  host?: string | null;
+  alpn?: string | null;
+  header_type?: string | null;
+  service_name?: string | null;
+  extra?: string | null;
 }
 
 export function stableServerId(
@@ -82,6 +87,11 @@ export function hasSameVpnConfig(
     value(a.network) === value(b.network) &&
     value(a.path) === value(b.path) &&
     value(a.mode) === value(b.mode) &&
-    value(a.spx) === value(b.spx)
+    value(a.spx) === value(b.spx) &&
+    value(a.host) === value(b.host) &&
+    value(a.alpn) === value(b.alpn) &&
+    value(a.header_type) === value(b.header_type) &&
+    value(a.service_name) === value(b.service_name) &&
+    value(a.extra) === value(b.extra)
   );
 }

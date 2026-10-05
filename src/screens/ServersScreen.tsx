@@ -24,6 +24,7 @@ import {
 import {
   cancelServerProbe,
   probeServerProfiles,
+  serverProfileKey,
   type ServerProbeProgress,
 } from "../session/serverProbe";
 import Spinner from "../components/Spinner";
@@ -55,6 +56,9 @@ function loadErrorText(error: unknown): string {
   console.warn("[servers] load failed", error);
   return t("servers_load_error_details");
 }
+
+/** How long the Refresh check waits for the bot's subscription sync. */
+const SUBSCRIPTION_SYNC_WAIT_MS = 4000;
 
 /**
  * After an explicit end-to-end check, confirmed servers come first by real
@@ -220,6 +224,9 @@ export default function ServersScreen({
   const profileDelaysRef = useRef(new Map<string, number>());
   const probeGenRef = useRef(0);
   const probingRef = useRef(false);
+  const pendingServersRef = useRef<VpnServer[] | null>(null);
+  // Checks the progress card belongs to (quiet follow-up checks excluded).
+  const progressGenRef = useRef(0);
   const probing = probeProgress !== null && profileMeasured === false;
   const loading = serverLoading || pingLoading || probing;
 
@@ -255,34 +262,41 @@ export default function ServersScreen({
     };
   }, [flagsReady]);
 
+  // runProfileCheck is declared below; showServers reaches it through a ref.
+  const runProfileCheckRef = useRef<
+    (list: VpnServer[], opts?: { onlyMissing?: boolean }) => Promise<Map<string, number> | null>
+  >(async () => null);
+
   const showServers = useCallback((vpnServers: VpnServer[], forcePing = false) => {
     if (!mountedRef.current) return;
     setError(null);
+    // While the full check runs the screen keeps the list being checked: the
+    // subscription can hand out other hosts for the same server on every
+    // request, and swapping rows mid-check left them without a result. The
+    // newest list is applied when the check ends.
+    if (probingRef.current) {
+      pendingServersRef.current = vpnServers;
+      return;
+    }
     const items: ServerItem[] = vpnServers.map((s) => ({
       ...s,
       ping: 0,
     }));
-    // While the full check runs, keep its partial results for known servers.
-    if (probingRef.current) {
-      setServers((current) =>
-        items.map((item) => ({
-          ...item,
-          ping: isAvailableVpnServer(item)
-            ? current.find((server) => server.id === item.id)?.ping ?? 0
-            : -1,
-        })),
-      );
-      return;
-    }
     // Once the full check has run, its results stand; the TCP-only ping
-    // would overwrite their meaning (as on the phone).
+    // would overwrite their meaning (as on the phone). Profiles the check has
+    // not seen yet (a refreshed subscription) are checked on their own.
     if (profileMeasuredRef.current) {
+      const results = profileDelaysRef.current;
+      const missing = items.some(
+        (item) => isAvailableVpnServer(item) && !results.has(serverProfileKey(item)),
+      );
       setServers(
         items.map((item) => ({
           ...item,
-          ping: isAvailableVpnServer(item) ? profileDelaysRef.current.get(item.id) ?? -1 : -1,
+          ping: isAvailableVpnServer(item) ? results.get(serverProfileKey(item)) ?? 0 : -1,
         })),
       );
+      if (missing) void runProfileCheckRef.current(vpnServers, { onlyMissing: true });
       return;
     }
     setServers((current) =>
@@ -323,34 +337,64 @@ export default function ServersScreen({
       });
   }, []);
 
-  /** Full end-to-end check of the given servers; results arrive one by one. */
-  const runProfileCheck = useCallback(async (list: VpnServer[]): Promise<Map<string, number> | null> => {
+  /**
+   * Full end-to-end check of the given servers; results arrive one by one.
+   * With `onlyMissing` the results of the last check are kept and only
+   * profiles without one are checked, quietly: the progress card keeps
+   * describing the check the user started, the new rows show their loader.
+   */
+  const runProfileCheck = useCallback(async (
+    list: VpnServer[],
+    opts: { onlyMissing?: boolean } = {},
+  ): Promise<Map<string, number> | null> => {
     const generation = ++probeGenRef.current;
     const isCurrent = () => mountedRef.current && generation === probeGenRef.current;
     pingGenRef.current += 1; // drop any TCP results still in flight
     setPingLoading(false);
-    probingRef.current = true;
-    profileMeasuredRef.current = false;
-    setProfileMeasured(false);
+    const profileDelays = opts.onlyMissing ? new Map(profileDelaysRef.current) : new Map<string, number>();
+    // Results by server id for this list, for automatic selection.
     const delays = new Map<string, number>();
-    const total = list.filter(isAvailableVpnServer).length;
-    if (total === 0) {
-      probingRef.current = false;
+    for (const server of list) {
+      const known = profileDelays.get(serverProfileKey(server));
+      if (known !== undefined) delays.set(server.id, known);
+    }
+    const toCheck = list.filter(
+      (server) => isAvailableVpnServer(server) && !profileDelays.has(serverProfileKey(server)),
+    );
+    // The rows always show exactly the list being checked.
+    setServers(
+      list.map((server) => ({
+        ...server,
+        ping: isAvailableVpnServer(server) ? profileDelays.get(serverProfileKey(server)) ?? 0 : -1,
+      })),
+    );
+    if (toCheck.length === 0) {
+      profileDelaysRef.current = profileDelays;
       return delays;
     }
-    setServers((current) =>
-      current.map((server) => ({ ...server, ping: isAvailableVpnServer(server) ? 0 : -1 })),
-    );
-    const startProgress = { completed: 0, total };
-    setProbeProgress(startProgress);
-    setLastProbeProgress(startProgress);
+    const quiet = opts.onlyMissing === true;
+    probingRef.current = true;
+    pendingServersRef.current = null;
+    const progressGen = quiet ? progressGenRef.current : ++progressGenRef.current;
+    if (!quiet) {
+      profileMeasuredRef.current = false;
+      setProfileMeasured(false);
+      const startProgress = { completed: 0, total: toCheck.length };
+      setProbeProgress(startProgress);
+      setLastProbeProgress(startProgress);
+    }
     try {
-      await probeServerProfiles(list, (serverId, delayMs, progress) => {
+      await probeServerProfiles(toCheck, (checked, delayMs, progress) => {
         if (!isCurrent()) return;
-        delays.set(serverId, delayMs);
+        delays.set(checked.id, delayMs);
+        const checkedKey = serverProfileKey(checked);
+        profileDelays.set(checkedKey, delayMs);
         setServers((current) =>
-          current.map((server) => (server.id === serverId ? { ...server, ping: delayMs } : server)),
+          current.map((server) =>
+            serverProfileKey(server) === checkedKey ? { ...server, ping: delayMs } : server,
+          ),
         );
+        if (quiet) return;
         setProbeProgress((current) => {
           const next = {
             completed: Math.max(current?.completed ?? 0, progress.completed),
@@ -366,17 +410,29 @@ export default function ServersScreen({
     if (generation === probeGenRef.current) probingRef.current = false;
     if (!isCurrent()) return null;
     // Anything that did not report is unconfirmed.
+    for (const server of toCheck) {
+      const key = serverProfileKey(server);
+      if (!profileDelays.has(key)) profileDelays.set(key, -1);
+    }
     setServers((current) =>
       current.map((server) => (server.ping === 0 ? { ...server, ping: -1 } : server)),
     );
-    profileDelaysRef.current = delays;
+    profileDelaysRef.current = profileDelays;
     profileMeasuredRef.current = true;
     setProfileMeasured(true);
-    window.setTimeout(() => {
-      if (isCurrent()) setProbeProgress(null);
-    }, PROBE_PROGRESS_COMPLETION_HOLD_MS);
+    if (!quiet) {
+      window.setTimeout(() => {
+        if (mountedRef.current && progressGen === progressGenRef.current) setProbeProgress(null);
+      }, PROBE_PROGRESS_COMPLETION_HOLD_MS);
+    }
+    // A list that arrived during the check replaces the rows now; new
+    // profiles in it get their own check.
+    const pending = pendingServersRef.current;
+    pendingServersRef.current = null;
+    if (pending) showServers(pending);
     return delays;
-  }, []);
+  }, [showServers]);
+  runProfileCheckRef.current = runProfileCheck;
 
   const selectAutomatic = useCallback(() => {
     void (async () => {
@@ -424,17 +480,24 @@ export default function ServersScreen({
       // Force the subscription sync only when the user explicitly hit the
       // Refresh button — opening the screen normally rides the throttle
       // window so re-entering doesn't hammer the panel.
-      if (opts.force) {
-        // Server availability is decided by the direct subscription response.
-        // Keep plan metadata refreshing without putting the bot in front of
-        // the user's server refresh.
-        void syncSubscription({ force: true }).catch(() => {});
-      }
-      const vpnServers = await fetchVpnServers();
+      // The bot's sync also rewrites the server list, often with other hosts
+      // for the same servers; the check waits for it (at most a few seconds)
+      // so it covers the list the screen ends up with.
+      const subscriptionSynced = opts.force
+        ? syncSubscription({ force: true }).catch(() => {})
+        : null;
+      const fetchedServers = await fetchVpnServers();
       if (!isCurrent()) return;
       if (opts.force) {
-        // The refresh button runs the full end-to-end check (Android).
-        showServers(vpnServers);
+        await Promise.race([
+          subscriptionSynced,
+          new Promise((resolve) => window.setTimeout(resolve, SUBSCRIPTION_SYNC_WAIT_MS)),
+        ]);
+        if (!isCurrent()) return;
+        const latest = getCachedVpnServers();
+        const vpnServers = latest.length > 0 ? latest : fetchedServers;
+        // The refresh button runs the full end-to-end check (Android); it
+        // shows the rows itself.
         setServerLoading(false);
         const delays = await runProfileCheck(vpnServers);
         if (delays && automaticServerSelection && onAutomaticRefreshed) {
@@ -442,7 +505,7 @@ export default function ServersScreen({
           if (best) onAutomaticRefreshed(best);
         }
       } else {
-        showServers(vpnServers);
+        showServers(fetchedServers);
       }
     } catch (e) {
       if (isCurrent() && cachedServers.length === 0) {

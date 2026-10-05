@@ -47,6 +47,7 @@ import {
   subscribeServerSelection,
 } from "./session/lastServer";
 import { selectBestVpnServer } from "./session/serverQuality";
+import { serverProfileConfig } from "./session/vpn";
 import {
   initializeDiagnostics,
   recordDiagnosticEvent,
@@ -163,6 +164,11 @@ function toSelectedServer(server: VpnServer): SelectedServer {
     path: server.path,
     mode: server.mode,
     spx: server.spx,
+    host: server.host ?? "",
+    alpn: server.alpn ?? "",
+    header_type: server.header_type ?? "",
+    service_name: server.service_name ?? "",
+    extra: server.extra ?? "",
   };
 }
 
@@ -182,6 +188,12 @@ export interface SelectedServer {
   path: string;
   mode: string;
   spx: string;
+  // Optional: selections saved by earlier versions do not have them.
+  host?: string;
+  alpn?: string;
+  header_type?: string;
+  service_name?: string;
+  extra?: string;
 }
 
 type Direction = "forward" | "backward" | "none";
@@ -1015,21 +1027,7 @@ export default function App({
               const sameConfig = hasSameVpnConfig(prev, server);
               const runtime = getVpnRuntime();
               if (!sameConfig && (runtime.connected || runtime.connecting)) {
-                void connectVpn({
-                  address: server.address,
-                  port: server.port,
-                  uuid: server.uuid,
-                  flow: server.flow,
-                  security: server.security,
-                  sni: server.sni,
-                  fingerprint: server.fingerprint,
-                  public_key: server.public_key,
-                  short_id: server.short_id,
-                  network: server.network,
-                  path: server.path,
-                  mode: server.mode,
-                  spx: server.spx,
-                }).catch((e) => {
+                void connectVpn(serverProfileConfig(server)).catch((e) => {
                   console.error("[VPN] live-switch failed:", e);
                   if (!prev || !getVpnRuntime().connected) return;
                   setSelectedServer((current) => {
@@ -1066,21 +1064,7 @@ export default function App({
               const sameConfig = hasSameVpnConfig(prev, server);
               const runtime = getVpnRuntime();
               if (!sameConfig && (runtime.connected || runtime.connecting)) {
-                void connectVpn({
-                  address: server.address,
-                  port: server.port,
-                  uuid: server.uuid,
-                  flow: server.flow,
-                  security: server.security,
-                  sni: server.sni,
-                  fingerprint: server.fingerprint,
-                  public_key: server.public_key,
-                  short_id: server.short_id,
-                  network: server.network,
-                  path: server.path,
-                  mode: server.mode,
-                  spx: server.spx,
-                }).catch((e) => {
+                void connectVpn(serverProfileConfig(server)).catch((e) => {
                   console.error("[VPN] automatic live-switch failed:", e);
                   if (!prev || !getVpnRuntime().connected) return;
                   setSelectedServer((current) => {

@@ -1804,6 +1804,12 @@ export interface VpnServer {
   path: string;
   mode: string;
   spx: string;
+  /** Transport fields, as on Android (VlessUrlParser). */
+  host: string;
+  alpn: string;
+  header_type: string;
+  service_name: string;
+  extra: string;
   country: string;
   isOnline: boolean;
   sortOrder: number;
@@ -1865,6 +1871,16 @@ function decodeVlessComponent(value: string): string {
   }
 }
 
+/** One canonical transport name, as Android's VlessUrlParser.normalizeNetwork:
+ *  Xray also accepts the historical aliases subscriptions may carry. */
+function normalizeNetwork(raw: string | null): string {
+  const network = raw?.trim().toLowerCase() ?? "";
+  if (network === "" || network === "raw" || network === "tcp") return "tcp";
+  if (network === "websocket" || network === "ws") return "ws";
+  if (network === "splithttp" || network === "xhttp") return "xhttp";
+  return network;
+}
+
 function parseVlessUrl(url: string): VpnServer | null {
   if (!url.startsWith("vless://")) return null;
   try {
@@ -1897,15 +1913,20 @@ function parseVlessUrl(url: string): VpnServer | null {
       port,
       uuid,
       flow: p.get("flow") ?? "",
-      security: p.get("security") ?? "none",
+      security: p.get("security")?.trim().toLowerCase() || "none",
       sni,
-      fingerprint: p.get("fp") ?? "chrome",
+      fingerprint: p.get("fp")?.trim().toLowerCase() || "chrome",
       public_key: p.get("pbk") ?? "",
       short_id: p.get("sid") ?? "",
-      network: p.get("type") ?? "tcp",
+      network: normalizeNetwork(p.get("type")),
       path: p.get("path") ?? "",
-      mode: p.get("mode") ?? "",
+      mode: p.get("mode")?.trim().toLowerCase() ?? "",
       spx: p.get("spx") ?? "",
+      host: p.get("host") ?? "",
+      alpn: p.get("alpn") ?? "",
+      header_type: p.get("headerType")?.trim().toLowerCase() ?? "",
+      service_name: p.get("serviceName") ?? "",
+      extra: p.get("extra") ?? "",
       country: "",
       isOnline: true,
       sortOrder: 0,

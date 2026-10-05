@@ -35,6 +35,7 @@ import { getSession, useSession, type UserPlan } from "../session/store";
 import { connectVpn, disconnectVpn, useVpnRuntime, clearVpnError } from "../session/vpnState";
 import {
   measureVpnServerPing,
+  selectBestVerifiedVpnServer,
   selectBestVpnServer,
 } from "../session/serverQuality";
 import { stableServerId } from "../session/serverSelection";
@@ -48,6 +49,8 @@ import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
 import MaterialIcon from "../components/MaterialIcon";
 import { dismissPaymentSuccess, usePaymentSuccessVisible } from "../session/notifications";
+import { getCachedProfileDelays } from "../session/serverProbe";
+import { serverProfileConfig } from "../session/vpn";
 
 function countryName(code: string | null | undefined): string {
   if (!code) return "";
@@ -242,6 +245,11 @@ function toSelectedServer(server: VpnServer): SelectedServer {
     path: server.path,
     mode: server.mode,
     spx: server.spx,
+    host: server.host ?? "",
+    alpn: server.alpn ?? "",
+    header_type: server.header_type ?? "",
+    service_name: server.service_name ?? "",
+    extra: server.extra ?? "",
   };
 }
 
@@ -425,6 +433,11 @@ export default function HomeScreen({
     setPing(0);
     void (async () => {
       const pingServer: VpnServer = {
+        host: "",
+        alpn: "",
+        header_type: "",
+        service_name: "",
+        extra: "",
         ...selectedServer,
         id: stableServerId(selectedServer),
         isOnline: true,
@@ -459,8 +472,11 @@ export default function HomeScreen({
       }
       return null;
     }
+    // AUTO: the best server confirmed by the last full check (3 minutes),
+    // else the TCP ranking, as on the phone (VpnToggleController).
     const fresh = automaticServerSelection
-      ? await selectBestVpnServer(freshServers, { forceProbe: true })
+      ? selectBestVerifiedVpnServer(freshServers, getCachedProfileDelays(freshServers)) ??
+        await selectBestVpnServer(freshServers, { forceProbe: true })
       : freshServers.find((server) => isSameServerSelection(selectedServer, server)) ?? null;
     if (!fresh) {
       return null;
@@ -492,21 +508,7 @@ export default function HomeScreen({
         setLocalError(t("servers_empty"));
         return;
       }
-      const serverConfig = {
-        address: serverToConnect.address,
-        port: serverToConnect.port,
-        uuid: serverToConnect.uuid,
-        flow: serverToConnect.flow,
-        security: serverToConnect.security,
-        sni: serverToConnect.sni,
-        fingerprint: serverToConnect.fingerprint,
-        public_key: serverToConnect.public_key,
-        short_id: serverToConnect.short_id,
-        network: serverToConnect.network,
-        path: serverToConnect.path,
-        mode: serverToConnect.mode,
-        spx: serverToConnect.spx,
-      };
+      const serverConfig = serverProfileConfig(serverToConnect);
       await connectVpn(serverConfig);
     } catch (e) {
       console.error("[VPN-UI] connectVpn() error:", e);

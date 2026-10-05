@@ -304,6 +304,25 @@ impl VpnManager {
 
     async fn detect_default_interface(attempt: &ConnectAttempt) -> Result<String, String> {
         attempt.ensure_active()?;
+        let interface = Self::query_default_interface().await;
+        attempt.ensure_active()?;
+        interface
+    }
+
+    /// The physical interface to bind traffic that must not enter the tunnel
+    /// (the server check). None while no tunnel is up: then the OS routes
+    /// such traffic directly anyway.
+    pub async fn tunnel_bypass_interface(&self) -> Option<String> {
+        if !matches!(
+            self.get_state().await,
+            VpnState::Connected | VpnState::Connecting
+        ) {
+            return None;
+        }
+        Self::query_default_interface().await.ok()
+    }
+
+    async fn query_default_interface() -> Result<String, String> {
         let mut cmd = Command::new("ip");
         cmd.args(["-4", "route", "show", "default"])
             .kill_on_drop(true);
@@ -311,7 +330,6 @@ impl VpnManager {
             .await
             .map_err(|_| "Timed out while detecting the physical network interface".to_string())?
             .map_err(|e| format!("Failed to detect the physical network interface: {e}"))?;
-        attempt.ensure_active()?;
         if !output.status.success() {
             return Err("Could not detect the physical network interface".into());
         }

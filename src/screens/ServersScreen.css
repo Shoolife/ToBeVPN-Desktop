@@ -159,8 +159,10 @@
   width: 100%;
 }
 
+/* The ping chip is 52px wide here; text statuses ("Unavailable") may be
+   wider, as on the phone, so the column only has a minimum. */
 .server-item--with-endpoint .server-item__main {
-  grid-template-columns: 44px minmax(0, 1fr) 52px;
+  grid-template-columns: 44px minmax(0, 1fr) minmax(52px, auto);
 }
 
 .server-item__flag {

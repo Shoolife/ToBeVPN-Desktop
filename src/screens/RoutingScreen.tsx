@@ -1,11 +1,15 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { t } from "../i18n";
 import {
   loadRoutingServiceDomains,
   ROUTING_SERVICES_DATABASE_VERSION,
 } from "../session/routingDatabase";
 import {
+  displayRoutingDomain,
+  isWithinDomain,
   loadRoutingSettings,
+  looksLikeIpAddress,
+  MAX_DOMAINS_PER_LIST,
   normalizeRoutingDomain,
   saveRoutingSettings,
   type RoutingSettings,
@@ -30,15 +34,7 @@ function sameSettings(left: RoutingSettings, right: RoutingSettings): boolean {
   );
 }
 
-function wildcardRuleRoot(rule: string): string | null {
-  return rule.startsWith("*.") ? rule.slice(2) : null;
-}
-
-function routingRuleCoversDomain(rule: string, host: string): boolean {
-  const wildcard = wildcardRuleRoot(rule);
-  const root = wildcard ?? rule;
-  return host === root || host.endsWith(`.${root}`);
-}
+type DomainAddError = "routing_invalid_domain" | "routing_ip_not_supported" | "routing_list_full";
 
 function DomainEditor({
   title,
@@ -48,19 +44,21 @@ function DomainEditor({
 }: {
   title: string;
   domains: string[];
-  onAdd: (value: string) => boolean;
+  onAdd: (value: string) => DomainAddError | null;
   onRemove: (domain: string) => void;
 }) {
   const [value, setValue] = useState("");
-  const [invalid, setInvalid] = useState(false);
+  const [error, setError] = useState<DomainAddError | null>(null);
+  const invalid = error !== null;
 
   const submit = () => {
-    if (!onAdd(value)) {
-      setInvalid(true);
+    const failure = onAdd(value);
+    if (failure) {
+      setError(failure);
       return;
     }
     setValue("");
-    setInvalid(false);
+    setError(null);
   };
 
   return (
@@ -71,7 +69,7 @@ function DomainEditor({
           value={value}
           onChange={(event) => {
             setValue(event.target.value);
-            if (invalid) setInvalid(false);
+            if (invalid) setError(null);
           }}
           onKeyDown={(event) => {
             if (event.key === "Enter") submit();
@@ -90,12 +88,12 @@ function DomainEditor({
           +
         </button>
       </div>
-      {invalid && <div className="routing-domain-error">{t("routing_invalid_domain")}</div>}
+      {error && <div className="routing-domain-error">{t(error)}</div>}
       {domains.length > 0 && (
         <div className="routing-domain-list">
           {domains.map((domain) => (
             <div className="routing-domain-row" key={domain}>
-              <span>{domain}</span>
+              <span>{displayRoutingDomain(domain)}</span>
               <button
                 type="button"
                 onClick={() => onRemove(domain)}
@@ -125,9 +123,25 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
   const [databaseError, setDatabaseError] = useState(false);
   const [databaseReload, setDatabaseReload] = useState(0);
   const [query, setQuery] = useState("");
+  // Uncontrolled after the first render: removing the last exception must
+  // not fold the section the user is working in.
+  const [advancedOpen, setAdvancedOpen] = useState(
+    initial.directDomains.length > 0 || initial.proxyDomains.length > 0,
+  );
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const runtime = useVpnRuntime();
   const dirty = !sameSettings(draft, saved);
+
+  // Leaving the screen applies what was changed, whichever way the user
+  // leaves (Back, another section, the window); nothing is lost silently.
+  const pendingRef = useRef({ draft, saved });
+  pendingRef.current = { draft, saved };
+  useEffect(() => () => {
+    const { draft: last, saved: lastSaved } = pendingRef.current;
+    if (sameSettings(last, lastSaved)) return;
+    saveRoutingSettings(last);
+    void reapplyRoutingSettings().catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (
@@ -177,7 +191,8 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
       if (
         deferredQuery &&
         !domain.includes(deferredQuery) &&
-        !(queryDomain && routingRuleCoversDomain(domain, queryDomain))
+        !(domain.includes("xn--") && displayRoutingDomain(domain).includes(deferredQuery)) &&
+        !(queryDomain && isWithinDomain(queryDomain, domain))
       ) {
         continue;
       }
@@ -212,17 +227,28 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
     return selected;
   }, [database, draft.selectAllServices, excludedSet, selectedSet]);
 
+  // A zone ("ru", "yandex.ru") carries the services inside it along, so
+  // the checkboxes always show where each site goes; a service can still be
+  // switched on its own afterwards (the most specific entry wins).
   const toggleDatabaseDomain = (domain: string) => {
+    const affected = database.filter((item) => isWithinDomain(item, domain));
+    if (!affected.includes(domain)) affected.push(domain);
     setDraft((current) => {
       if (current.selectAllServices) {
         const excluded = new Set(current.excludedServiceDomains);
-        if (excluded.has(domain)) excluded.delete(domain);
-        else excluded.add(domain);
+        const exclude = !excluded.has(domain);
+        for (const item of affected) {
+          if (exclude) excluded.add(item);
+          else excluded.delete(item);
+        }
         return { ...current, excludedServiceDomains: [...excluded].sort() };
       }
       const selected = new Set(current.selectedServiceDomains);
-      if (selected.has(domain)) selected.delete(domain);
-      else selected.add(domain);
+      const select = !selected.has(domain);
+      for (const item of affected) {
+        if (select) selected.add(item);
+        else selected.delete(item);
+      }
       return { ...current, selectedServiceDomains: [...selected].sort() };
     });
   };
@@ -231,9 +257,18 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
     target: DomainListKey,
     action: "add" | "remove",
     rawDomain: string,
-  ): boolean => {
+  ): DomainAddError | null => {
     const domain = normalizeRoutingDomain(rawDomain);
-    if (!domain) return false;
+    if (!domain) {
+      return looksLikeIpAddress(rawDomain) ? "routing_ip_not_supported" : "routing_invalid_domain";
+    }
+    if (
+      action === "add" &&
+      !draft[target].includes(domain) &&
+      draft[target].length >= MAX_DOMAINS_PER_LIST
+    ) {
+      return "routing_list_full";
+    }
     const opposite: DomainListKey =
       target === "directDomains" ? "proxyDomains" : "directDomains";
     setDraft((current) => {
@@ -249,7 +284,7 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
             : current[opposite],
       };
     });
-    return true;
+    return null;
   };
 
   const apply = async () => {
@@ -405,7 +440,7 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
                       checked={isDatabaseDomainSelected(domain)}
                       onChange={() => toggleDatabaseDomain(domain)}
                     />
-                    <span>{domain}</span>
+                    <span>{displayRoutingDomain(domain)}</span>
                   </label>
                 ))}
               </div>
@@ -418,7 +453,8 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
 
         <details
           className="routing-advanced"
-          open={draft.directDomains.length > 0 || draft.proxyDomains.length > 0 || undefined}
+          open={advancedOpen}
+          onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
         >
           <summary>{t("routing_additional")}</summary>
           <section className="routing-section routing-section--intro">
