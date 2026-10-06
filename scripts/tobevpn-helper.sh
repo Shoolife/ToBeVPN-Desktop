@@ -92,6 +92,79 @@ validate_tun2socks_path() {
     return 0
 }
 
+# DNS while the tunnel is up (see "DNS hardening" in start). State lives in a
+# root-only directory instead of the world-writable /tmp.
+DNS_STATE_DIR="/run/tobevpn-dns"
+TUNNEL_RESOLV_CONF="# Written by ToBeVPN while the VPN is connected; restored on disconnect.
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+"
+
+# systemd-resolved only decides for programs that ask its stub. In its
+# "uplink"/static modes, or with resolved merely installed, resolv.conf names
+# other servers (usually the router) and resolvectl settings change nothing.
+resolv_conf_uses_resolved() {
+    grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.5[34]([[:space:]]|$)' /etc/resolv.conf 2>/dev/null
+}
+
+# Replaces /etc/resolv.conf with our file. A symlink is replaced, not written
+# through: writing through it changed the target (NetworkManager's or
+# resolved's own file), which then kept our servers after the restore.
+write_tunnel_resolv_conf() {
+    local tmp="/etc/.resolv.conf.tobevpn.$$"
+    printf '%s' "$TUNNEL_RESOLV_CONF" > "$tmp" \
+        && chmod 644 "$tmp" \
+        && mv -f "$tmp" /etc/resolv.conf \
+        || { rm -f "$tmp"; return 1; }
+}
+
+# Remembers the current /etc/resolv.conf (link target or contents) as the
+# version to put back on disconnect.
+save_system_resolv_conf() {
+    if [ -L /etc/resolv.conf ]; then
+        readlink /etc/resolv.conf > "$DNS_STATE_DIR/link"
+        rm -f "$DNS_STATE_DIR/resolv.conf.bak"
+    elif [ -e /etc/resolv.conf ]; then
+        cp -p /etc/resolv.conf "$DNS_STATE_DIR/resolv.conf.bak"
+        rm -f "$DNS_STATE_DIR/link"
+    fi
+}
+
+# Puts the system DNS back in the mode it was changed in. Also used by start,
+# so a session that crashed with resolv.conf rewritten is undone before its
+# file could be mistaken for the original.
+restore_dns() {
+    local dir="$DNS_STATE_DIR" mode="" link="" bak=""
+    if [ -f "$dir/guard.pid" ]; then
+        kill "$(cat "$dir/guard.pid")" 2>/dev/null || true
+    fi
+    if [ -f "$dir/mode" ]; then
+        mode=$(cat "$dir/mode")
+        link="$dir/link"
+        bak="$dir/resolv.conf.bak"
+    elif [ -f /tmp/tobevpn_dns_mode ]; then
+        # State written by releases before 1.0.89.
+        mode=$(cat /tmp/tobevpn_dns_mode)
+        link=/tmp/tobevpn_resolv_link
+        bak=/tmp/tobevpn_resolv.bak
+    fi
+    case "$mode" in
+        resolvectl)
+            command -v resolvectl >/dev/null 2>&1 \
+                && resolvectl revert "$TUN_NAME" 2>/dev/null || true
+            ;;
+        resolvconf)
+            if [ -f "$link" ]; then
+                ln -sfn "$(cat "$link")" /etc/resolv.conf 2>/dev/null || true
+            elif [ -f "$bak" ]; then
+                cp -p "$bak" /etc/resolv.conf 2>/dev/null || true
+            fi
+            ;;
+    esac
+    rm -rf "$dir"
+    rm -f /tmp/tobevpn_dns_mode /tmp/tobevpn_resolv.bak /tmp/tobevpn_resolv_link
+}
+
 cleanup_routing() {
     if [ -f "$PID_FILE" ]; then
         OLD=$(cat "$PID_FILE")
@@ -136,6 +209,7 @@ case "$1" in
     done
 
     cleanup_routing
+    restore_dns
 
     # Parse `ip route show default` by token names (not field positions) so
     # we handle both `default via X dev Y ...` and on-link `default dev Y ...`
@@ -201,40 +275,40 @@ case "$1" in
 
     # DNS hardening: prevent the OS from resolving through the original NIC,
     # which would leak DNS queries past the VPN even if their answers come
-    # back through the tunnel.
+    # back through the tunnel (and a filtering ISP resolver answers NXDOMAIN).
     #
     # Two-tier strategy:
-    #   1) systemd-resolved (most modern distros) — pin DNS to the TUN with a
-    #      catch-all routing domain "~.". This is reverted on stop.
-    #   2) Fallback — back up /etc/resolv.conf and overwrite with our own
-    #      pointing at 1.1.1.1/8.8.8.8. Restored on stop. We explicitly do
+    #   1) systemd-resolved, when programs really ask it (resolv.conf points
+    #      at its stub) — pin DNS to the TUN with a catch-all routing domain
+    #      "~.", so no other link is asked. Reverted on stop.
+    #   2) Otherwise — replace /etc/resolv.conf with 1.1.1.1/8.8.8.8 and keep
+    #      it so while connected (dns-guard below: NetworkManager or a DHCP
+    #      client may rewrite it). The original is restored on stop. We do
     #      NOT silently fall through if neither path works — that would
     #      leave a DNS leak.
+    mkdir -p -m 700 "$DNS_STATE_DIR"
     DNS_MODE="none"
-    if command -v resolvectl >/dev/null 2>&1; then
+    if command -v resolvectl >/dev/null 2>&1 && resolv_conf_uses_resolved; then
         if resolvectl dns "$TUN_NAME" 1.1.1.1 8.8.8.8 2>/dev/null \
            && resolvectl domain "$TUN_NAME" '~.' 2>/dev/null; then
             DNS_MODE="resolvectl"
+        else
+            resolvectl revert "$TUN_NAME" 2>/dev/null || true
         fi
     fi
-    if [ "$DNS_MODE" = "none" ]; then
-        # Detect resolv.conf — usually a symlink (stub-resolv.conf) or a
-        # plain file. If it's a symlink we can't safely move it: dropping a
-        # plain file in its place is fine. Save the original (file or
-        # symlink target) so we can restore on stop.
-        if [ -e /etc/resolv.conf ]; then
-            if [ -L /etc/resolv.conf ]; then
-                readlink /etc/resolv.conf > /tmp/tobevpn_resolv_link
-            else
-                cp -p /etc/resolv.conf /tmp/tobevpn_resolv.bak 2>/dev/null || true
-            fi
-        fi
-        if printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf 2>/dev/null; then
-            chmod 644 /etc/resolv.conf 2>/dev/null || true
+    # Without a saved original the file is left alone rather than lost.
+    if [ "$DNS_MODE" = "none" ] && save_system_resolv_conf; then
+        printf '%s' "$TUNNEL_RESOLV_CONF" > "$DNS_STATE_DIR/resolv.conf"
+        if write_tunnel_resolv_conf; then
             DNS_MODE="resolvconf"
         fi
     fi
-    echo "$DNS_MODE" > /tmp/tobevpn_dns_mode
+    echo "$DNS_MODE" > "$DNS_STATE_DIR/mode"
+    if [ "$DNS_MODE" = "resolvconf" ]; then
+        setsid "$0" dns-guard </dev/null >/dev/null 2>&1 &
+        echo $! > "$DNS_STATE_DIR/guard.pid"
+        disown $! 2>/dev/null || true
+    fi
 
     echo "OK $T2S_PID"
     ;;
@@ -242,29 +316,23 @@ case "$1" in
   stop)
     cleanup_routing
 
-    # Restore DNS in the same mode we set it. Untouched if start() never
-    # got past DNS-mode "none".
-    if [ -f /tmp/tobevpn_dns_mode ]; then
-        DNS_MODE=$(cat /tmp/tobevpn_dns_mode)
-        case "$DNS_MODE" in
-            resolvectl)
-                command -v resolvectl >/dev/null 2>&1 \
-                    && resolvectl revert "$TUN_NAME" 2>/dev/null || true
-                ;;
-            resolvconf)
-                if [ -f /tmp/tobevpn_resolv_link ]; then
-                    target=$(cat /tmp/tobevpn_resolv_link)
-                    rm -f /etc/resolv.conf
-                    ln -s "$target" /etc/resolv.conf 2>/dev/null || true
-                elif [ -f /tmp/tobevpn_resolv.bak ]; then
-                    cp -p /tmp/tobevpn_resolv.bak /etc/resolv.conf 2>/dev/null || true
-                fi
-                ;;
-        esac
-    fi
-    rm -f /tmp/tobevpn_orig_route /tmp/tobevpn_server_ip \
-          /tmp/tobevpn_dns_mode /tmp/tobevpn_resolv.bak /tmp/tobevpn_resolv_link
+    # Restore DNS in the same mode we set it.
+    restore_dns
+    rm -f /tmp/tobevpn_orig_route /tmp/tobevpn_server_ip
     echo "STOPPED"
+    ;;
+
+  dns-guard)
+    # Started by start in the resolv.conf mode; ends with the session (stop
+    # removes the state, restore_dns kills it). Whatever replaced our file
+    # becomes the version restored on disconnect, then ours goes back.
+    while sleep 2; do
+        [ "$(cat "$DNS_STATE_DIR/mode" 2>/dev/null)" = "resolvconf" ] || exit 0
+        if [ -L /etc/resolv.conf ] || ! cmp -s /etc/resolv.conf "$DNS_STATE_DIR/resolv.conf"; then
+            save_system_resolv_conf || true
+            write_tunnel_resolv_conf || true
+        fi
+    done
     ;;
 
   bypass)

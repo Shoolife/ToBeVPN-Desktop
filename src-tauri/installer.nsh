@@ -71,6 +71,10 @@
   ; switch. Ignore a missing task so uninstall remains idempotent.
   nsExec::ExecToLog `"$SYSDIR\schtasks.exe" /Delete /TN "ToBeVPN Autostart" /F`
 
+  ; Drop the catch-all DNS policy (NRPT) the app sets while connected, in
+  ; case it is uninstalled with the tunnel up or after a crash.
+  nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-DnsClientNrptRule | Where-Object { $$_.Comment -eq 'ToBeVPN' } | Remove-DnsClientNrptRule -Force; Clear-DnsClientCache"`
+
   ; Stop the tray instance and bundled helpers before removing Program Files.
   nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root=[IO.Path]::GetFullPath('$INSTDIR').TrimEnd('\') + '\'; $$names=@('ToBeVPN.exe','tobevpn-desktop.exe','xray.exe','tun2socks.exe'); Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $$proc=$$_; $$path=$$proc.ExecutablePath; if ($$path -and ($$names -contains $$proc.Name) -and $$path.StartsWith($$root,[StringComparison]::OrdinalIgnoreCase)) { Stop-Process -Id $$proc.ProcessId -Force -ErrorAction SilentlyContinue } }; Start-Sleep -Milliseconds 700"`
 !macroend

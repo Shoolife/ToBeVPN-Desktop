@@ -129,6 +129,8 @@ impl VpnManager {
             self.reset_wintun_ipv4_config(interface_index).await;
             self.reset_ipv6_tunnel(interface_index).await;
         }
+        // A crash while connected leaves the DNS policy behind.
+        restore_system_dns().await;
     }
 
     pub async fn prepare_ping_bypass(
@@ -990,6 +992,9 @@ impl VpnManager {
         attempt.ensure_active()?;
 
         self.configure_ipv6_tunnel(attempt).await?;
+        attempt.ensure_active()?;
+
+        apply_tunnel_dns(wintun_idx).await;
 
         Ok(())
     }
@@ -1113,6 +1118,10 @@ impl VpnManager {
         let cleanup_started = Instant::now();
         log_win!("[VPN-WIN] force_stop");
 
+        // Name resolution goes back to the system's own servers first, so no
+        // lookup is left pointing at a tunnel that is about to disappear.
+        restore_system_dns().await;
+
         // Stop proxy traffic first, then remove only routes owned by this
         // session while the Wintun adapter still has a valid interface index.
         if let Some(mut child) = self.xray_process.lock().await.take() {
@@ -1177,6 +1186,83 @@ impl VpnManager {
 }
 
 // ── helpers ────────────────────────────────────────────────────────
+
+/// DNS servers used while the tunnel is up, as on Linux (tobevpn-helper.sh)
+/// and Android (ToBeVpnService.addDnsServer). Their addresses route into the
+/// tunnel, so the answers come from outside the user's network.
+const TUNNEL_DNS_SERVERS: &str = "'1.1.1.1','8.8.8.8'";
+/// Marks our Name Resolution Policy Table rule; other rules are never touched.
+const NRPT_RULE_COMMENT: &str = "ToBeVPN";
+const DNS_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Points every name lookup at the tunnel DNS servers.
+///
+/// Without this Windows kept resolving through the LAN adapter's servers
+/// (usually the router, i.e. the ISP's resolver): those queries are on-link
+/// and never enter the tunnel, so a filtering ISP answered NXDOMAIN for
+/// YouTube and the browser never even tried the VPN. A DNS server on the
+/// Wintun interface alone is not enough either, because Windows may query
+/// every adapter in parallel and take the first answer. A catch-all NRPT
+/// rule (namespace ".") makes the DNS client use only the given servers.
+async fn apply_tunnel_dns(interface_index: u32) {
+    let script = format!(
+        "$ErrorActionPreference = 'Continue'; \
+         Set-DnsClientServerAddress -InterfaceIndex {interface_index} -ServerAddresses {TUNNEL_DNS_SERVERS}; \
+         Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_RULE_COMMENT}' }} | Remove-DnsClientNrptRule -Force; \
+         Add-DnsClientNrptRule -Namespace '.' -NameServers {TUNNEL_DNS_SERVERS} -Comment '{NRPT_RULE_COMMENT}' | Out-Null; \
+         Clear-DnsClientCache"
+    );
+    run_dns_script("apply", &script).await;
+}
+
+/// Removes our NRPT rule and drops answers cached while it was active.
+async fn restore_system_dns() {
+    let script = format!(
+        "$ErrorActionPreference = 'Continue'; \
+         $rules = @(Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_RULE_COMMENT}' }}); \
+         if ($rules.Count -gt 0) {{ $rules | Remove-DnsClientNrptRule -Force; Clear-DnsClientCache }}"
+    );
+    run_dns_script("restore", &script).await;
+}
+
+async fn run_dns_script(label: &str, script: &str) {
+    let started = Instant::now();
+    let result = timeout(
+        DNS_COMMAND_TIMEOUT,
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output(),
+    )
+    .await;
+    match result {
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            if output.status.success() && stderr.is_empty() {
+                log_win!(
+                    "[VPN-WIN] Tunnel DNS {label} done; elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
+            } else {
+                log_win!(
+                    "[VPN-WIN] Tunnel DNS {label} reported errors (status={}): {}",
+                    output.status,
+                    stderr.chars().take(400).collect::<String>()
+                );
+            }
+        }
+        Ok(Err(error)) => log_win!("[VPN-WIN] Tunnel DNS {label} could not start: {error}"),
+        Err(_) => log_win!("[VPN-WIN] Tunnel DNS {label} timed out"),
+    }
+}
 
 /// True if the current process token is elevated (running as Administrator).
 /// Reads the process token directly via the Win32 API. The previous probe
