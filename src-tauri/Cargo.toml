@@ -41,12 +41,13 @@ infer = "0.19"
 minisign-verify = "0.2"
 tempfile = "3"
 tauri-plugin-notification = "2"
+# The update download (update_download.rs) runs on Linux and Windows.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 libc = "0.2"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tauri-plugin-autostart = "2"
 # Linux notifications go through notify-rust directly (see notifications.rs).
