@@ -6,6 +6,7 @@ mod notifications;
 mod server_probe;
 mod settings_transfer;
 mod speed_test;
+mod update_download;
 mod vpn;
 
 use keyring::{Entry, Error as KeyringError};
@@ -749,14 +750,61 @@ fn compact_legacy_webkit_localstorage() {}
 
 #[cfg(target_os = "linux")]
 #[tauri::command]
-async fn install_latest_linux_update(version: String) -> Result<(), String> {
-    linux_update::install_latest_via_polkit(version).await
+async fn install_latest_linux_update(app: tauri::AppHandle, version: String) -> Result<(), String> {
+    linux_update::install_latest_via_polkit(app, version).await
 }
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
 async fn install_latest_linux_update(_version: String) -> Result<(), String> {
     Err("Linux update helper is unavailable on this platform".into())
+}
+
+/// Windows update with the parallel download (update_download.rs); the
+/// updater plugin still runs the installer, as with its own download.
+/// Reports `update-download-progress` like the Linux helper.
+#[cfg(windows)]
+#[tauri::command]
+async fn install_update_parallel(app: tauri::AppHandle, version: String) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(|e| format!("updater: {e}"))?
+        .check()
+        .await
+        .map_err(|e| format!("check update: {e}"))?
+        .ok_or_else(|| "no update available".to_string())?;
+    if update.version.trim_start_matches('v') != version.trim_start_matches('v') {
+        return Err(format!("latest version changed to {}", update.version));
+    }
+    let url = update.download_url.to_string();
+    let emitter = app.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let client = update_download::http_client()?;
+        update_download::download(&client, &url, 512 * 1024 * 1024, |downloaded, total| {
+            let _ = emitter.emit(
+                "update-download-progress",
+                serde_json::json!({ "phase": "downloading", "downloaded": downloaded, "total": total }),
+            );
+        })
+    })
+    .await
+    .map_err(|e| format!("download task: {e}"))??;
+    let _ = app.emit(
+        "update-download-progress",
+        serde_json::json!({ "phase": "installing", "downloaded": 0, "total": 0 }),
+    );
+    update_download::verify_signature(&bytes, &update.signature)?;
+    // Starts the installer and exits this process on success.
+    update
+        .install(bytes)
+        .map_err(|e| format!("install update: {e}"))
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+async fn install_update_parallel(_version: String) -> Result<(), String> {
+    Err("Parallel update download is used only on Windows".into())
 }
 
 /// Measure TCP connect latency to `host:port`.
@@ -1139,6 +1187,7 @@ pub fn run() {
             load_desktop_stats,
             save_desktop_stats,
             install_latest_linux_update,
+            install_update_parallel,
             tcp_ping,
             resolve_host,
             prepare_ping_bypass,

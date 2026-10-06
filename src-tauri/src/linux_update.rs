@@ -1,20 +1,57 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use minisign_verify::{PublicKey, Signature};
+use crate::update_download;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Command as StdCommand, Stdio};
+use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 const UPDATE_HELPER: &str = "/usr/local/bin/tobevpn-update-helper.sh";
 const UPDATE_ENDPOINT: &str =
     "https://github.com/Shoolife/ToBeVPN-Desktop/releases/latest/download/latest.json";
-const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDQTkyQzdDOUVGMzk5NEMKUldSTW1mT2VmQ3lwM01NWkFhQ2ZoZ21kVjdCWFNUbk5kU0E4UHRvUVhKRGhPZjR5QVRWYW00azMK";
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_PACKAGE_BYTES: usize = 256 * 1024 * 1024;
 const PACKAGE_NAMES: &[&str] = &["to-be-vpn", "tobevpn-desktop"];
+
+/// Lines the root helper prints on stdout so the app can show how much of
+/// the package is downloaded. pkexec passes stdout through unchanged.
+const PROGRESS_PREFIX: &str = "TOBEVPN-UPDATE ";
+const PROGRESS_EVENT: &str = "update-download-progress";
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProgress {
+    phase: &'static str,
+    downloaded: u64,
+    total: u64,
+}
+
+/// "TOBEVPN-UPDATE download <downloaded> <total>" or "TOBEVPN-UPDATE install".
+fn parse_progress_line(line: &str) -> Option<UpdateProgress> {
+    let mut parts = line.strip_prefix(PROGRESS_PREFIX)?.split_whitespace();
+    match parts.next()? {
+        "download" => Some(UpdateProgress {
+            phase: "downloading",
+            downloaded: parts.next()?.parse().ok()?,
+            total: parts.next()?.parse().ok()?,
+        }),
+        "install" => Some(UpdateProgress {
+            phase: "installing",
+            downloaded: 0,
+            total: 0,
+        }),
+        _ => None,
+    }
+}
+
+fn report_progress(line: std::fmt::Arguments) {
+    // Rust's stdout is line buffered, so each report leaves at once. A closed
+    // pipe (the app quit) must not stop the update, unlike println!.
+    let _ = writeln!(std::io::stdout(), "{PROGRESS_PREFIX}{line}");
+}
 
 #[derive(Debug, Deserialize)]
 struct UpdateManifest {
@@ -54,11 +91,17 @@ pub fn maybe_run_update_helper() -> bool {
     }
 }
 
-pub async fn install_latest_via_polkit(version: String) -> Result<(), String> {
+pub async fn install_latest_via_polkit(app: AppHandle, version: String) -> Result<(), String> {
     validate_version(&version)?;
 
     let mut cmd = Command::new("pkexec");
-    cmd.arg(UPDATE_HELPER).arg("install-latest").arg(&version);
+    cmd.arg(UPDATE_HELPER)
+        .arg("install-latest")
+        .arg(&version)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     for var in &[
         "DISPLAY",
         "WAYLAND_DISPLAY",
@@ -70,17 +113,41 @@ pub async fn install_latest_via_polkit(version: String) -> Result<(), String> {
         }
     }
 
-    let output = timeout(UPDATE_TIMEOUT, cmd.output())
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Could not start update helper: {e}"))?;
+    // Progress lines become events; anything else is kept for the error text.
+    let stdout = child.stdout.take();
+    let reader = tokio::spawn(async move {
+        let mut other = Vec::new();
+        let Some(stdout) = stdout else {
+            return other;
+        };
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            match parse_progress_line(&line) {
+                Some(progress) => {
+                    let _ = app.emit(PROGRESS_EVENT, progress);
+                }
+                None if other.len() < 64 => other.push(line),
+                None => {}
+            }
+        }
+        other
+    });
+
+    let output = timeout(UPDATE_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| "Update helper timed out".to_string())?
-        .map_err(|e| format!("Could not start update helper: {e}"))?;
+        .map_err(|e| format!("Could not run update helper: {e}"))?;
+    let stdout = reader.await.unwrap_or_default().join("\n");
 
     if output.status.success() {
         return Ok(());
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stdout = stdout.trim().to_string();
     let detail = if stderr.is_empty() { stdout } else { stderr };
     Err(if detail.is_empty() {
         format!("Update helper failed: {}", output.status)
@@ -92,13 +159,8 @@ pub async fn install_latest_via_polkit(version: String) -> Result<(), String> {
 fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
     validate_root()?;
     validate_version(expected_version)?;
-    install_rustls_provider();
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("tobevpn-desktop-updater")
-        .timeout(UPDATE_TIMEOUT)
-        .build()
-        .map_err(|e| format!("create HTTP client: {e}"))?;
+    let client = update_download::http_client()?;
 
     let manifest_response = client
         .get(UPDATE_ENDPOINT)
@@ -119,14 +181,15 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
 
     let platform = select_platform(&manifest)?;
     validate_package_url(&platform.url, expected_version)?;
-    let package_response = client
-        .get(platform.url.as_str())
-        .send()
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("download update package: {e}"))?;
-    let bytes = read_limited_response(package_response, MAX_PACKAGE_BYTES, "update package")?;
+    let bytes = update_download::download(
+        &client,
+        &platform.url,
+        MAX_PACKAGE_BYTES as u64,
+        |downloaded, total| report_progress(format_args!("download {downloaded} {total}")),
+    )?;
+    report_progress(format_args!("install"));
 
-    verify_signature(&bytes, &platform.signature)?;
+    update_download::verify_signature(&bytes, &platform.signature)?;
     if !infer::archive::is_deb(&bytes) {
         return Err("downloaded update is not a deb package".into());
     }
@@ -271,26 +334,6 @@ fn read_deb_field(path: &std::path::Path, field: &str) -> Result<String, String>
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn verify_signature(data: &[u8], release_signature: &str) -> Result<(), String> {
-    let pub_key_decoded = base64_to_string(UPDATE_PUBKEY)?;
-    let public_key = PublicKey::decode(&pub_key_decoded)
-        .map_err(|e| format!("decode update public key: {e}"))?;
-    let signature_decoded = base64_to_string(release_signature)?;
-    let signature = Signature::decode(&signature_decoded)
-        .map_err(|e| format!("decode update signature: {e}"))?;
-    public_key
-        .verify(data, &signature, true)
-        .map_err(|e| format!("verify update signature: {e}"))?;
-    Ok(())
-}
-
-fn base64_to_string(value: &str) -> Result<String, String> {
-    let decoded = STANDARD
-        .decode(value)
-        .map_err(|e| format!("decode base64: {e}"))?;
-    String::from_utf8(decoded).map_err(|e| format!("decode utf8: {e}"))
-}
-
 fn validate_root() -> Result<(), String> {
     if unsafe { libc::geteuid() } == 0 {
         Ok(())
@@ -315,12 +358,6 @@ fn validate_version(version: &str) -> Result<(), String> {
 
 fn normalize_version(version: &str) -> &str {
     version.trim().trim_start_matches('v')
-}
-
-fn install_rustls_provider() {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
 }
 
 #[cfg(test)]
@@ -354,6 +391,27 @@ mod tests {
             "1.2.3",
         )
         .is_err());
+    }
+
+    #[test]
+    fn progress_lines_are_parsed_and_other_output_is_not() {
+        assert_eq!(
+            parse_progress_line("TOBEVPN-UPDATE download 1048576 53187632"),
+            Some(UpdateProgress {
+                phase: "downloading",
+                downloaded: 1_048_576,
+                total: 53_187_632
+            })
+        );
+        assert_eq!(
+            parse_progress_line("TOBEVPN-UPDATE install").map(|p| p.phase),
+            Some("installing")
+        );
+        assert_eq!(parse_progress_line("TOBEVPN-UPDATE download x 1"), None);
+        assert_eq!(
+            parse_progress_line("Selecting previously unselected package"),
+            None
+        );
     }
 
     #[test]

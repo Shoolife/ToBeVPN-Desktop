@@ -18,6 +18,7 @@
 
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { recordDiagnosticEvent } from "./diagnostics";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -401,11 +402,14 @@ export async function startUpdateDownload(): Promise<void> {
   });
 
   if (isLinuxDesktop()) {
+    // Until the password prompt is answered and the package starts arriving
+    // the bar runs indeterminate; then the root helper reports the bytes.
     setState({
       kind: "downloading",
       info,
-      progress: { downloaded: 0, total: 0, indeterminate: true, phase: "installing" },
+      progress: { downloaded: 0, total: 0, indeterminate: true, phase: "downloading" },
     });
+    const stopProgress = await trackNativeProgress(generation, info);
     try {
       await invoke("install_latest_linux_update", { version: info.version });
       if (generation !== operationGeneration) return;
@@ -418,8 +422,27 @@ export async function startUpdateDownload(): Promise<void> {
       console.warn("[updateStore] Linux update install failed:", e);
       recordDiagnosticEvent("Update", `Linux package update failed: ${String(e)}`, "E");
       setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
+    } finally {
+      stopProgress();
     }
     return;
+  }
+
+  // Windows: the parallel download first (much faster on a throttled
+  // connection); the plugin's own single-stream download stays as fallback.
+  {
+    const stopProgress = await trackNativeProgress(generation, info);
+    try {
+      // On success the installer starts and this process exits.
+      await invoke("install_update_parallel", { version: info.version });
+      return;
+    } catch (e) {
+      if (generation !== operationGeneration) return;
+      recordDiagnosticEvent("Update", `Parallel update download failed, using the updater: ${String(e)}`, "W");
+      setState({ kind: "downloading", info, progress: { downloaded: 0, total: 0, phase: "downloading" } });
+    } finally {
+      stopProgress();
+    }
   }
 
   let update = cachedUpdate;
@@ -540,6 +563,51 @@ export async function startUpdateDownload(): Promise<void> {
     recordDiagnosticEvent("Update", `Application update install failed: ${String(e)}`, "E");
     setState({ kind: "failed", reason: t("update_banner_failed_details"), info });
   }
+}
+
+interface NativeUpdateProgressEvent {
+  phase: "downloading" | "installing";
+  downloaded: number;
+  total: number;
+}
+
+/**
+ * Shows `update-download-progress` from the native download (the Linux root
+ * helper or the Windows parallel download), at most once per frame.
+ */
+async function trackNativeProgress(generation: number, info: DesktopUpdateInfo): Promise<() => void> {
+  let latest: NativeUpdateProgressEvent | null = null;
+  let frame: number | null = null;
+  const flush = () => {
+    frame = null;
+    const state = snapshot.state;
+    if (!latest || generation !== operationGeneration || state.kind !== "downloading") return;
+    setState({
+      kind: "downloading",
+      info,
+      progress: latest.phase === "installing"
+        ? {
+            downloaded: state.progress.downloaded,
+            total: state.progress.total,
+            indeterminate: true,
+            phase: "installing",
+          }
+        : {
+            downloaded: latest.downloaded,
+            total: latest.total,
+            indeterminate: latest.total <= 0,
+            phase: "downloading",
+          },
+    });
+  };
+  const unlisten = await listen<NativeUpdateProgressEvent>("update-download-progress", ({ payload }) => {
+    latest = payload;
+    if (frame === null) frame = requestAnimationFrame(flush);
+  }).catch(() => null);
+  return () => {
+    unlisten?.();
+    if (frame !== null) cancelAnimationFrame(frame);
+  };
 }
 
 function isLinuxDesktop(): boolean {

@@ -42,9 +42,12 @@
   ; requireAdministrator manifest: process creation can appear successful,
   ; then the Windows loader fails before main() with TaskDialogIndirect not
   ; found. Start the installed binary through ShellExecute's elevation verb
-  ; instead. Clearing PassiveMode after a successful launch prevents Tauri's
-  ; .onInstSuccess callback from performing a second, broken RunAsUser launch.
-  ; SetAutoClose preserves the passive updater UX after clearing that flag.
+  ; instead, then drop /R from $CMDLINE (a writable NSIS variable) so Tauri's
+  ; .onInstSuccess callback does not perform a second, broken RunAsUser
+  ; launch. PassiveMode must stay set: clearing it (as earlier versions did)
+  ; turned the update back into an interactive install whose Finish page,
+  ; with its "Run" and "Desktop shortcut" boxes, appeared after the app had
+  ; already started.
   ${If} $UpdateMode = 1
   ${AndIf} $PassiveMode = 1
     ${GetOptions} $CMDLINE "/R" $R0
@@ -57,8 +60,7 @@
       ClearErrors
       ExecShell "runas" "$INSTDIR\${MAINBINARYNAME}.exe" "$R0" SW_SHOWNORMAL
       ${IfNot} ${Errors}
-        SetAutoClose true
-        StrCpy $PassiveMode 0
+        StrCpy $CMDLINE '"$EXEPATH" /P /UPDATE'
       ${EndIf}
     ${EndIf}
   ${EndIf}
