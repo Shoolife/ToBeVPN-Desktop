@@ -4,10 +4,14 @@ import { getSavedLang, t, tf } from "../i18n";
 // the same on the home card, in the subscription sheet and in notifications.
 
 export interface TrafficResetText {
-  /** "15 окт." / "завтра" / "в 03:10": fits the narrow column on the home card. */
+  /** "03.11.2026" / "завтра" / "в 05:10": under the bar on the home card. */
   when: string;
-  /** "Лимит трафика обновится 15 октября в 03:10". */
+  /** "Сброс трафика 03.11 в 05:10": tooltip and notifications. */
   full: string;
+  /** "Сброс 03.11 в 05:10": the chip in the plan card without limits. */
+  chip: string;
+  /** "03.11 в 05:10": under the traffic limit in the plan card. */
+  dateTime: string;
 }
 
 /** Null when there is no limit, no reset date, or the date is already past
@@ -21,10 +25,18 @@ export function trafficResetText(
   const locale = getSavedLang() === "ru" ? "ru-RU" : "en-US";
   const reset = new Date(resetAt);
   const time = reset.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
-  const full = tf(
-    "traffic_reset_full",
-    reset.toLocaleString(locale, { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }),
-  );
+  const shortDate =
+    locale === "ru-RU"
+      ? `${String(reset.getDate()).padStart(2, "0")}.${String(reset.getMonth() + 1).padStart(2, "0")}`
+      : reset.toLocaleDateString(locale, { day: "numeric", month: "short" });
+  // The home card shows the year, like the plan expiry "до 01.06.2027".
+  const dateWithYear =
+    locale === "ru-RU"
+      ? `${shortDate}.${reset.getFullYear()}`
+      : reset.toLocaleDateString(locale, { day: "numeric", month: "short", year: "numeric" });
+  const full = tf("traffic_reset_full", shortDate, time);
+  const chip = tf("traffic_reset_chip", shortDate, time);
+  const dateTime = tf("traffic_reset_datetime", shortDate, time);
   const startOfDay = (value: Date) =>
     new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
   const days = Math.round((startOfDay(reset) - startOfDay(new Date(now))) / 86_400_000);
@@ -33,6 +45,6 @@ export function trafficResetText(
       ? tf("traffic_reset_when_today", time)
       : days === 1
         ? t("traffic_reset_when_tomorrow")
-        : reset.toLocaleDateString(locale, { day: "numeric", month: "short" });
-  return { when, full };
+        : dateWithYear;
+  return { when, full, chip, dateTime };
 }

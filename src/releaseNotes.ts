@@ -18,39 +18,29 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
-      icon: "bolt",
-      titleKey: "whats_new_server_check_title",
-      descriptionKey: "whats_new_server_check_description",
+      icon: "schedule",
+      titleKey: "whats_new_traffic_reset_title",
+      descriptionKey: "whats_new_traffic_reset_description",
     },
     {
-      icon: "dataUsage",
-      titleKey: "whats_new_speedtest_v1086_title",
-      descriptionKey: "whats_new_speedtest_v1086_description",
+      icon: "checkCircle",
+      titleKey: "whats_new_server_selection_title",
+      descriptionKey: "whats_new_server_selection_description",
     },
     {
-      icon: "notifications",
-      titleKey: "whats_new_notifications_title",
-      descriptionKey: "whats_new_notifications_description",
+      icon: "info",
+      titleKey: "whats_new_clear_errors_title",
+      descriptionKey: "whats_new_clear_errors_description",
     },
     {
-      icon: "settingsBackupRestore",
-      titleKey: "whats_new_settings_transfer_title",
-      descriptionKey: "whats_new_settings_transfer_description",
-    },
-    {
-      icon: "login",
-      titleKey: "whats_new_sign_in_title",
-      descriptionKey: "whats_new_sign_in_description",
+      icon: "public",
+      titleKey: "whats_new_windows_dns_title",
+      descriptionKey: "whats_new_windows_dns_description",
     },
     {
       icon: "refresh",
-      titleKey: "whats_new_xray_v1086_title",
-      descriptionKey: "whats_new_xray_v1086_description",
-    },
-    {
-      icon: "schedule",
-      titleKey: "whats_new_trial_date_title",
-      descriptionKey: "whats_new_trial_date_description",
+      titleKey: "whats_new_faster_updates_title",
+      descriptionKey: "whats_new_faster_updates_description",
     },
   ],
 };

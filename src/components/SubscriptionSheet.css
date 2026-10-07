@@ -197,6 +197,48 @@
   margin-top: 2px;
 }
 
+/* Traffic reset under the traffic limit, instead of "per month": a pill
+   like the chip used without the limits block. */
+.sub-limit__label--reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.sub-limit__label--reset svg {
+  flex-shrink: 0;
+}
+
+/* Traffic reset chip under the expiry line (plans without the limits block). */
+.sub-current__reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.sub-current__reset svg {
+  flex-shrink: 0;
+}
+
+.sub-current__reset span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sub-current__limits {
   display: flex;
   align-items: center;

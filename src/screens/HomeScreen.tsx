@@ -200,7 +200,6 @@ export function SubscriptionSummaryCard({
             {usageNote && (
               <div
                 className={`home-sub-usage__reset${exhausted ? " home-sub-usage__reset--exhausted" : ""}`}
-                title={reset?.full}
               >
                 {usageNote}
               </div>

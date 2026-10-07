@@ -581,6 +581,27 @@ function currentPlanInfoFromDto(dto: CurrentPlanDto | null | undefined): Current
   };
 }
 
+/**
+ * Keeps the next traffic reset from any current-plan response (the
+ * subscription sheet reads it for its limits too). Logs only whether the
+ * backend sent it, so a missing date can be told from a display problem.
+ */
+export function rememberTrafficResetFromCurrentPlan(dto: CurrentPlanDto | null | undefined): void {
+  const info = currentPlanInfoFromDto(dto);
+  if (!info) return;
+  const session = getSession();
+  if (!session.isLinked) return;
+  const strategy = dto?.subscription?.traffic_limit_strategy ?? dto?.current_plan?.traffic_limit_strategy ?? "-";
+  if (info.trafficResetAtMillis !== session.trafficResetAt) {
+    recordDiagnosticEvent(
+      "Subscription",
+      `Traffic reset date ${info.trafficResetAtMillis ? "received" : "absent"}; strategy=${strategy}`,
+      "D",
+    );
+    updateSession({ trafficResetAt: info.trafficResetAtMillis });
+  }
+}
+
 async function fetchCurrentSubscriptionPlan(): Promise<CurrentSubscriptionPlanInfo | null> {
   try {
     const res = await getCurrentPlan();
@@ -1317,6 +1338,7 @@ async function checkCurrentDeviceLinkStatus(): Promise<DeviceLinkStatus> {
     const res = await getCurrentPlan();
     if (getSessionGeneration() !== expectedGeneration) return "unknown";
     if (res.success) {
+      rememberTrafficResetFromCurrentPlan(res.data);
       await applyCurrentPlanHeartbeat(res.data).catch(() => {});
     }
     return res.success ? "linked" : "unknown";

@@ -8,6 +8,7 @@ import {
   pingHwidOnly,
   startPendingPurchaseRefreshIfNeeded,
   sanitizePurchasePlansData,
+  rememberTrafficResetFromCurrentPlan,
 } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
 import { trafficResetText } from "../session/trafficReset";
@@ -578,25 +579,38 @@ export function SubscriptionCurrentPlanCard({
   limitsLoading,
   trafficLimitValue,
   deviceLimitValue,
-  trafficResetLine = null,
+  trafficReset = null,
 }: {
   currentPlanName: string;
   currentPlanNameClass: string;
   currentHint: ReactNode;
-  /** "Лимит трафика обновится 15 октября в 03:10", when known. */
-  trafficResetLine?: string | null;
+  /** The next traffic reset, when known (trafficReset.ts). */
+  trafficReset?: { chip: string; dateTime: string } | null;
   showLimits: boolean;
   limitsLoading: boolean;
   trafficLimitValue: string;
   deviceLimitValue: string;
 }) {
+  const resetIcon = (
+    // 1em: the icon follows the size of the text next to it.
+    <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <polyline points="21 3 21 9 15 9" />
+    </svg>
+  );
   return (
     <div className="sub-current">
       <div className="sub-current__info">
         <div className="sub-current__label">{t("current_plan")}</div>
         <div className={currentPlanNameClass}>{currentPlanName}</div>
         {currentHint && <div className="sub-current__hint">{currentHint}</div>}
-        {trafficResetLine && <div className="sub-current__hint">{trafficResetLine}</div>}
+        {/* Without the limits block (trial) the reset gets its own chip. */}
+        {!showLimits && trafficReset && (
+          <div className="sub-current__reset">
+            {resetIcon}
+            <span>{trafficReset.chip}</span>
+          </div>
+        )}
       </div>
       {showLimits && (
         <div className="sub-current__limits">
@@ -609,7 +623,15 @@ export function SubscriptionCurrentPlanCard({
             <>
               <div className="sub-limit">
                 <div className="sub-limit__value">{trafficLimitValue}</div>
-                <div className="sub-limit__label">{t("per_month_short")}</div>
+                {/* The reset date replaces "per month" under the limit it renews. */}
+                {trafficReset ? (
+                  <div className="sub-limit__label sub-limit__label--reset">
+                    {resetIcon}
+                    <span>{trafficReset.dateTime}</span>
+                  </div>
+                ) : (
+                  <div className="sub-limit__label">{t("per_month_short")}</div>
+                )}
               </div>
               <span className="sub-current__sep">·</span>
               <div className="sub-limit">
@@ -773,6 +795,7 @@ export default function SubscriptionSheet({
     getCurrentPlan()
       .then((response) => {
         if (cancelled) return;
+        if (response.success) rememberTrafficResetFromCurrentPlan(response.data);
         setCurrentLimits(response.success ? currentLimitsFromPlan(response.data) : null);
       })
       .catch(() => {
@@ -1407,10 +1430,10 @@ export default function SubscriptionSheet({
             limitsLoading={limitsLoading}
             trafficLimitValue={trafficLimitValue}
             deviceLimitValue={deviceLimitValue}
-            trafficResetLine={
+            trafficReset={
               session.userPlan === "EXPIRED"
                 ? null
-                : trafficResetText(session.trafficResetAt, session.trafficLimitBytes)?.full ?? null
+                : trafficResetText(session.trafficResetAt, session.trafficLimitBytes)
             }
           />
 
