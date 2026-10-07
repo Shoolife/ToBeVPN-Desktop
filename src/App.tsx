@@ -31,7 +31,7 @@ import {
 import { isPaired, useSession } from "./session/store";
 import { markMainWindowPresented } from "./session/windowPresentation";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
-import { hasSameVpnConfig, isSameServerSelection } from "./session/serverSelection";
+import { findSameServer, hasSameVpnConfig, isSameServerSelection } from "./session/serverSelection";
 import { connectVpn, disconnectVpn, getVpnRuntime } from "./session/vpnState";
 import {
   launchedFromAutostart,
@@ -507,9 +507,7 @@ export default function App({
     let cancelled = false;
     void selectBestVpnServer(servers).then((best) => {
       if (cancelled || !best) return;
-      const fresh = getCachedVpnServers()
-        .filter(isAvailableVpnServer)
-        .find((candidate) => isSameServerSelection(candidate, best));
+      const fresh = findSameServer(best, getCachedVpnServers().filter(isAvailableVpnServer));
       if (!fresh || !automaticServerSelectionRef.current) return;
       const resolved = toSelectedServer(fresh);
       selectedServerRef.current = resolved;
@@ -544,9 +542,7 @@ export default function App({
         }
         return;
       }
-      const matching = current
-        ? servers.find((server) => isSameServerSelection(current, server)) ?? null
-        : null;
+      const matching = findSameServer(current, servers);
 
       const applyFreshServer = (fresh: VpnServer) => {
         if (currentGeneration !== generation) return;
@@ -587,9 +583,7 @@ export default function App({
           ? Boolean(latestSelection && isSameServerSelection(latestSelection, current))
           : latestSelection === null;
         if (!selectionUnchanged) return;
-        const fresh = getCachedVpnServers()
-          .filter(isAvailableVpnServer)
-          .find((candidate) => isSameServerSelection(candidate, best));
+        const fresh = findSameServer(best, getCachedVpnServers().filter(isAvailableVpnServer));
         if (fresh) applyFreshServer(fresh);
       });
     });

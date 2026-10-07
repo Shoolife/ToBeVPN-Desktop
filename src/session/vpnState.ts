@@ -31,7 +31,7 @@ import {
   loadAutomaticServerSelection,
   saveLastServer,
 } from "./lastServer";
-import { stableServerId } from "./serverSelection";
+import { findSameServer, serverSelectionKey, stableServerId } from "./serverSelection";
 import {
   recordServerConnectionFailure,
   recordServerConnectionSuccess,
@@ -180,7 +180,12 @@ async function refreshServerConfigAfterAccessCheck(
       "W",
     );
     if (canFallbackToStale()) return server;
-    throw new Error(t("servers_empty"));
+    // The list could not be fetched: that is not "no servers".
+    throw new Error(
+      getSession().userPlan === "EXPIRED"
+        ? t("subscription_expired_connect")
+        : t("servers_load_error_details"),
+    );
   }
   const availableServers = servers.filter(isAvailableVpnServer);
   recordDiagnosticEvent(
@@ -193,23 +198,35 @@ async function refreshServerConfigAfterAccessCheck(
     throw new Error(t("servers_empty"));
   }
   const automatic = loadAutomaticServerSelection();
+  // A failed server is avoided under any host the subscription gives it.
   const excludedId = options.avoidCurrentInAuto ? stableServerId(server) : undefined;
+  const excludedName = options.avoidCurrentInAuto && server.name
+    ? serverSelectionKey({ name: server.name, country: server.country, address: server.address, port: server.port })
+    : undefined;
+  const isExcluded = (candidate: VpnServer) =>
+    stableServerId(candidate) === excludedId ||
+    (excludedName !== undefined && serverSelectionKey(candidate) === excludedName);
   const verifiedCandidates = excludedId
-    ? availableServers.filter((candidate) => stableServerId(candidate) !== excludedId)
+    ? availableServers.filter((candidate) => !isExcluded(candidate))
     : availableServers;
   // AUTO: a server confirmed by the last full check first (Android:
   // VpnConnectionManager), then the TCP ranking.
   const fresh = automatic
     ? selectBestVerifiedVpnServer(verifiedCandidates, getCachedProfileDelays(verifiedCandidates)) ??
-      await selectBestVpnServer(availableServers, { excludeServerId: excludedId })
-    : availableServers.find(
-        (candidate) =>
-          candidate.address === server.address &&
-          candidate.port === server.port &&
-          candidate.sni === (server.sni ?? ""),
-      ) ?? null;
+      await selectBestVpnServer(
+        verifiedCandidates.length > 0 ? verifiedCandidates : availableServers,
+        { excludeServerId: excludedId },
+      )
+    : // The subscription may answer each request with another host/SNI for
+      // the same server; the exact variant missing from this response does
+      // not mean the chosen server is gone (it showed "No servers available"
+      // until a retry happened to return the same variant).
+      findSameServer(
+        { name: server.name ?? "", country: server.country, address: server.address, port: server.port, sni: server.sni },
+        availableServers,
+      );
   if (!fresh) {
-    throw new Error(t("servers_empty"));
+    throw new Error(t(automatic ? "servers_empty" : "server_selected_unavailable"));
   }
   if (automatic) {
     saveLastServer(fresh);

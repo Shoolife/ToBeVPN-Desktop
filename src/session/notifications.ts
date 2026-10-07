@@ -4,6 +4,7 @@ import { getSavedLang, t, tf } from "../i18n";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { recordDiagnosticEvent } from "./diagnostics";
 import { getSession, isDemoSession, subscribeSession, type Session } from "./store";
+import { trafficResetText } from "./trafficReset";
 
 // System notifications ported from the Android client: the traffic balance
 // alerts (TrafficLimitNotifications / TrafficLimitAlerts.kt) and the
@@ -150,10 +151,13 @@ function processUsage(session: Session): void {
   if (thresholdToNotify === null) return;
 
   const remaining = Math.min(Math.max(0, limitBytes - usedBytes), limitBytes);
+  // With a known reset date the user can tell whether to wait or renew.
+  const reset = trafficResetText(session.trafficResetAt, limitBytes);
+  const description = tf("traffic_limit_notification_description", formatGib(remaining));
   showSystemNotification(
     "traffic_limit",
     t("traffic_limit_notification_title"),
-    tf("traffic_limit_notification_description", formatGib(remaining)),
+    reset ? `${description} ${reset.full}.` : description,
   );
   recordDiagnosticEvent(
     "Notifications",

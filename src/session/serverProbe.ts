@@ -3,7 +3,10 @@ import { listen } from "@tauri-apps/api/event";
 import { isAvailableVpnServer, type VpnServer } from "./auth";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { recordDiagnosticEvent } from "./diagnostics";
+import { serverProfileKey } from "./serverSelection";
 import { preparePingBypass, serverProfileConfig } from "./vpn";
+
+export { serverProfileKey };
 
 // End-to-end server check, as on the phone (ServerListViewModel /
 // BaseStationBypassProfileProbeRepository): every server carries a real
@@ -56,17 +59,9 @@ export function setServerPingTimeoutSeconds(value: number): void {
 const PROFILE_RESULT_TTL_MS = 3 * 60 * 1000;
 const profileResults = new Map<string, { delayMs: number; measuredAt: number; timeoutMs: number }>();
 
-/** Full identity of a profile: ids built from address:port:sni can repeat
- *  when one endpoint carries several transports. */
-export function serverProfileKey(server: VpnServer): string {
-  return [
-    server.address, server.port, server.uuid, server.sni, server.public_key, server.short_id,
-    server.network, server.path, server.mode, server.host ?? "", server.service_name ?? "",
-  ].join("|");
-}
 const profileKey = serverProfileKey;
 
-/** Fresh results of the last checks for these servers, by server id. */
+/** Fresh results of the last checks for these servers, by serverProfileKey. */
 export function getCachedProfileDelays(servers: VpnServer[]): Map<string, number> {
   const now = Date.now();
   const timeoutMs = getServerPingTimeoutSeconds() * 1000;
@@ -79,7 +74,7 @@ export function getCachedProfileDelays(servers: VpnServer[]): Map<string, number
       now - cached.measuredAt >= 0 &&
       now - cached.measuredAt <= PROFILE_RESULT_TTL_MS
     ) {
-      delays.set(server.id, cached.delayMs);
+      delays.set(profileKey(server), cached.delayMs);
     }
   }
   return delays;
@@ -137,7 +132,7 @@ export async function probeServerProfiles(
     const server = candidates[index];
     if (!server || delivered.has(index)) return;
     delivered.add(index);
-    results.set(server.id, delayMs);
+    results.set(profileKey(server), delayMs);
     profileResults.set(profileKey(server), {
       delayMs: delayMs > 0 ? delayMs : -1,
       measuredAt: Date.now(),
@@ -197,7 +192,7 @@ function previewProbe(
     servers.forEach((server, index) => {
       window.setTimeout(() => {
         const delay = server.isOnline && index % 4 !== 3 ? 90 + index * 37 : -1;
-        results.set(server.id, delay);
+        results.set(serverProfileKey(server), delay);
         onResult(server, delay, { completed: results.size, total: servers.length });
         if (results.size === servers.length) resolve(results);
       }, 500 + index * 450);

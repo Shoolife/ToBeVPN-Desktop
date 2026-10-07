@@ -507,6 +507,8 @@ interface CurrentSubscriptionPlanInfo {
   trafficLimitBytes: number | null;
   deviceLimit: number | null;
   expiresAtMillis: number | null;
+  /** Null when the plan has no traffic limit or never resets it. */
+  trafficResetAtMillis: number | null;
   isActive: boolean | null;
   isExpired: boolean | null;
   isTrial: boolean | null;
@@ -565,6 +567,9 @@ function currentPlanInfoFromDto(dto: CurrentPlanDto | null | undefined): Current
       normalizeTrafficLimitBytes(snapshot?.traffic_limit_bytes, snapshot?.traffic_limit),
     deviceLimit: subscription?.device_limit ?? snapshot?.device_limit ?? null,
     expiresAtMillis,
+    trafficResetAtMillis:
+      epochTimestampToMillis(subscription?.next_traffic_reset_at_ts) ??
+      parseExpiresAtMillis(subscription?.next_traffic_reset_at),
     isActive,
     isExpired,
     isTrial: subscription?.is_trial ?? snapshot?.is_trial ?? null,
@@ -1135,6 +1140,7 @@ async function runSyncSubscription(expectedGeneration: number): Promise<void> {
         currentPlanInfo.displayName ??
         (session.userPlan !== "EXPIRED" ? session.planDisplayName : null),
       planExpiresAt: currentPlanInfo.expiresAtMillis,
+      trafficResetAt: currentPlanInfo.trafficResetAtMillis,
       trafficLimitBytes:
         profileResult?.trafficLimitBytes ??
         currentPlanInfo.trafficLimitBytes ??
@@ -1360,6 +1366,7 @@ async function applyCurrentPlanHeartbeat(
         ? null
         : (planInfo.displayName ?? refreshedSession.planDisplayName),
     planExpiresAt: planInfo.expiresAtMillis,
+    trafficResetAt: planInfo.trafficResetAtMillis,
     trafficLimitBytes: planInfo.trafficLimitBytes ?? refreshedSession.trafficLimitBytes,
     isAdminProfile: planInfo.isAdmin,
   });
@@ -1627,6 +1634,7 @@ async function refreshAfterDeviceUnlink(
       userPlan: resolvePlanFromCurrentPlan(refreshedSession.userPlan, planInfo),
       planDisplayName: planInfo.displayName ?? refreshedSession.planDisplayName,
       planExpiresAt: planInfo.expiresAtMillis,
+      trafficResetAt: planInfo.trafficResetAtMillis,
       trafficLimitBytes: planInfo.trafficLimitBytes ?? refreshedSession.trafficLimitBytes,
       isAdminProfile: planInfo.isAdmin,
     });

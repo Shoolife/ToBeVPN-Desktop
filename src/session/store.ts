@@ -18,6 +18,8 @@ export interface Session {
   userPlan: UserPlan;
   planDisplayName: string | null;
   planExpiresAt: number | null;
+  /** Next traffic limit reset (current-plan next_traffic_reset_at), if any. */
+  trafficResetAt: number | null;
   isAdminProfile: boolean;
   trafficLimitBytes: number;
   trafficUsedBytes: number;
@@ -59,6 +61,7 @@ function defaultSession(): Session {
     userPlan: "FREE_TRIAL",
     planDisplayName: null,
     planExpiresAt: null,
+    trafficResetAt: null,
     isAdminProfile: false,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
@@ -76,6 +79,9 @@ function migrateSession(parsed: Partial<Session>): Session {
     merged.isLinked = parsed.telegramId !== null && parsed.telegramId !== undefined;
   }
   merged.isAdminProfile = parsed.isAdminProfile === true;
+  if (typeof merged.trafficResetAt !== "number" || !Number.isFinite(merged.trafficResetAt)) {
+    merged.trafficResetAt = null;
+  }
   return merged;
 }
 
@@ -160,6 +166,7 @@ export function clearIdentity() {
     userPlan: "FREE_TRIAL",
     planDisplayName: null,
     planExpiresAt: null,
+    trafficResetAt: null,
     isAdminProfile: false,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
@@ -192,6 +199,7 @@ export function clearDeviceSession() {
     userPlan: "FREE_TRIAL",
     planDisplayName: null,
     planExpiresAt: null,
+    trafficResetAt: null,
     isAdminProfile: false,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
@@ -217,6 +225,7 @@ export function markDemoIdentity() {
     userPlan: "FREE_TRIAL",
     planDisplayName: null,
     planExpiresAt: null,
+    trafficResetAt: null,
     isAdminProfile: false,
     trafficLimitBytes: 0,
     trafficUsedBytes: 0,
@@ -325,6 +334,7 @@ export function updateSessionFromTokens(tokens: SessionTokensDto): Session {
     userPlan: isLinked ? currentSession.userPlan : "FREE_TRIAL",
     planDisplayName: isLinked ? currentSession.planDisplayName : null,
     planExpiresAt: isLinked ? currentSession.planExpiresAt : null,
+    trafficResetAt: isLinked ? currentSession.trafficResetAt : null,
     isAdminProfile: isLinked ? currentSession.isAdminProfile : false,
     trafficLimitBytes: isLinked ? currentSession.trafficLimitBytes : 0,
     trafficUsedBytes: isLinked ? currentSession.trafficUsedBytes : 0,
@@ -372,6 +382,7 @@ export function markLinkedIdentity(identity: {
     userPlan: sameIdentity ? currentSession.userPlan : "FREE_TRIAL",
     planDisplayName: sameIdentity ? currentSession.planDisplayName : null,
     planExpiresAt: sameIdentity ? currentSession.planExpiresAt : null,
+    trafficResetAt: sameIdentity ? currentSession.trafficResetAt : null,
     isAdminProfile: sameIdentity ? currentSession.isAdminProfile : false,
     trafficLimitBytes: sameIdentity ? currentSession.trafficLimitBytes : 0,
     trafficUsedBytes: sameIdentity ? currentSession.trafficUsedBytes : 0,

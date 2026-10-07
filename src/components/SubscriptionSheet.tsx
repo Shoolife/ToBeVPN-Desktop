@@ -10,6 +10,7 @@ import {
   sanitizePurchasePlansData,
 } from "../session/auth";
 import { useSession, type UserPlan } from "../session/store";
+import { trafficResetText } from "../session/trafficReset";
 import { getCurrentPlan } from "../api/client";
 import type { CurrentPlanDto, PurchaseDurationDto, PurchasePlanDto, PurchasePlansDto } from "../api/types";
 import { formatDateDots } from "../session/dateFormat";
@@ -577,10 +578,13 @@ export function SubscriptionCurrentPlanCard({
   limitsLoading,
   trafficLimitValue,
   deviceLimitValue,
+  trafficResetLine = null,
 }: {
   currentPlanName: string;
   currentPlanNameClass: string;
   currentHint: ReactNode;
+  /** "Лимит трафика обновится 15 октября в 03:10", when known. */
+  trafficResetLine?: string | null;
   showLimits: boolean;
   limitsLoading: boolean;
   trafficLimitValue: string;
@@ -592,6 +596,7 @@ export function SubscriptionCurrentPlanCard({
         <div className="sub-current__label">{t("current_plan")}</div>
         <div className={currentPlanNameClass}>{currentPlanName}</div>
         {currentHint && <div className="sub-current__hint">{currentHint}</div>}
+        {trafficResetLine && <div className="sub-current__hint">{trafficResetLine}</div>}
       </div>
       {showLimits && (
         <div className="sub-current__limits">
@@ -1402,6 +1407,11 @@ export default function SubscriptionSheet({
             limitsLoading={limitsLoading}
             trafficLimitValue={trafficLimitValue}
             deviceLimitValue={deviceLimitValue}
+            trafficResetLine={
+              session.userPlan === "EXPIRED"
+                ? null
+                : trafficResetText(session.trafficResetAt, session.trafficLimitBytes)?.full ?? null
+            }
           />
 
           <div className="sub-sheet__divider" />

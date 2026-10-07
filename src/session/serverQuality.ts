@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { VpnServer } from "./auth";
+import { serverProfileKey } from "./serverSelection";
 import { preparePingBypass } from "./vpn";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { recordDiagnosticEvent } from "./diagnostics";
@@ -456,6 +457,7 @@ export async function selectBestVpnServer(
  * make a server the automatic choice. Ranked like selectBestVpnServer, with
  * the measured profile delay as the ping.
  */
+/** `verifiedDelays` is keyed by serverProfileKey (ids can repeat). */
 export function selectBestVerifiedVpnServer(
   servers: VpnServer[],
   verifiedDelays: Map<string, number>,
@@ -467,7 +469,7 @@ export function selectBestVerifiedVpnServer(
   const ranked = servers
     .filter(isAvailableServer)
     .map((server) => {
-      const delay = verifiedDelays.get(server.id) ?? -1;
+      const delay = verifiedDelays.get(serverProfileKey(server)) ?? -1;
       return delay > 0
         ? { server: { ...server, ping: delay }, score: qualityScore(delay, records[qualityKey(server)], now) }
         : null;

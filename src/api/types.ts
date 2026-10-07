@@ -265,6 +265,8 @@ export interface CurrentPlanSubscriptionDto {
   traffic_limit?: number | null;
   traffic_limit_bytes?: number | null;
   traffic_limit_strategy?: string | null;
+  next_traffic_reset_at?: string | null;
+  next_traffic_reset_at_ts?: number | null;
   device_limit?: number | null;
   created_at?: string | null;
   created_at_ts?: number | null;

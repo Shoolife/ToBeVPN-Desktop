@@ -15,7 +15,7 @@ import {
   syncSubscription,
   type VpnServer,
 } from "../session/auth";
-import { isSameServerSelection } from "../session/serverSelection";
+import { findSameServer } from "../session/serverSelection";
 import {
   measureVpnServerPings,
   selectBestVerifiedVpnServer,
@@ -352,11 +352,11 @@ export default function ServersScreen({
     pingGenRef.current += 1; // drop any TCP results still in flight
     setPingLoading(false);
     const profileDelays = opts.onlyMissing ? new Map(profileDelaysRef.current) : new Map<string, number>();
-    // Results by server id for this list, for automatic selection.
+    // Results for this list by serverProfileKey, for automatic selection.
     const delays = new Map<string, number>();
     for (const server of list) {
       const known = profileDelays.get(serverProfileKey(server));
-      if (known !== undefined) delays.set(server.id, known);
+      if (known !== undefined) delays.set(serverProfileKey(server), known);
     }
     const toCheck = list.filter(
       (server) => isAvailableVpnServer(server) && !profileDelays.has(serverProfileKey(server)),
@@ -386,8 +386,8 @@ export default function ServersScreen({
     try {
       await probeServerProfiles(toCheck, (checked, delayMs, progress) => {
         if (!isCurrent()) return;
-        delays.set(checked.id, delayMs);
         const checkedKey = serverProfileKey(checked);
+        delays.set(checkedKey, delayMs);
         profileDelays.set(checkedKey, delayMs);
         setServers((current) =>
           current.map((server) =>
@@ -440,7 +440,7 @@ export default function ServersScreen({
       if (profileMeasuredRef.current || probeProgress !== null) {
         // A running check reports progressively: an already confirmed server
         // may be chosen without waiting for every failed timeout.
-        delays = new Map(servers.map((server) => [server.id, server.ping]));
+        delays = new Map(servers.map((server) => [serverProfileKey(server), server.ping]));
       } else {
         delays = await runProfileCheck(servers);
       }
@@ -456,6 +456,10 @@ export default function ServersScreen({
     ? servers.some((server) => server.ping > 0)
     : servers.some(isAvailableVpnServer);
   const displayedServers = sortVerifiedServersForDisplay(servers, profileMeasured);
+  // One row is the selection, even when other servers share its endpoint.
+  const selectedRow = automaticServerSelection
+    ? null
+    : findSameServer(selectedServer, servers.filter(isAvailableVpnServer));
 
   const load = useCallback(async (opts: { force?: boolean } = {}) => {
     const generation = ++loadGenRef.current;
@@ -625,10 +629,7 @@ export default function ServersScreen({
             </div>
           </div>
           {displayedServers.map((server) => {
-            const selected =
-              !automaticServerSelection &&
-              isAvailableVpnServer(server) &&
-              isSameServerSelection(selectedServer, server);
+            const selected = server === selectedRow;
             return (
               <ServerListRow
                 key={serverListItemKey(server)}

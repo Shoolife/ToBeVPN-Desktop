@@ -213,6 +213,7 @@ if (browserPreview) {
     isAdminProfile: adminPreview,
     trafficLimitBytes: 100 * 1024 * 1024 * 1024,
     trafficUsedBytes: 24 * 1024 * 1024 * 1024,
+    trafficResetAt: Date.now() + 8 * 24 * 60 * 60 * 1000,
     email: "preview@tobevpn.local",
   });
   seedVpnServersForBrowserPreview(BROWSER_PREVIEW_SHORT_UUID, browserPreviewServers);

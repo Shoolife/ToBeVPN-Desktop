@@ -19,7 +19,7 @@ import {
   serverCountryCodeForUi,
   serverDisplayName,
 } from "../components/serverDisplay";
-import { hasSameVpnConfig, isSameServerSelection } from "../session/serverSelection";
+import { findSameServer, hasSameVpnConfig } from "../session/serverSelection";
 import {
   fetchVpnServers,
   getSubscriptionUsageBlocked,
@@ -50,6 +50,7 @@ import "./HomeScreen.css";
 import MaterialIcon from "../components/MaterialIcon";
 import { dismissPaymentSuccess, usePaymentSuccessVisible } from "../session/notifications";
 import { getCachedProfileDelays } from "../session/serverProbe";
+import { trafficResetText } from "../session/trafficReset";
 import { serverProfileConfig } from "../session/vpn";
 
 function countryName(code: string | null | undefined): string {
@@ -145,6 +146,7 @@ export function SubscriptionSummaryCard({
   planExpiresAt,
   trafficUsedBytes,
   trafficLimitBytes,
+  trafficResetAt = null,
   checking = false,
   onClick,
 }: {
@@ -153,6 +155,7 @@ export function SubscriptionSummaryCard({
   planExpiresAt: number | null;
   trafficUsedBytes: number;
   trafficLimitBytes: number;
+  trafficResetAt?: number | null;
   checking?: boolean;
   onClick?: () => void;
 }) {
@@ -160,6 +163,12 @@ export function SubscriptionSummaryCard({
   const limitBytes = Math.max(0, trafficLimitBytes);
   const hasTrafficLimit = limitBytes > 0;
   const trafficProgress = hasTrafficLimit ? Math.min(usedBytes / limitBytes, 1) : 0;
+  const reset = trafficResetText(trafficResetAt, limitBytes);
+  const exhausted = hasTrafficLimit && usedBytes >= limitBytes;
+  // Under the bar: when the limit renews; in red once it is used up.
+  const usageNote = exhausted
+    ? reset ? tf("traffic_exhausted_reset", reset.when) : t("traffic_exhausted")
+    : reset ? tf("traffic_reset_short", reset.when) : null;
 
   return (
     <div className="home-card home-card--clickable home-card--sub" onClick={onClick}>
@@ -188,6 +197,14 @@ export function SubscriptionSummaryCard({
                 }}
               />
             </div>
+            {usageNote && (
+              <div
+                className={`home-sub-usage__reset${exhausted ? " home-sub-usage__reset--exhausted" : ""}`}
+                title={reset?.full}
+              >
+                {usageNote}
+              </div>
+            )}
           </div>
         )}
         <svg className="home-card__arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -454,7 +471,8 @@ export default function HomeScreen({
   const [localError, setLocalError] = useState<string | null>(null);
   const vpnError = localError ?? lastError;
 
-  const prepareServerForConnect = async (): Promise<SelectedServer | null> => {
+  /** null: no matching server; "load_failed": the list could not be fetched. */
+  const prepareServerForConnect = async (): Promise<SelectedServer | null | "load_failed"> => {
     if (!automaticServerSelection && !selectedServer) return null;
 
     // Refresh plan metadata in the background; direct subscription access is
@@ -470,14 +488,14 @@ export default function HomeScreen({
         console.warn("[VPN-UI] server refresh failed; using cached selection", error);
         return selectedServer;
       }
-      return null;
+      return "load_failed";
     }
     // AUTO: the best server confirmed by the last full check (3 minutes),
     // else the TCP ranking, as on the phone (VpnToggleController).
     const fresh = automaticServerSelection
       ? selectBestVerifiedVpnServer(freshServers, getCachedProfileDelays(freshServers)) ??
         await selectBestVpnServer(freshServers, { forceProbe: true })
-      : freshServers.find((server) => isSameServerSelection(selectedServer, server)) ?? null;
+      : findSameServer(selectedServer, freshServers);
     if (!fresh) {
       return null;
     }
@@ -504,8 +522,17 @@ export default function HomeScreen({
     try {
       const serverToConnect = await prepareServerForConnect();
       if (generation !== toggleGeneration.current) return;
+      if (serverToConnect === "load_failed") {
+        setLocalError(t("servers_load_error_details"));
+        return;
+      }
       if (!serverToConnect) {
-        setLocalError(t("servers_empty"));
+        // An expired plan leaves only the panel's placeholder entries.
+        setLocalError(t(
+          session.userPlan === "EXPIRED"
+            ? "subscription_expired_connect"
+            : automaticServerSelection ? "servers_empty" : "server_selected_unavailable",
+        ));
         return;
       }
       const serverConfig = serverProfileConfig(serverToConnect);
@@ -788,6 +815,7 @@ export default function HomeScreen({
             planExpiresAt={session.planExpiresAt}
             trafficUsedBytes={subscriptionTrafficUsedBytes}
             trafficLimitBytes={subscriptionTrafficLimitBytes}
+            trafficResetAt={session.trafficResetAt}
             checking={checkingSubscriptionAccess}
             onClick={() => void openSubscription()}
           />

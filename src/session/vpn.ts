@@ -5,6 +5,10 @@ import { loadRoutingServiceDomains } from "./routingDatabase";
 import { loadRoutingSettings, serviceRoutingLists, type RoutingMode } from "./routingSettings";
 
 export interface ServerVpnConfig {
+  /** The server as the user picked it, to recognise it again when the
+   *  subscription hands out another host for it (the native side ignores it). */
+  name?: string;
+  country?: string | null;
   address: string;
   port: number;
   uuid: string;
@@ -35,6 +39,8 @@ export interface ServerVpnConfig {
 /** Every profile field the native side needs to build the outbound. One
  *  place, so a new transport field cannot be forgotten at a call site. */
 export interface ServerProfileFields {
+  name?: string;
+  country?: string | null;
   address: string;
   port: number;
   uuid: string;
@@ -57,6 +63,7 @@ export interface ServerProfileFields {
 
 export function serverProfileConfig(server: ServerProfileFields): ServerVpnConfig {
   return {
+    ...(server.name ? { name: server.name, country: server.country ?? null } : {}),
     address: server.address,
     port: server.port,
     uuid: server.uuid,
