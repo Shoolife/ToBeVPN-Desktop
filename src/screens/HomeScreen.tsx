@@ -182,10 +182,7 @@ export function SubscriptionSummaryCard({
         </div>
         {hasTrafficLimit && (
           <div className="home-sub-usage" aria-label={t("traffic")}>
-            <div
-              className="home-sub-usage__value"
-              title={`${formatTrafficBytes(usedBytes)} / ${formatTrafficBytes(limitBytes)}`}
-            >
+            <div className="home-sub-usage__value">
               {formatTrafficBytes(usedBytes)} / {formatTrafficBytes(limitBytes)}
             </div>
             <div className="home-sub-usage__progress">

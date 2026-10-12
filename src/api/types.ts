@@ -291,6 +291,8 @@ export interface CurrentPlanDto {
 export interface PurchasePriceDto {
   currency: "USD" | "RUB" | "XTR" | string;
   amount: string;
+  /** Saving for the term against the monthly price times its months. */
+  discount_percent?: number;
 }
 
 export interface PurchasePaymentMethodDto {
@@ -298,6 +300,10 @@ export interface PurchasePaymentMethodDto {
   currency: string;
   original_amount: string;
   final_amount: string;
+  /**
+   * Total saving against the monthly price times the term's months: the
+   * term discount plus any promo code (1350 -> 959 is 28%).
+   */
   discount_percent: number;
 }
 

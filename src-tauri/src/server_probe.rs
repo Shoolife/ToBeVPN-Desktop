@@ -33,8 +33,11 @@ const MAX_CONCURRENT_CORES: usize = 8;
 const MIN_TIMEOUT_MS: u64 = 1_000;
 const MAX_TIMEOUT_MS: u64 = 15_000;
 const XRAY_READY_TIMEOUT: Duration = Duration::from_secs(4);
+/// Shortest connect attempt per resolved address (Go's dialSerial uses 2 s).
+#[cfg(target_os = "linux")]
+const MIN_ADDRESS_ATTEMPT: Duration = Duration::from_secs(2);
 /// A server is not marked unavailable because one public endpoint is
-/// filtered: the second target is tried only after the first fails.
+/// filtered: both targets are tried at once and the first success counts.
 const PROBE_TARGETS: [&str; 2] = [
     "https://www.gstatic.com/generate_204",
     "https://cp.cloudflare.com/generate_204",
@@ -167,59 +170,49 @@ pub async fn probe_server_profiles(
         }
     };
 
-    // 1. A closed TCP port fails at once instead of waiting for Xray.
-    let mut reachable = Vec::new();
-    {
-        let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES));
-        let mut checks = Vec::new();
-        for server in servers {
-            let slots = slots.clone();
-            let bypass = bypass_interface.clone();
-            checks.push(tokio::spawn(async move {
-                let _permit = slots.acquire_owned().await.ok()?;
-                let open = server.config.validate().is_ok()
-                    && tcp_open(
-                        &server.config.address,
-                        server.config.port,
-                        timeout,
-                        bypass.as_deref(),
-                    )
-                    .await;
-                Some((server, open))
-            }));
-        }
-        for check in checks {
-            if let Ok(Some((server, open))) = check.await {
-                if open {
-                    reachable.push(server);
-                } else {
-                    check_log(format!(
-                        "{} -> TCP port closed",
-                        profile_label(&server.config)
-                    ));
-                    report(&server.id, -1);
-                }
-            }
-        }
-    }
-    if reachable.is_empty() || RUN_GENERATION.load(Ordering::SeqCst) != generation {
-        return Ok(take_results(&results));
-    }
-
-    // 2. Per server: its own Xray, then one real request through it.
-    let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CORES));
+    // Per server: a TCP check (a closed port fails at once instead of
+    // waiting for Xray), then its own Xray and one real request through it.
+    // Each server moves on independently: waiting for every TCP check first
+    // held "0 of N" on screen until the slowest one gave up (as on Android).
+    let tcp_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES));
+    let core_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CORES));
     let ports = Arc::new(std::sync::Mutex::new(HashSet::<u16>::new()));
     let rejected = Arc::new(AtomicU64::new(0));
     let mut probes = Vec::new();
-    for server in reachable {
-        let slots = slots.clone();
+    for server in servers {
+        let tcp_slots = tcp_slots.clone();
+        let core_slots = core_slots.clone();
         let report = report.clone();
         let xray = xray.clone();
         let ports = ports.clone();
         let rejected = rejected.clone();
         let bypass = bypass_interface.clone();
         probes.push(tokio::spawn(async move {
-            let Ok(_permit) = slots.acquire_owned().await else {
+            let open = {
+                let Ok(_permit) = tcp_slots.acquire_owned().await else {
+                    return;
+                };
+                server.config.validate().is_ok()
+                    && tcp_open(
+                        &server.config.address,
+                        server.config.port,
+                        timeout,
+                        bypass.as_deref(),
+                    )
+                    .await
+            };
+            if RUN_GENERATION.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            if !open {
+                check_log(format!(
+                    "{} -> TCP port closed",
+                    profile_label(&server.config)
+                ));
+                report(&server.id, -1);
+                return;
+            }
+            let Ok(_permit) = core_slots.acquire_owned().await else {
                 return;
             };
             if RUN_GENERATION.load(Ordering::SeqCst) != generation {
@@ -318,9 +311,19 @@ async fn tcp_open_bypassing_tunnel(
     timeout: Duration,
     interface: &str,
 ) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
     let attempt = async {
-        let addresses = tokio::net::lookup_host((host, port)).await.ok()?;
-        for address in addresses {
+        let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await.ok()?.collect();
+        // Every address gets a share of what is left (at least
+        // MIN_ADDRESS_ATTEMPT, like Go's dialSerial): one dead A record must
+        // not use up the whole budget before a live one is tried.
+        for (index, address) in addresses.iter().enumerate() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let share = (remaining / (addresses.len() - index) as u32)
+                .max(remaining.min(MIN_ADDRESS_ATTEMPT));
             let socket = if address.is_ipv4() {
                 tokio::net::TcpSocket::new_v4()
             } else {
@@ -330,13 +333,13 @@ async fn tcp_open_bypassing_tunnel(
             if socket.bind_device(Some(interface.as_bytes())).is_err() {
                 continue;
             }
-            if socket.connect(address).await.is_ok() {
+            if matches!(tokio::time::timeout(share, socket.connect(*address)).await, Ok(Ok(_))) {
                 return Some(());
             }
         }
         None
     };
-    matches!(tokio::time::timeout(timeout, attempt).await, Ok(Some(())))
+    matches!(tokio::time::timeout_at(deadline, attempt).await, Ok(Some(())))
 }
 
 /// Windows: no unprivileged way to pin this socket to the adapter here, and a
@@ -522,7 +525,7 @@ async fn wait_for_port(port: u16, child: &mut tokio::process::Child) -> bool {
     }
 }
 
-/// Same measurement as AndroidLibXrayLite's measureInstDelay (v26.9.30):
+/// Same measurement as AndroidLibXrayLite's measureInstDelay (v26.10.10):
 /// two requests over one kept-alive connection, the shorter one counts, 200
 /// or 204 with the body read. The first request pays for the VLESS/REALITY
 /// and TLS handshakes; the second shows the latency through the server, which
@@ -538,41 +541,67 @@ async fn measure_through_proxy(port: u16, timeout: Duration, generation: u64) ->
     else {
         return (-1, "client setup failed".into());
     };
-    let mut last_error = String::from("no attempt");
-    for target in PROBE_TARGETS {
+    // Both targets at once, the first success wins: a filtered target often
+    // just stays silent until the timeout, and trying them one after the
+    // other made every dead server cost two full timeouts (as on Android).
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Result<i64, String>>(PROBE_TARGETS.len());
+    let attempts: Vec<_> = PROBE_TARGETS
+        .iter()
+        .map(|&target| {
+            let client = client.clone();
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                let outcome = match tokio::time::timeout(timeout, measure_target(&client, target)).await {
+                    Ok(Ok(delay)) => Ok(delay),
+                    Ok(Err(errors)) => Err(format!("{target}: {errors}")),
+                    Err(_) => Err(format!("{target}: timed out after {} ms", timeout.as_millis())),
+                };
+                let _ = sender.send(outcome).await;
+            })
+        })
+        .collect();
+    drop(sender);
+    let mut errors = Vec::new();
+    while let Some(outcome) = receiver.recv().await {
         if RUN_GENERATION.load(Ordering::SeqCst) != generation {
+            attempts.iter().for_each(|attempt| attempt.abort());
             return (-1, "cancelled".into());
         }
-        let mut errors = Vec::new();
-        let attempts = async {
-            let mut best: Option<i64> = None;
-            for _ in 0..2 {
-                let started = Instant::now();
-                let response = match client.get(target).send().await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        errors.push(format!("{error:?}").chars().take(200).collect::<String>());
-                        continue;
-                    }
-                };
-                let status = response.status().as_u16();
-                let body = response.bytes().await;
-                if (status == 200 || status == 204) && body.is_ok() {
-                    let elapsed = (started.elapsed().as_millis() as i64).max(1);
-                    best = Some(best.map_or(elapsed, |current| current.min(elapsed)));
-                } else {
-                    errors.push(format!("status {status}"));
-                }
+        match outcome {
+            Ok(delay) => {
+                attempts.iter().for_each(|attempt| attempt.abort());
+                return (delay, String::new());
             }
-            best
-        };
-        match tokio::time::timeout(timeout, attempts).await {
-            Ok(Some(delay)) => return (delay, String::new()),
-            Ok(None) => last_error = format!("{target}: {}", errors.join(" / ")),
-            Err(_) => last_error = format!("{target}: timed out after {} ms", timeout.as_millis()),
+            Err(error) => errors.push(error),
         }
     }
-    (-1, last_error)
+    (-1, if errors.is_empty() { "no attempt".into() } else { errors.join(" | ") })
+}
+
+/// Two requests to [target] over one kept-alive connection; the shorter one
+/// counts. Err lists why neither was a 200/204 with its body read.
+async fn measure_target(client: &reqwest::Client, target: &str) -> Result<i64, String> {
+    let mut errors = Vec::new();
+    let mut best: Option<i64> = None;
+    for _ in 0..2 {
+        let started = Instant::now();
+        let response = match client.get(target).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                errors.push(format!("{error:?}").chars().take(200).collect::<String>());
+                continue;
+            }
+        };
+        let status = response.status().as_u16();
+        let body = response.bytes().await;
+        if (status == 200 || status == 204) && body.is_ok() {
+            let elapsed = (started.elapsed().as_millis() as i64).max(1);
+            best = Some(best.map_or(elapsed, |current| current.min(elapsed)));
+        } else {
+            errors.push(format!("status {status}"));
+        }
+    }
+    best.ok_or_else(|| errors.join(" / "))
 }
 
 #[cfg(test)]

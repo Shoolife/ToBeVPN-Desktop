@@ -1,15 +1,15 @@
 {
-  "version": "v26.9.30",
+  "version": "v26.10.10",
   "linux": {
     "asset": "Xray-linux-64.zip",
-    "sha256": "f851110beaff16e78d643f0ccfd9524b4a44dfd59bae3e34bb52bba378f7690e"
+    "sha256": "72a5fde819713a103c6fc26a87aa025c1518c918a34eba4bc38d64dc0728e5d9"
   },
   "windows_arm64": {
     "asset": "Xray-windows-arm64-v8a.zip",
-    "sha256": "5cf7ad4fd9aac5aa248ae7e598f3f0a0d0f79a6195089d611ddef9653830f1b0"
+    "sha256": "07d5ebf066e5a0bede9b4539269c8576105f3f5b27098f4e317f9bea1e8afc61"
   },
   "windows": {
     "asset": "Xray-windows-64.zip",
-    "sha256": "b17a619343c11b89d8faf36278298856749b15c52277d875d32051b33dcda617"
+    "sha256": "bfefce8e9804e53b7d75b7c49d958b34e89890d9d5e672329089d1b3111647af"
   }
 }

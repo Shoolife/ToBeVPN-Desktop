@@ -1035,11 +1035,26 @@ export async function pingHwidOnly(): Promise<boolean> {
     if (!result) return wasBlocked;
     setSubscriptionUsageBlocked(shortUuid, result.isUsageBlocked);
     setUpdateRequired(result.isUpdateRequired);
+    // The access check runs every few seconds while connected and its
+    // response carries the subscription usage: Home and the 20/10/5% traffic
+    // alerts follow it without an extra request.
+    applySubscriptionUsage(result.trafficUsedBytes, result.trafficLimitBytes);
     return result.isUsageBlocked;
   } catch (error) {
     recordDiagnosticEvent("Subscription", `Access heartbeat failed: ${String(error)}`, "W");
     return wasBlocked;
   }
+}
+
+function applySubscriptionUsage(usedBytes: number | null, limitBytes: number | null): void {
+  const session = getSession();
+  const trafficUsedBytes = usedBytes ?? session.trafficUsedBytes;
+  const trafficLimitBytes = limitBytes ?? session.trafficLimitBytes;
+  if (
+    trafficUsedBytes === session.trafficUsedBytes &&
+    trafficLimitBytes === session.trafficLimitBytes
+  ) return;
+  updateSession({ trafficUsedBytes, trafficLimitBytes });
 }
 
 const subscriptionUrlRefreshes = new Map<string, Promise<void>>();
@@ -1745,7 +1760,11 @@ export function sanitizePurchasePlansData(
           const currency = text(price.currency, 16, true);
           const amount = text(price.amount, 64, true);
           if (!currency || !amount || !/^\d{1,12}(?:\.\d{1,6})?$/.test(amount)) continue;
-          prices.push({ currency, amount });
+          prices.push({
+            currency,
+            amount,
+            discount_percent: integer(price.discount_percent, 0, 100) ?? 0,
+          });
         }
       }
       const paymentMethods: PurchasePlansDto["plans"][number]["durations"][number]["payment_methods"] = [];

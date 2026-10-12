@@ -18,29 +18,24 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
-      icon: "schedule",
-      titleKey: "whats_new_traffic_reset_title",
-      descriptionKey: "whats_new_traffic_reset_description",
+      icon: "percent",
+      titleKey: "whats_new_clear_discounts_title",
+      descriptionKey: "whats_new_clear_discounts_description",
     },
     {
-      icon: "checkCircle",
-      titleKey: "whats_new_server_selection_title",
-      descriptionKey: "whats_new_server_selection_description",
+      icon: "bolt",
+      titleKey: "whats_new_faster_server_check_title",
+      descriptionKey: "whats_new_faster_server_check_description",
     },
     {
-      icon: "info",
-      titleKey: "whats_new_clear_errors_title",
-      descriptionKey: "whats_new_clear_errors_description",
+      icon: "dataUsage",
+      titleKey: "whats_new_live_usage_title",
+      descriptionKey: "whats_new_live_usage_description",
     },
     {
-      icon: "public",
-      titleKey: "whats_new_windows_dns_title",
-      descriptionKey: "whats_new_windows_dns_description",
-    },
-    {
-      icon: "refresh",
-      titleKey: "whats_new_faster_updates_title",
-      descriptionKey: "whats_new_faster_updates_description",
+      icon: "security",
+      titleKey: "whats_new_xray_core_title",
+      descriptionKey: "whats_new_xray_core_description",
     },
   ],
 };

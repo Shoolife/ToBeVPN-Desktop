@@ -38,12 +38,13 @@ export interface SubscriptionPingResult {
   intervalMs: number | null;
   isUsageBlocked: boolean;
   isUpdateRequired: boolean;
+  /** From the subscription-userinfo header, which every response carries. */
+  trafficUsedBytes: number | null;
+  trafficLimitBytes: number | null;
 }
 
 export interface SubscriptionProfileResult extends SubscriptionPingResult {
   links: string[];
-  trafficUsedBytes: number | null;
-  trafficLimitBytes: number | null;
   isSuccessful: boolean;
 }
 
@@ -414,12 +415,15 @@ function readResult(
   response: Response,
   minimumVersionHeader: string | null,
 ): SubscriptionPingResult {
+  const userInfo = readSubscriptionUserInfo(response.headers.get(SUBSCRIPTION_USERINFO_HEADER));
   return {
     intervalMs: readIntervalMs(response.headers.get("profile-update-interval")),
     isUsageBlocked: readUsageBlocked(response.headers),
     isUpdateRequired: isVersionBelowMinimum(
       minimumVersionHeader ? response.headers.get(minimumVersionHeader) : null,
     ),
+    trafficUsedBytes: userInfo.usedBytes,
+    trafficLimitBytes: userInfo.totalBytes,
   };
 }
 
@@ -428,12 +432,9 @@ async function readProfileResult(
   minimumVersionHeader: string | null,
 ): Promise<SubscriptionProfileResult> {
   const body = await response.text().catch(() => "");
-  const userInfo = readSubscriptionUserInfo(response.headers.get(SUBSCRIPTION_USERINFO_HEADER));
   return {
     ...readResult(response, minimumVersionHeader),
     links: parseProfileLinks(body),
-    trafficUsedBytes: userInfo.usedBytes,
-    trafficLimitBytes: userInfo.totalBytes,
     isSuccessful: response.ok,
   };
 }

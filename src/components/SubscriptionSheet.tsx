@@ -189,6 +189,19 @@ function createPreviewPlan(
     durations: FALLBACK_PLAN_DURATIONS.map((duration, index) => {
       const multiplier = orderIndex + 1;
       const rub = duration.rubPrice * multiplier;
+      const stars = Math.round(rub / 1.3);
+      // Same shape as the server: prices[].discount_percent is the term's
+      // saving and payment_methods[].discount_percent the total one (with the
+      // preview's 10% promo code), both against the shortest term's price
+      // scaled to this term's days.
+      const shortest = FALLBACK_PLAN_DURATIONS[0];
+      const unitRub = shortest.rubPrice * multiplier;
+      const unitStars = Math.round(unitRub / 1.3);
+      const scale = duration.days / shortest.days;
+      const savingAgainst = (paid: number, unit: number) =>
+        Math.max(0, Math.trunc((1 - paid / (unit * scale)) * 100));
+      const rubFinal = Math.round(rub * 0.9);
+      const starsFinal = Math.round(stars * 0.9);
       return {
         id: id * 100 + index + 1,
         days: duration.days,
@@ -196,24 +209,24 @@ function createPreviewPlan(
         bot_start_param: `preview_${id}_${duration.days}`,
         bot_payment_url: `https://t.me/preview_bot?start=preview_${id}_${duration.days}`,
         prices: [
-          { currency: "RUB", amount: String(rub) },
+          { currency: "RUB", amount: String(rub), discount_percent: savingAgainst(rub, unitRub) },
           { currency: "USD", amount: (rub / 95).toFixed(2) },
-          { currency: "XTR", amount: String(Math.round(rub / 1.3)) },
+          { currency: "XTR", amount: String(stars) },
         ],
         payment_methods: [
           {
             gateway_type: "CRYPTOMUS",
             currency: "RUB",
             original_amount: String(rub),
-            final_amount: String(Math.round(rub * 0.9)),
-            discount_percent: 10,
+            final_amount: String(rubFinal),
+            discount_percent: savingAgainst(rubFinal, unitRub),
           },
           {
             gateway_type: "TELEGRAM_STARS",
             currency: "XTR",
-            original_amount: String(Math.round(rub / 1.3)),
-            final_amount: String(Math.round((rub / 1.3) * 0.9)),
-            discount_percent: 10,
+            original_amount: String(stars),
+            final_amount: String(starsFinal),
+            discount_percent: savingAgainst(starsFinal, unitStars),
           },
         ],
       };
@@ -389,13 +402,47 @@ interface ResolvedDurationPrice {
   discountPercent: number;
 }
 
+/**
+ * The plan's shortest term and its price in [currency]. The server states
+ * every term's saving against this price scaled to the term's days: with a
+ * 15 ₽ day, 90 days are 1350 ₽ and 550 ₽ for them is 59% off; with a month
+ * as the shortest term, 90 days are 3 x 450 = 1350 ₽.
+ */
+function shortestTermPrice(
+  durations: PurchaseDurationDto[],
+  currency: string,
+): { days: number; amount: number } | null {
+  const sameCurrency = (value: string) =>
+    value.toLocaleUpperCase("en-US") === currency.toLocaleUpperCase("en-US");
+  const priced = durations
+    .filter((duration) => duration.days > 0)
+    .map((duration) => {
+      const raw =
+        duration.prices.find((price) => sameCurrency(price.currency))?.amount ??
+        duration.payment_methods.find((method) => sameCurrency(method.currency))
+          ?.original_amount;
+      return { days: duration.days, amount: Number(raw) };
+    })
+    .filter((term) => Number.isFinite(term.amount) && term.amount > 0)
+    .sort((left, right) => left.days - right.days);
+  return priced[0] ?? null;
+}
+
+function plainAmount(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
 function resolveDurationPrice(
   duration: PurchaseDurationDto,
+  durations: PurchaseDurationDto[],
   isRu: boolean,
 ): ResolvedDurationPrice {
-  // Keep the same server-price priority as Android. The amount itself is
-  // always taken from payment_methods[].final_amount; the client never
-  // recalculates a discount or its currency conversion.
+  // Keep the same server-price priority as Android. The amount to pay is
+  // always payment_methods[].final_amount and the percentage is the
+  // server's; the client never recalculates a discount or a conversion.
+  // The percentage is the saving against the shortest term's price scaled
+  // to this term's days (see shortestTermPrice), so that is what is struck
+  // through.
   const preferredCurrencies = isRu ? ["RUB", "USD", "XTR"] : ["USD", "RUB", "XTR"];
   const methods = duration.payment_methods.filter(
     (method) =>
@@ -408,43 +455,47 @@ function resolveDurationPrice(
       methods.find((candidate) => candidate.currency.toLocaleUpperCase("en-US") === currency),
     )
     .find((candidate) => candidate !== undefined) ?? methods[0];
-  if (method) {
-    const original = Number(method.original_amount);
-    const final = Number(method.final_amount);
-    const discountPercent = Math.min(100, Math.max(0, Math.trunc(method.discount_percent)));
-    const hasDiscount =
-      discountPercent > 0 &&
-      Number.isFinite(original) &&
-      Number.isFinite(final) &&
-      final < original;
-    return {
-      priceDisplay: formatCurrency(method.final_amount, method.currency),
-      originalPriceDisplay: hasDiscount
-        ? formatCurrency(method.original_amount, method.currency)
-        : null,
-      discountPercent: hasDiscount ? discountPercent : 0,
-    };
-  }
-
   const prices = duration.prices.filter(
     (price) => price.currency.trim() && price.amount.trim(),
   );
-  const price = preferredCurrencies
-    .map((currency) =>
-      prices.find((candidate) => candidate.currency.toLocaleUpperCase("en-US") === currency),
-    )
-    .find((candidate) => candidate !== undefined) ?? prices[0];
-  return price
-    ? {
-        priceDisplay: formatCurrency(price.amount, price.currency),
-        originalPriceDisplay: null,
-        discountPercent: 0,
-      }
-    : {
-        priceDisplay: t("plan_unknown_name"),
-        originalPriceDisplay: null,
-        discountPercent: 0,
-      };
+  const price = method
+    ? null
+    : preferredCurrencies
+        .map((currency) =>
+          prices.find((candidate) => candidate.currency.toLocaleUpperCase("en-US") === currency),
+        )
+        .find((candidate) => candidate !== undefined) ?? prices[0];
+  if (!method && !price) {
+    return {
+      priceDisplay: t("plan_unknown_name"),
+      originalPriceDisplay: null,
+      discountPercent: 0,
+    };
+  }
+
+  const currency = method?.currency ?? price!.currency;
+  const finalRaw = method?.final_amount ?? price!.amount;
+  const final = Number(finalRaw);
+  const discountPercent = Math.min(
+    100,
+    Math.max(0, Math.trunc(method?.discount_percent ?? price!.discount_percent ?? 0)),
+  );
+  const shortest = shortestTermPrice(durations, currency);
+  // The shortest term itself (or a plan without its price) strikes through
+  // its own original amount, so only a promo code shows there.
+  const base =
+    shortest !== null && duration.days > shortest.days
+      ? Math.round(shortest.amount * (duration.days / shortest.days) * 100) / 100
+      : method
+        ? Number(method.original_amount)
+        : NaN;
+  const hasDiscount =
+    discountPercent > 0 && Number.isFinite(final) && Number.isFinite(base) && final < base;
+  return {
+    priceDisplay: formatCurrency(finalRaw, currency),
+    originalPriceDisplay: hasDiscount ? formatCurrency(plainAmount(base), currency) : null,
+    discountPercent: hasDiscount ? discountPercent : 0,
+  };
 }
 
 function planDescription(plan: PurchasePlanDto | null, masked = false): string {
@@ -505,7 +556,7 @@ function buildTabs(data: PurchasePlansDto | null, isRu: boolean, masked = false)
                 originalPriceDisplay: null,
                 discountPercent: 0,
               }
-            : resolveDurationPrice(d, isRu);
+            : resolveDurationPrice(d, sourcePlan.durations, isRu);
           return {
             key: `${sourcePlan.id}:${planKey(d.days)}`,
             title: planTitle(d.days),
