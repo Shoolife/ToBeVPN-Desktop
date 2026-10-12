@@ -313,7 +313,8 @@ async fn tcp_open_bypassing_tunnel(
 ) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     let attempt = async {
-        let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await.ok()?.collect();
+        let addresses: Vec<SocketAddr> =
+            tokio::net::lookup_host((host, port)).await.ok()?.collect();
         // Every address gets a share of what is left (at least
         // MIN_ADDRESS_ATTEMPT, like Go's dialSerial): one dead A record must
         // not use up the whole budget before a live one is tried.
@@ -333,13 +334,19 @@ async fn tcp_open_bypassing_tunnel(
             if socket.bind_device(Some(interface.as_bytes())).is_err() {
                 continue;
             }
-            if matches!(tokio::time::timeout(share, socket.connect(*address)).await, Ok(Ok(_))) {
+            if matches!(
+                tokio::time::timeout(share, socket.connect(*address)).await,
+                Ok(Ok(_))
+            ) {
                 return Some(());
             }
         }
         None
     };
-    matches!(tokio::time::timeout_at(deadline, attempt).await, Ok(Some(())))
+    matches!(
+        tokio::time::timeout_at(deadline, attempt).await,
+        Ok(Some(()))
+    )
 }
 
 /// Windows: no unprivileged way to pin this socket to the adapter here, and a
@@ -544,18 +551,23 @@ async fn measure_through_proxy(port: u16, timeout: Duration, generation: u64) ->
     // Both targets at once, the first success wins: a filtered target often
     // just stays silent until the timeout, and trying them one after the
     // other made every dead server cost two full timeouts (as on Android).
-    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Result<i64, String>>(PROBE_TARGETS.len());
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<Result<i64, String>>(PROBE_TARGETS.len());
     let attempts: Vec<_> = PROBE_TARGETS
         .iter()
         .map(|&target| {
             let client = client.clone();
             let sender = sender.clone();
             tokio::spawn(async move {
-                let outcome = match tokio::time::timeout(timeout, measure_target(&client, target)).await {
-                    Ok(Ok(delay)) => Ok(delay),
-                    Ok(Err(errors)) => Err(format!("{target}: {errors}")),
-                    Err(_) => Err(format!("{target}: timed out after {} ms", timeout.as_millis())),
-                };
+                let outcome =
+                    match tokio::time::timeout(timeout, measure_target(&client, target)).await {
+                        Ok(Ok(delay)) => Ok(delay),
+                        Ok(Err(errors)) => Err(format!("{target}: {errors}")),
+                        Err(_) => Err(format!(
+                            "{target}: timed out after {} ms",
+                            timeout.as_millis()
+                        )),
+                    };
                 let _ = sender.send(outcome).await;
             })
         })
@@ -575,7 +587,14 @@ async fn measure_through_proxy(port: u16, timeout: Duration, generation: u64) ->
             Err(error) => errors.push(error),
         }
     }
-    (-1, if errors.is_empty() { "no attempt".into() } else { errors.join(" | ") })
+    (
+        -1,
+        if errors.is_empty() {
+            "no attempt".into()
+        } else {
+            errors.join(" | ")
+        },
+    )
 }
 
 /// Two requests to [target] over one kept-alive connection; the shorter one
