@@ -18,6 +18,11 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
+      icon: "public",
+      titleKey: "whats_new_panel_ready_title",
+      descriptionKey: "whats_new_panel_ready_description",
+    },
+    {
       icon: "percent",
       titleKey: "whats_new_clear_discounts_title",
       descriptionKey: "whats_new_clear_discounts_description",

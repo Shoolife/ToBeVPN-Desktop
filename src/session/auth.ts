@@ -63,6 +63,7 @@ import {
 } from "./subscriptionPinger";
 import { getDeviceFingerprint } from "./fingerprint";
 import { recordDiagnosticEvent } from "./diagnostics";
+import { mergePanelUserUuid } from "./panelIdentity";
 
 const DEVICE_TYPE = "desktop";
 const PLATFORM = "Desktop";
@@ -1124,7 +1125,12 @@ async function runSyncSubscription(expectedGeneration: number): Promise<void> {
       if (panelUser) {
         session = updateSession({
           shortUuid: panelUser.short_uuid,
-          panelUserUuid: panelUser.uuid,
+          panelUserUuid: mergePanelUserUuid(
+            session.panelUserUuid,
+            session.shortUuid,
+            panelUser.uuid,
+            panelUser.short_uuid,
+          ),
           email: panelUser.email ?? session.email,
         });
       }
@@ -1682,9 +1688,11 @@ async function refreshAfterDeviceUnlink(
 }
 
 export async function saveEmail(email: string): Promise<void> {
-  const { isLinked, panelUserUuid } = getSession();
+  const { isLinked } = getSession();
   if (!isLinked) throw new Error("Not authenticated");
-  const res = await apiSaveEmail({ panel_user_uuid: panelUserUuid, email });
+  // The bot finds the account from the device session; a panel 3.x account
+  // may have no UUID at all, so none is sent.
+  const res = await apiSaveEmail({ email });
   if (!res.success) throw new Error(res.message ?? "Could not save email");
   updateSession({ email });
 }

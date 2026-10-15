@@ -2,6 +2,7 @@
 // Holds the stable install-scoped deviceId, per-device auth tokens, and linked user identity.
 import { useSyncExternalStore } from "react";
 import type { SessionTokensDto } from "../api/types";
+import { mergePanelUserUuid } from "./panelIdentity";
 
 export type UserPlan = "FREE_TRIAL" | "PAID" | "ADMIN" | "EXPIRED";
 
@@ -329,7 +330,12 @@ export function updateSessionFromTokens(tokens: SessionTokensDto): Session {
       ? (boundedIdentity(tokens.short_uuid) ?? currentSession.shortUuid)
       : (isLinked ? currentSession.shortUuid : null),
     panelUserUuid: tokenIsLinked
-      ? (boundedIdentity(tokens.panel_user_uuid) ?? currentSession.panelUserUuid)
+      ? mergePanelUserUuid(
+          currentSession.panelUserUuid,
+          currentSession.shortUuid,
+          boundedIdentity(tokens.panel_user_uuid),
+          boundedIdentity(tokens.short_uuid),
+        )
       : (isLinked ? currentSession.panelUserUuid : null),
     userPlan: isLinked ? currentSession.userPlan : "FREE_TRIAL",
     planDisplayName: isLinked ? currentSession.planDisplayName : null,
@@ -363,9 +369,14 @@ export function markLinkedIdentity(identity: {
   };
   const nextShortUuid =
     boundedIdentity(identity.shortUuid) ?? (sameIdentity ? currentSession.shortUuid : null);
-  const nextPanelUserUuid =
-    boundedIdentity(identity.panelUserUuid) ??
-    (sameIdentity ? currentSession.panelUserUuid : null);
+  const nextPanelUserUuid = sameIdentity
+    ? mergePanelUserUuid(
+        currentSession.panelUserUuid,
+        currentSession.shortUuid,
+        boundedIdentity(identity.panelUserUuid),
+        boundedIdentity(identity.shortUuid),
+      )
+    : boundedIdentity(identity.panelUserUuid);
   if (
     !currentSession.isLinked ||
     currentSession.telegramId !== identity.telegramId ||

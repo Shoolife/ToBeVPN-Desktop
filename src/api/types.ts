@@ -33,6 +33,8 @@ export interface SessionTokensDto {
   device_id?: string | null;
   telegram_id?: number | null;
   panel_user_uuid?: string | null;
+  /** Panel 3.x numeric user id; a 3.x account can come without a UUID. */
+  panel_user_id?: number | null;
   short_uuid?: string | null;
   is_linked: boolean;
 }
@@ -42,6 +44,7 @@ export interface SessionTokensDto {
 export interface AuthRequestDto {
   device_id?: string;
   panel_user_uuid?: string | null;
+  panel_user_id?: number | null;
 }
 
 export interface AuthRequestResponseDto {
@@ -170,6 +173,7 @@ export interface PromocodeHistoryDto {
 
 export interface SaveEmailRequestDto {
   panel_user_uuid?: string | null;
+  panel_user_id?: number | null;
   email: string;
 }
 
@@ -189,6 +193,7 @@ export interface TvPairStatusDto {
   telegram_id?: number | null;
   short_uuid?: string | null;
   panel_user_uuid?: string | null;
+  panel_user_id?: number | null;
 }
 
 // --- Panel users ---
@@ -206,7 +211,9 @@ export interface PanelUserTrafficDto {
 }
 
 export interface PanelUserDto {
-  uuid: string;
+  // Panel 3.x identifies users by a numeric id and may omit the UUID.
+  uuid?: string | null;
+  id?: number | null;
   short_uuid: string;
   username: string;
   status?: string | null;
@@ -214,7 +221,7 @@ export interface PanelUserDto {
   traffic_limit_strategy?: string | null;
   expire_at: string | null;
   telegram_id: number | null;
-  vless_uuid: string;
+  vless_uuid?: string | null;
   subscription_url: string;
   active_internal_squads?: PanelSquadRefDto[] | null;
   user_traffic: PanelUserTrafficDto | null;
