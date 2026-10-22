@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { CONTROL_PLANE_BYPASS_HOSTS } from "../api/config";
 import { loadRoutingServiceDomains } from "./routingDatabase";
+import { serverProtocol } from "./serverSelection";
 import { loadRoutingSettings, serviceRoutingLists, type RoutingMode } from "./routingSettings";
 
 export interface ServerVpnConfig {
@@ -27,6 +28,11 @@ export interface ServerVpnConfig {
   header_type?: string;
   service_name?: string;
   extra?: string;
+  protocol?: string;
+  obfs_password?: string;
+  pin_sha256?: string;
+  port_hopping?: string;
+  ech_config_list?: string;
   bypass_hosts?: string[];
   routing_mode?: RoutingMode;
   select_all_services?: boolean;
@@ -59,6 +65,12 @@ export interface ServerProfileFields {
   header_type?: string | null;
   service_name?: string | null;
   extra?: string | null;
+  /** "vless" (default) or "hysteria2"; uuid is the Hysteria2 auth then. */
+  protocol?: string | null;
+  obfs_password?: string | null;
+  pin_sha256?: string | null;
+  port_hopping?: string | null;
+  ech_config_list?: string | null;
 }
 
 export function serverProfileConfig(server: ServerProfileFields): ServerVpnConfig {
@@ -82,6 +94,11 @@ export function serverProfileConfig(server: ServerProfileFields): ServerVpnConfi
     header_type: server.header_type ?? "",
     service_name: server.service_name ?? "",
     extra: server.extra ?? "",
+    protocol: serverProtocol(server),
+    obfs_password: server.obfs_password ?? "",
+    pin_sha256: server.pin_sha256 ?? "",
+    port_hopping: server.port_hopping ?? "",
+    ech_config_list: server.ech_config_list ?? "",
   };
 }
 

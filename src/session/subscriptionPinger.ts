@@ -524,7 +524,8 @@ function parseProfileLinks(body: string): string[] {
 }
 
 function extractVlessLinks(text: string): string[] {
-  return Array.from(new Set(text.match(/vless:\/\/[^\s<>"']+/g) ?? []))
+  // VLESS and Hysteria2 ("hysteria2://" or the short "hy2://") links.
+  return Array.from(new Set(text.match(/(?:vless|hysteria2|hy2):\/\/[^\s<>"']+/g) ?? []))
     .filter((link) => link.length <= MAX_PROFILE_LINK_LENGTH)
     .slice(0, MAX_PROFILE_LINKS);
 }

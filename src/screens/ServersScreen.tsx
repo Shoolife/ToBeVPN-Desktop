@@ -15,7 +15,11 @@ import {
   syncSubscription,
   type VpnServer,
 } from "../session/auth";
-import { findSameServer } from "../session/serverSelection";
+import {
+  findSameServer,
+  PROTOCOL_HYSTERIA2,
+  serverProtocol,
+} from "../session/serverSelection";
 import {
   measureVpnServerPings,
   selectBestVerifiedVpnServer,
@@ -32,6 +36,12 @@ import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import { applyEdgeFade } from "../components/ScrollEdgeAffordance";
 import type { SelectedServer } from "../App";
 import { useSession } from "../session/store";
+import CopyNotification, { useCopyNotification } from "../components/CopyNotification";
+import {
+  type ServerListView,
+  USER_SERVER_LIST_VIEW,
+  useServerListView,
+} from "../session/serverListView";
 import "./ServersScreen.css";
 
 type ServerItem = MeasuredVpnServer;
@@ -92,30 +102,78 @@ function serverListItemKey(server: VpnServer): string {
     server.sni,
     server.public_key,
     server.short_id,
+    serverProtocol(server),
   ].join("|");
+}
+
+function protocolDisplayName(server: VpnServer): string {
+  return serverProtocol(server) === PROTOCOL_HYSTERIA2 ? "Hysteria2" : "VLESS";
+}
+
+const TRANSPORT_LABELS: Record<string, string> = {
+  tcp: "RAW",
+  ws: "WS",
+  grpc: "gRPC",
+  xhttp: "XHTTP",
+  httpupgrade: "HTTPUpgrade",
+};
+
+/** How the profile is built, for admins: ["REALITY", "XHTTP"], ["QUIC", "Salamander"]. */
+function protocolFormula(server: VpnServer): string[] {
+  const parts = serverProtocol(server) === PROTOCOL_HYSTERIA2
+    ? [
+      "QUIC",
+      server.obfs_password ? "Salamander" : "",
+      server.ech_config_list ? "ECH" : "",
+      server.port_hopping ? "Port hopping" : "",
+    ]
+    : [
+      server.security && server.security !== "none" ? server.security.toUpperCase() : "",
+      server.network
+        ? TRANSPORT_LABELS[server.network.toLowerCase()] ?? server.network.toUpperCase()
+        : "",
+      /vision/i.test(server.flow) ? "Vision" : "",
+    ];
+  return parts.filter(Boolean);
 }
 
 export function ServerListRow({
   server,
   flagsReady,
-  showEndpoint = false,
+  view = USER_SERVER_LIST_VIEW,
   selected = false,
   onSelect,
+  onCopyAddress,
 }: {
   server: ServerItem;
   flagsReady: boolean;
-  showEndpoint?: boolean;
+  /** Which lines the row shows; users always get USER_SERVER_LIST_VIEW. */
+  view?: ServerListView;
   selected?: boolean;
   onSelect?: (server: ServerItem) => void;
+  /** A click on the address copies it (the rest of the card still selects
+   *  the server), as on Android. */
+  onCopyAddress?: (address: string) => void;
 }) {
   const clickable = isAvailableVpnServer(server);
   const unavailablePlaceholder = !clickable;
-  const showCountryLine = showEndpoint || unavailablePlaceholder;
+  // The "unavailable" note always shows, whatever the view hides.
+  const showSubtitle = unavailablePlaceholder || view.subtitle !== "none";
+  const hasDetailRows = view.endpoint || view.protocol;
+  const subtitleText = unavailablePlaceholder
+    ? t("server_unavailable")
+    : view.subtitle === "country"
+      ? countryName(serverCountryCodeForUi(server.country, server.name))
+      : view.subtitle === "protocolFull"
+        ? [protocolDisplayName(server), ...protocolFormula(server)].join(" · ")
+        : view.subtitle === "protocol"
+          ? protocolDisplayName(server)
+          : null;
   const className = [
     "server-item",
     "server-item--server",
-    !showCountryLine && !showEndpoint ? "server-item--compact" : "",
-    showEndpoint ? "server-item--with-endpoint" : "",
+    !showSubtitle && !hasDetailRows ? "server-item--compact" : "",
+    hasDetailRows ? "server-item--with-endpoint" : "",
     selected && clickable ? "server-item--selected" : "",
     !clickable ? "server-item--offline" : "",
   ].filter(Boolean).join(" ");
@@ -153,17 +211,15 @@ export function ServerListRow({
           <div className="server-item__name">
             {serverDisplayName(server.name, server.country)}
           </div>
-          {showCountryLine && (
+          {showSubtitle && (
             <div className={`server-item__country ${unavailablePlaceholder ? "server-item__country--red" : ""}`}>
-              {unavailablePlaceholder
-                ? t("server_unavailable")
-                : countryName(serverCountryCodeForUi(server.country, server.name))}
+              {subtitleText}
             </div>
           )}
         </div>
         {statusNode}
       </div>
-      {showEndpoint && (
+      {view.endpoint && (
         <>
           <div className="server-item__divider" aria-hidden="true" />
           <div className="server-item__endpoint-row" aria-label="Server endpoint">
@@ -174,8 +230,58 @@ export function ServerListRow({
                 <path d="M8 7.5h.01M8 16.5h.01" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
               </svg>
             </span>
-            <span className="server-item__endpoint-domain">{server.address}</span>
+            {onCopyAddress ? (
+              // The whole address cell, full row height, is the target: a
+              // click just off the text must not select the server instead.
+              <button
+                type="button"
+                className="server-item__endpoint-copy"
+                title={t("server_address_copy")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCopyAddress(server.address);
+                }}
+              >
+                <span className="server-item__endpoint-domain">{server.address}</span>
+              </button>
+            ) : (
+              <span className="server-item__endpoint-domain">{server.address}</span>
+            )}
             <span className="server-item__endpoint-port">{server.port}</span>
+          </div>
+        </>
+      )}
+      {view.protocol && (
+        <>
+          <div className="server-item__divider" aria-hidden="true" />
+          <div className="server-item__endpoint-row" aria-label="Server protocol">
+            <span className="server-item__endpoint-marker" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <circle cx="6" cy="6" r="2.4" stroke="currentColor" strokeWidth="1.8" />
+                <circle cx="18" cy="18" r="2.4" stroke="currentColor" strokeWidth="1.8" />
+                <path
+                  d="M6 8.4V17a3 3 0 0 0 6 0V7a3 3 0 0 1 6 0v8.6"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </span>
+            <span className="server-item__endpoint-domain">
+              {[protocolDisplayName(server), ...protocolFormula(server)].map((part, index) => (
+                // The list is fixed for a server: its position is a stable key.
+                // eslint-disable-next-line react/no-array-index-key
+                <span key={index}>
+                  {index > 0 && (
+                    <span className="server-item__protocol-separator" aria-hidden="true">·</span>
+                  )}
+                  {part}
+                </span>
+              ))}
+            </span>
+            <span className="server-item__endpoint-port">
+              {serverProtocol(server) === PROTOCOL_HYSTERIA2 ? "UDP" : "TCP"}
+            </span>
           </div>
         </>
       )}
@@ -209,7 +315,16 @@ export default function ServersScreen({
   const [error, setError] = useState<string | null>(null);
   const [flagsReady, setFlagsReady] = useState(areCountryFlagsReady);
   const session = useSession();
-  const showEndpoint = forceShowEndpoint ?? session.isAdminProfile;
+  const adminView = useServerListView();
+  const { notice: copyNotice, copyWithNotification } = useCopyNotification();
+  const copyAddress = useCallback((address: string) => {
+    void copyWithNotification(address, t("server_address_copied"));
+  }, [copyWithNotification]);
+  const listView = forceShowEndpoint === false
+    ? USER_SERVER_LIST_VIEW
+    : forceShowEndpoint || session.isAdminProfile
+      ? adminView
+      : USER_SERVER_LIST_VIEW;
   const pingGenRef = useRef(0);
   const loadGenRef = useRef(0);
   const mountedRef = useRef(true);
@@ -635,7 +750,8 @@ export default function ServersScreen({
                 key={serverListItemKey(server)}
                 server={server}
                 flagsReady={flagsReady}
-                showEndpoint={showEndpoint}
+                view={listView}
+                onCopyAddress={copyAddress}
                 selected={selected}
                 onSelect={onSelect}
               />
@@ -651,6 +767,7 @@ export default function ServersScreen({
           <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
         </div>
       </div>
+      <CopyNotification notice={copyNotice} />
     </div>
   );
 }

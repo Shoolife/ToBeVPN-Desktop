@@ -5,14 +5,15 @@ import MaterialIcon, { type MaterialIconName } from "../components/MaterialIcon"
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import { recordDiagnosticEvent } from "../session/diagnostics";
+import { useSession } from "../session/store";
 import {
   MAX_SETTINGS_FILE_BYTES,
-  SETTINGS_TRANSFER_SECTION_COUNT,
   applySettingsImport,
   countSelected,
   decodeSettingsDocument,
   exportSettingsFile,
   previewSettingsDocument,
+  settingsTransferSectionCount,
   type SettingsImportPreview,
   type SettingsTransferSelection,
 } from "../session/settingsTransfer";
@@ -20,7 +21,14 @@ import "../components/WhatsNewDialog.css";
 import "./SettingsScreen.css";
 import "./SettingsTransferScreen.css";
 
-const ALL_SELECTED: SettingsTransferSelection = { language: true, theme: true, display: true, routing: true };
+const ALL_SELECTED: SettingsTransferSelection = {
+  language: true,
+  theme: true,
+  display: true,
+  routing: true,
+  serverCheck: true,
+  serverListView: true,
+};
 
 interface ChoiceItem {
   key: keyof SettingsTransferSelection;
@@ -29,18 +37,33 @@ interface ChoiceItem {
   description: string;
 }
 
-function choiceItems(): ChoiceItem[] {
+function choiceItems(isAdmin: boolean): ChoiceItem[] {
   return [
     { key: "language", icon: "language", title: t("settings_transfer_language"), description: t("settings_transfer_language_desc") },
     { key: "theme", icon: "palette", title: t("settings_transfer_theme"), description: t("settings_transfer_theme_desc") },
     { key: "display", icon: "openInFull", title: t("settings_transfer_display"), description: t("settings_transfer_display_desc") },
     { key: "routing", icon: "altRoute", title: t("settings_transfer_routing"), description: t("settings_transfer_routing_desc") },
+    { key: "serverCheck", icon: "schedule", title: t("settings_transfer_server_check"), description: t("settings_transfer_server_check_desc") },
+    // Admins only: regular users always see the same server list.
+    ...(isAdmin
+      ? [{
+        key: "serverListView" as const,
+        icon: "dns" as const,
+        title: t("settings_transfer_server_list_view"),
+        description: t("settings_transfer_server_list_view_desc"),
+      }]
+      : []),
   ];
 }
 
 // Ported from the Android client's SettingsTransferScreen.
 export default function SettingsTransferScreen({ onBack }: { onBack: () => void }) {
-  const [exportSelection, setExportSelection] = useState<SettingsTransferSelection>(ALL_SELECTED);
+  const isAdmin = useSession().isAdminProfile;
+  const [chosenExport, setExportSelection] = useState<SettingsTransferSelection>(ALL_SELECTED);
+  const exportSelection: SettingsTransferSelection = isAdmin
+    ? chosenExport
+    : { ...chosenExport, serverListView: false };
+  const sectionCount = settingsTransferSectionCount(isAdmin);
   const [optionsExpanded, setOptionsExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
@@ -50,8 +73,8 @@ export default function SettingsTransferScreen({ onBack }: { onBack: () => void 
   const selectedCount = countSelected(exportSelection);
   const summary =
     selectedCount === 0 ? t("settings_transfer_nothing_selected")
-    : selectedCount === SETTINGS_TRANSFER_SECTION_COUNT ? t("settings_transfer_all_settings")
-    : tf("settings_transfer_selected_count", selectedCount, SETTINGS_TRANSFER_SECTION_COUNT);
+    : selectedCount === sectionCount ? t("settings_transfer_all_settings")
+    : tf("settings_transfer_selected_count", selectedCount, sectionCount);
 
   const runExport = async () => {
     if (busy || selectedCount === 0) return;
@@ -76,7 +99,7 @@ export default function SettingsTransferScreen({ onBack }: { onBack: () => void 
     try {
       if (file.size > MAX_SETTINGS_FILE_BYTES) throw new Error("Settings file is too large");
       const document = decodeSettingsDocument(await file.text());
-      const nextPreview = previewSettingsDocument(document);
+      const nextPreview = previewSettingsDocument(document, isAdmin);
       if (countSelected(nextPreview.available) === 0) throw new Error("Nothing applicable on desktop");
       setPreview(nextPreview);
     } catch (error) {
@@ -122,7 +145,7 @@ export default function SettingsTransferScreen({ onBack }: { onBack: () => void 
           </button>
           <div className={`transfer-options ${optionsExpanded ? "transfer-options--open" : ""}`}>
             <div className="transfer-options__inner">
-              {choiceItems().map((item) => (
+              {choiceItems(isAdmin).map((item) => (
                 <ChoiceRow
                   key={item.key}
                   item={item}
@@ -269,7 +292,8 @@ function ImportDialog({
   const { closing, requestClose } = useAnimatedDialogClose(onDismiss);
   const [selection, setSelection] = useState<SettingsTransferSelection>(preview.available);
   const [busy, setBusy] = useState(false);
-  const items = choiceItems().filter((item) => preview.available[item.key]);
+  // previewSettingsDocument already left out what this account cannot apply.
+  const items = choiceItems(true).filter((item) => preview.available[item.key]);
 
   const apply = async () => {
     if (busy || countSelected(selection) === 0) return;

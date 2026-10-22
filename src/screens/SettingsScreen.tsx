@@ -46,6 +46,8 @@ import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { SubscriptionCurrentPlanCard } from "../components/SubscriptionSheet";
 import SubscriptionExpiryText from "../components/SubscriptionExpiryText";
 import { ServerListRow } from "./ServersScreen";
+import ServerListViewSettings from "../components/ServerListViewSettings";
+import { USER_SERVER_LIST_VIEW, useServerListView } from "../session/serverListView";
 import {
   getDiagnosticStateSnapshot,
   initializeDiagnostics,
@@ -75,6 +77,7 @@ export type SettingsSection =
   | "main"
   | "personalization"
   | "displayScale"
+  | "serverListView"
   | "advanced"
   | "support"
   | "about";
@@ -1022,6 +1025,12 @@ export default function SettingsScreen({
     ...server,
     ping: index === 0 ? 36 : 35,
   }));
+  // One real server is enough to judge every line of a row.
+  const serverViewPreviewServers = scalePreviewServers.slice(0, 1);
+  const adminServerListView = useServerListView();
+  const scalePreviewServerView = session.isAdminProfile
+    ? adminServerListView
+    : USER_SERVER_LIST_VIEW;
   const subscriptionPreviewShowsLimits =
     session.userPlan === "PAID" || session.userPlan === "ADMIN";
   const subscriptionPreviewHint: ReactNode =
@@ -1054,6 +1063,8 @@ export default function SettingsScreen({
   const topTitle =
     section === "displayScale"
       ? t("display_and_text_scale_title")
+      : section === "serverListView"
+      ? t("server_list_view_title")
       : section === "personalization"
       ? t("settings_personalization")
       : section === "advanced"
@@ -1066,7 +1077,9 @@ export default function SettingsScreen({
 
   const handleTopBack = () => {
     if (section === "main") onBack();
-    else if (section === "displayScale") goToSection("personalization");
+    else if (section === "displayScale" || section === "serverListView") {
+      goToSection("personalization");
+    }
     else goToSection("main");
   };
 
@@ -1117,7 +1130,7 @@ export default function SettingsScreen({
             // the avatar and the plan-limits request mid-animation.
             <div key={s} className={`settings-layer ${animClass}`}>
               <ScrollEdgeAffordance
-                className={`settings-content ${s === "main" ? "settings-content--main" : ""} ${s === "support" ? "settings-content--support" : ""} ${s === "displayScale" ? "settings-content--display-scale" : ""}`}
+                className={`settings-content ${s === "main" ? "settings-content--main" : ""} ${s === "support" ? "settings-content--support" : ""} ${s === "displayScale" ? "settings-content--display-scale" : ""} ${s === "serverListView" ? "settings-content--server-view" : ""}`}
               >
         {s === "main" && (
           <>
@@ -1289,6 +1302,47 @@ export default function SettingsScreen({
               </svg>
             </button>
 
+            {/* Admins only: which lines a server row shows, with a preview. */}
+            {session.isAdminProfile && (
+              <button
+                type="button"
+                className="display-scale-nav"
+                onClick={() => goToSection("serverListView")}
+              >
+                <span
+                  className="display-scale-nav__icon display-scale-nav__icon--servers"
+                  aria-hidden="true"
+                >
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                    <rect x="4" y="4.5" width="16" height="6" rx="1.8" stroke="currentColor" strokeWidth="1.8" />
+                    <rect x="4" y="13.5" width="16" height="6" rx="1.8" stroke="currentColor" strokeWidth="1.8" />
+                    <path d="M7.5 7.5h.01M7.5 16.5h.01" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+                    <path d="M11 7.5h5.5M11 16.5h3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  </svg>
+                </span>
+                <span className="display-scale-nav__copy">
+                  <span className="display-scale-nav__title">{t("server_list_view_title")}</span>
+                  <span className="display-scale-nav__description">
+                    {t("server_list_view_desc")}
+                  </span>
+                </span>
+                <svg
+                  className="display-scale-nav__chevron"
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+              </button>
+            )}
+
             {/* Name under the avatar */}
             {session.isLinked && (
               <div className="settings-card">
@@ -1310,6 +1364,10 @@ export default function SettingsScreen({
               </div>
             )}
           </>
+        )}
+
+        {s === "serverListView" && (
+          <ServerListViewSettings previewServers={serverViewPreviewServers} />
         )}
 
         {s === "displayScale" && (
@@ -1341,13 +1399,21 @@ export default function SettingsScreen({
               )}
               serversPreview={(
                 <div className="display-preview-real-servers">
-                  {scalePreviewServers.map((server) => (
-                    <ServerListRow
-                      key={server.id}
-                      server={server}
-                      flagsReady
-                    />
-                  ))}
+                  {/* A view with address/protocol rows makes each card about
+                      twice as tall: one server then fills the slide. */}
+                  {scalePreviewServers
+                    .slice(
+                      0,
+                      scalePreviewServerView.endpoint || scalePreviewServerView.protocol ? 1 : 2,
+                    )
+                    .map((server) => (
+                      <ServerListRow
+                        key={server.id}
+                        server={server}
+                        flagsReady
+                        view={scalePreviewServerView}
+                      />
+                    ))}
                 </div>
               )}
               subscriptionPreview={(

@@ -7,6 +7,7 @@ export interface ServerSelectionIdentity {
   address: string;
   port: number;
   sni?: string | null;
+  protocol?: string | null;
 }
 
 export interface ServerVpnConfigIdentity {
@@ -28,6 +29,12 @@ export interface ServerVpnConfigIdentity {
   header_type?: string | null;
   service_name?: string | null;
   extra?: string | null;
+  /** "vless" (default) or "hysteria2"; uuid is the Hysteria2 auth then. */
+  protocol?: string | null;
+  obfs_password?: string | null;
+  pin_sha256?: string | null;
+  port_hopping?: string | null;
+  ech_config_list?: string | null;
 }
 
 /** Full identity of a server profile. Ids built from address:port:sni can
@@ -45,18 +52,30 @@ export function serverProfileKey(server: {
   mode?: string | null;
   host?: string | null;
   service_name?: string | null;
+  protocol?: string | null;
 }): string {
   return [
     server.address, server.port, server.uuid, server.sni ?? "", server.public_key ?? "",
     server.short_id ?? "", server.network ?? "", server.path ?? "", server.mode ?? "",
-    server.host ?? "", server.service_name ?? "",
+    server.host ?? "", server.service_name ?? "", serverProtocol(server),
   ].join("|");
 }
 
 export function stableServerId(
-  server: Pick<ServerSelectionIdentity, "address" | "port" | "sni">,
+  server: Pick<ServerSelectionIdentity, "address" | "port" | "sni" | "protocol">,
 ): string {
-  return `${server.address}:${server.port}:${server.sni ?? ""}`;
+  // Hysteria2 often shares host:port with a VLESS inbound (UDP vs TCP 443);
+  // the prefix keeps them apart and leaves existing VLESS ids unchanged.
+  const prefix = serverProtocol(server) === PROTOCOL_HYSTERIA2 ? "hy2:" : "";
+  return `${prefix}${server.address}:${server.port}:${server.sni ?? ""}`;
+}
+
+export const PROTOCOL_VLESS = "vless";
+export const PROTOCOL_HYSTERIA2 = "hysteria2";
+
+/** Profiles cached before Hysteria2 support carry no protocol: VLESS. */
+export function serverProtocol(server: { protocol?: string | null }): string {
+  return server.protocol === PROTOCOL_HYSTERIA2 ? PROTOCOL_HYSTERIA2 : PROTOCOL_VLESS;
 }
 
 export function serverSelectionKey(server: ServerSelectionIdentity): string {
@@ -149,6 +168,11 @@ export function hasSameVpnConfig(
     value(a.alpn) === value(b.alpn) &&
     value(a.header_type) === value(b.header_type) &&
     value(a.service_name) === value(b.service_name) &&
-    value(a.extra) === value(b.extra)
+    value(a.extra) === value(b.extra) &&
+    serverProtocol(a) === serverProtocol(b) &&
+    value(a.obfs_password) === value(b.obfs_password) &&
+    value(a.pin_sha256) === value(b.pin_sha256) &&
+    value(a.port_hopping) === value(b.port_hopping) &&
+    value(a.ech_config_list) === value(b.ech_config_list)
   );
 }

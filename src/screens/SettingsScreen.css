@@ -560,7 +560,9 @@
 }
 
 /* Support (FAQ) section: fixed intro, scrollable FAQ list, pinned button. */
-.settings-content--support {
+/* Doubled class: .settings-content below sets a 24px bottom padding and
+   would otherwise win, leaving a gap under the contact button. */
+.settings-content.settings-content--support {
   overflow: hidden;
   gap: 0;
   padding: 4px 40px 0 16px;
@@ -753,7 +755,8 @@
   overscroll-behavior-y: contain;
 }
 
-.settings-content--display-scale > * {
+.settings-content--display-scale > *,
+.settings-content--server-view > * {
   flex-shrink: 0;
 }
 
@@ -1169,6 +1172,12 @@
 
 .display-preview-real-servers .server-item:last-child {
   margin-bottom: 0;
+}
+
+/* The preview panel is itself var(--surface), the cards' own colour: lift
+   them so every server reads as a separate card, as in the real list. */
+.display-preview-real-servers .server-item {
+  background: var(--surface-2);
 }
 
 .display-preview-profile {
@@ -2107,3 +2116,307 @@
   margin-top: 8px;
 }
 
+
+/* Personalization -> Server list view (admins) */
+.display-scale-nav__icon--servers {
+  background: color-mix(in srgb, #26a69a 18%, transparent);
+  color: #26a69a;
+}
+
+.server-view-preview {
+  padding: 8px 10px 10px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+:root[data-theme="light"] .server-view-preview {
+  background: #f4f4f6;
+}
+
+.server-view-preview__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 4px 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.server-view-preview__badge {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #4caf50 16%, transparent);
+  color: #4caf50;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Cross-fading preview of a fixed height: an invisible "Detailed" card (the
+   tallest view) sizes the stage, so the controls below never move. The card
+   background is one shape, centred, that eases to the height of the view in
+   front; the contents sit on transparent centred layers and only fade, so
+   no text is re-laid out mid-animation. */
+.server-view-stage {
+  position: relative;
+  pointer-events: none;
+}
+
+.server-view-stage__sizer {
+  visibility: hidden;
+}
+
+.server-view-stage .server-item {
+  margin-bottom: 0;
+}
+
+.server-view-stage__card {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 100%;
+  border-radius: 16px;
+  background: var(--surface-2);
+  transform: translateY(-50%);
+  transition: height 320ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.server-view-stage__layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  /* Kept on its own layer for the whole life of the card: text is not
+     re-rasterised when the fade starts or ends. */
+  will-change: opacity;
+  animation: server-view-layer-in 220ms ease-out 90ms both;
+}
+
+.server-view-stage__layer .server-item {
+  background: transparent;
+}
+
+/* The old contents go first and fast, the new ones follow: the two texts
+   barely overlap, so nothing doubles up on the way. */
+.server-view-stage__layer.is-leaving {
+  animation: server-view-layer-out 150ms ease-in both;
+}
+
+@keyframes server-view-layer-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes server-view-layer-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+
+/* Presets in a 3x2 grid: the sketch on top, name and summary below; every
+   tile is as tall as the tallest sketch. */
+.server-view-presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.server-view-preset {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 9px 10px 10px;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.server-view-preset:hover {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+.server-view-preset:active {
+  transform: scale(0.98);
+}
+
+.server-view-preset.is-selected {
+  border-color: #4caf50;
+  background: color-mix(in srgb, #4caf50 12%, transparent);
+  box-shadow: inset 0 0 0 1px #4caf50;
+}
+
+
+.server-view-preset__copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.server-view-preset__title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-view-preset__desc {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.server-view-sketch {
+  display: flex;
+  height: 40px;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.server-view-sketch__card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+.server-view-sketch__main {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.server-view-sketch__flag {
+  width: 9px;
+  height: 7px;
+  flex: 0 0 9px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text) 30%, transparent);
+}
+
+.server-view-sketch__text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.server-view-sketch__name,
+.server-view-sketch__subtitle,
+.server-view-sketch__row {
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text) 42%, transparent);
+}
+
+.server-view-sketch__name {
+  width: 80%;
+}
+
+.server-view-sketch__subtitle--long {
+  width: 90%;
+}
+
+.server-view-sketch__subtitle {
+  width: 50%;
+  background: color-mix(in srgb, var(--text) 22%, transparent);
+}
+
+.server-view-sketch__ping {
+  width: 10px;
+  height: 7px;
+  flex: 0 0 10px;
+  border-radius: 2px;
+  background: color-mix(in srgb, #4caf50 55%, transparent);
+}
+
+.server-view-sketch__row {
+  width: 74%;
+  margin-left: 14px;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+.server-view-sketch__row--short {
+  width: 52%;
+}
+
+.server-view-preset.is-selected .server-view-sketch__card {
+  background: color-mix(in srgb, #4caf50 14%, transparent);
+}
+
+.server-view-subtitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 50px;
+  padding: 8px 12px 8px 16px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.server-view-segments {
+  display: flex;
+  flex-shrink: 0;
+  padding: 3px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.server-view-segment {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.server-view-segment:hover {
+  color: var(--text);
+}
+
+.server-view-segment.is-selected {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-theme="light"] .server-view-segment.is-selected {
+  background: #ffffff;
+}
+
+.display-text-style-row.server-view-switch {
+  min-height: 46px;
+  padding: 8px 16px;
+  font-size: 15px;
+}

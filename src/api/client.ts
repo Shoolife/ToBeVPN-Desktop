@@ -60,6 +60,8 @@ export class ApiHttpError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    // Raw Retry-After header of the response (429 and 503 carry it).
+    public readonly retryAfter: string | null = null,
   ) {
     super(message);
     this.name = "ApiHttpError";
@@ -605,7 +607,8 @@ async function parseErrorMessage(response: Response): Promise<string> {
 
 async function expectJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    throw new ApiHttpError(response.status, await parseErrorMessage(response));
+    const retryAfter = response.headers.get("Retry-After");
+    throw new ApiHttpError(response.status, await parseErrorMessage(response), retryAfter);
   }
   return (await response.json()) as T;
 }

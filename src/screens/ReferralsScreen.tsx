@@ -12,6 +12,11 @@ import {
   getReferrals,
   setReferrer,
 } from "../api/client";
+import {
+  getReferrerLimitUntil,
+  parseRetryAfterSeconds,
+  setReferrerLimitUntil,
+} from "../session/referrerLimit";
 import type {
   ReferralListItemDto,
   ReferralsDto,
@@ -61,7 +66,27 @@ type AssignmentErrorKey =
   | "referrals_referrer_error_not_found"
   | "referrals_referrer_error_conflict"
   | "referrals_referrer_error_unavailable"
+  | "referrals_referrer_error_limited_short"
   | "referrals_referrer_error_unknown";
+
+// Retry-After missing or unreadable: the server's window is at most 24 h, an
+// hour is a safe pause that still lets the user retry the same day.
+const DEFAULT_LIMIT_WAIT_SECONDS = 3600;
+
+// "1 ч 05 мин", "12 мин", "минуту" - rounded up, so the form never claims the
+// wait is over before the server would accept the request.
+function formatLimitWait(seconds: number): string {
+  if (seconds < 60) return t("referrals_referrer_wait_under_minute");
+  const minutes = Math.ceil(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours > 0) {
+    return t("referrals_referrer_wait_hours")
+      .replace("{h}", String(hours))
+      .replace("{m}", String(rest).padStart(2, "0"));
+  }
+  return t("referrals_referrer_wait_minutes").replace("{m}", String(minutes));
+}
 
 const PREVIEW_DATA: ReferralData = {
   referralUrl: "https://t.me/meow_meow_vpn_bot?start=ref_preview",
@@ -301,6 +326,30 @@ export default function ReferralsScreen({
   const [assignmentError, setAssignmentError] =
     useState<AssignmentErrorKey | null>(null);
   const [referrerInput, setReferrerInput] = useState("");
+  // End of the server's referrer error-limit window; restored per account so
+  // a reopened screen does not send into a known 429.
+  const [referrerLimitedUntil, setReferrerLimitedUntil] = useState<number | null>(
+    () => getReferrerLimitUntil(session.telegramId),
+  );
+  const [limitNow, setLimitNow] = useState(() => Date.now());
+  useEffect(() => {
+    setReferrerLimitedUntil(getReferrerLimitUntil(session.telegramId));
+  }, [session.telegramId]);
+  useEffect(() => {
+    if (referrerLimitedUntil === null || referrerLimitedUntil <= Date.now()) return;
+    setLimitNow(Date.now());
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setLimitNow(now);
+      if (now >= referrerLimitedUntil) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [referrerLimitedUntil]);
+  const limitSecondsLeft =
+    referrerLimitedUntil === null
+      ? 0
+      : Math.max(0, Math.ceil((referrerLimitedUntil - limitNow) / 1000));
+  const isReferrerLimited = limitSecondsLeft > 0;
   const [pendingReferrerId, setPendingReferrerId] = useState<number | null>(
     previewParams?.get("confirm") === "1" ? 123456789 : null,
   );
@@ -414,7 +463,8 @@ export default function ReferralsScreen({
     if (
       assignmentInFlightRef.current ||
       dataRef.current?.referrer ||
-      !session.isLinked
+      !session.isLinked ||
+      (referrerLimitedUntil !== null && Date.now() < referrerLimitedUntil)
     ) {
       return;
     }
@@ -446,7 +496,18 @@ export default function ReferralsScreen({
       if (!browserPreview) void loadPage(true);
     } catch (error) {
       console.warn("[referrals] referrer assignment failed", error);
-      setAssignmentError(toAssignmentError(error));
+      if (error instanceof ApiHttpError && error.status === 429) {
+        const now = Date.now();
+        const waitSeconds =
+          parseRetryAfterSeconds(error.retryAfter, now) ?? DEFAULT_LIMIT_WAIT_SECONDS;
+        const until = now + waitSeconds * 1000;
+        setReferrerLimitUntil(session.telegramId, until);
+        setReferrerLimitedUntil(until);
+        setLimitNow(now);
+        setAssignmentError("referrals_referrer_error_limited_short");
+      } else {
+        setAssignmentError(toAssignmentError(error));
+      }
       setAssigningReferrer(false);
       assignmentInFlightRef.current = false;
     }
@@ -456,10 +517,15 @@ export default function ReferralsScreen({
   const parsedReferrerId = parseReferrerId(referrerInput);
   const localReferrerError =
     referrerInput.length > 0 && parsedReferrerId === null;
+  // A limit message outliving its window is no longer true.
+  const shownAssignmentError =
+    assignmentError === "referrals_referrer_error_limited_short" && !isReferrerLimited
+      ? null
+      : assignmentError;
 
   const handleReferrerSubmit = (event: FormEvent) => {
     event.preventDefault();
-    if (parsedReferrerId !== null && !isAssigningReferrer) {
+    if (parsedReferrerId !== null && !isAssigningReferrer && !isReferrerLimited) {
       setPendingReferrerId(parsedReferrerId);
     }
   };
@@ -614,24 +680,27 @@ export default function ReferralsScreen({
                       inputMode="numeric"
                       autoComplete="off"
                       disabled={isAssigningReferrer}
-                      aria-invalid={localReferrerError || assignmentError !== null}
+                      aria-invalid={localReferrerError || shownAssignmentError !== null || isReferrerLimited}
                     />
                   </span>
                 </label>
-                {(localReferrerError || assignmentError) && (
+                {(localReferrerError || isReferrerLimited || shownAssignmentError) && (
                   <div className="referrals-field__error" role="alert">
-                    {t(
-                      localReferrerError
-                        ? "referrals_referrer_id_invalid"
-                        : assignmentError!,
-                    )}
+                    {localReferrerError
+                      ? t("referrals_referrer_id_invalid")
+                      : isReferrerLimited
+                        ? t("referrals_referrer_error_limited").replace(
+                            "{time}",
+                            formatLimitWait(limitSecondsLeft),
+                          )
+                        : t(shownAssignmentError!)}
                   </div>
                 )}
 
                 <button
                   type="submit"
                   className="referrals-primary-button referrals-card__submit"
-                  disabled={parsedReferrerId === null || isAssigningReferrer}
+                  disabled={parsedReferrerId === null || isAssigningReferrer || isReferrerLimited}
                 >
                   {isAssigningReferrer && <Spinner size={18} thickness={2} />}
                   {t(

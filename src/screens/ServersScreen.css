@@ -273,6 +273,47 @@
   text-align: center;
 }
 
+/* In the monospace row a " · " takes three full cells; the dot sits in the
+   proportional UI font with a small gap instead. */
+.server-item__protocol-separator {
+  margin: 0 5px;
+  font-family: system-ui, sans-serif;
+}
+
+/* The address cell is a button: a click copies it. It fills its grid cell
+   at full row height so a click just off the text still copies; only the
+   text gets the hover highlight, grown by negative margins so it stays
+   exactly where the plain row has it. */
+.server-item__endpoint-copy {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  min-width: 0;
+  margin: -6px 0;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: copy;
+}
+
+.server-item__endpoint-copy .server-item__endpoint-domain {
+  margin: -3px -4px;
+  padding: 3px 4px;
+  border-radius: 6px;
+  transition: background 120ms ease;
+}
+
+.server-item__endpoint-copy:hover .server-item__endpoint-domain {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.server-item__endpoint-copy:active .server-item__endpoint-domain {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
 :root[data-theme="light"] .server-item__endpoint-port {
   border-color: rgba(26, 28, 30, 0.11);
   background: rgba(255, 255, 255, 0.82);

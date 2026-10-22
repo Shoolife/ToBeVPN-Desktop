@@ -35,6 +35,7 @@ import {
   getSession,
   getSessionGeneration,
   getSessionSecrets,
+  hasValidRefreshToken,
   invalidateSessionWork,
   isDemoSession,
   markDemoIdentity,
@@ -64,6 +65,7 @@ import {
 import { getDeviceFingerprint } from "./fingerprint";
 import { recordDiagnosticEvent } from "./diagnostics";
 import { mergePanelUserUuid } from "./panelIdentity";
+import { PROTOCOL_HYSTERIA2, PROTOCOL_VLESS, stableServerId } from "./serverSelection";
 
 const DEVICE_TYPE = "desktop";
 const PLATFORM = "Desktop";
@@ -1364,7 +1366,20 @@ async function checkCurrentDeviceLinkStatus(): Promise<DeviceLinkStatus> {
     }
     return res.success ? "linked" : "unknown";
   } catch (error) {
-    return isRemoteDeviceUnlinkedError(error) ? "missing" : "unknown";
+    if (!isRemoteDeviceUnlinkedError(error)) return "unknown";
+    // A 401 reaches here when the access token could not be renewed. That
+    // proves an unlink only when the server also refused the refresh token
+    // (which clears it). A refresh that merely failed - bot down, network
+    // gone, laptop just woke up - keeps a valid refresh token, and treating
+    // it as an unlink signed the user out over a transient error.
+    if (
+      error instanceof ApiHttpError &&
+      error.status === 401 &&
+      hasValidRefreshToken(getSession())
+    ) {
+      return "unknown";
+    }
+    return "missing";
   }
 }
 
@@ -1439,6 +1454,9 @@ export async function isCurrentDeviceLinked(): Promise<boolean> {
 }
 
 const DEVICE_LINK_POLL_MS = 5 * 60_000;
+// A "missing" answer is checked once more before the local session is wiped,
+// so a single bad response cannot sign the user out.
+const DEVICE_LINK_CONFIRM_MS = 15_000;
 let linkPollTimer: number | null = null;
 let linkPollGeneration = 0;
 
@@ -1468,6 +1486,22 @@ export function startDeviceLinkPolling() {
       linkPollTimer = window.setTimeout(tick, DEVICE_LINK_POLL_MS);
       return;
     }
+    await new Promise<void>((resolve) => {
+      linkPollTimer = window.setTimeout(resolve, DEVICE_LINK_CONFIRM_MS);
+    });
+    if (generation !== linkPollGeneration) return;
+    const confirmed = await checkCurrentDeviceLinkStatus();
+    if (generation !== linkPollGeneration) return;
+    if (confirmed !== "missing") {
+      recordDiagnosticEvent(
+        "DeviceLink",
+        `Device unlink not confirmed on recheck; status=${confirmed}`,
+        "W",
+      );
+      linkPollTimer = window.setTimeout(tick, DEVICE_LINK_POLL_MS);
+      return;
+    }
+    recordDiagnosticEvent("DeviceLink", "Device unlinked remotely; signing out", "W");
 
     // Tear down the tunnel before clearing identity — otherwise the OS-level
     // VPN keeps routing traffic after the user is bounced to the QR screen.
@@ -1867,6 +1901,14 @@ export interface VpnServer {
   header_type: string;
   service_name: string;
   extra: string;
+  /** "vless" or "hysteria2". Missing on profiles cached before Hysteria2
+   *  support, which are VLESS (see serverProtocol). For Hysteria2 `uuid`
+   *  carries the auth string, as on Android. */
+  protocol?: string;
+  obfs_password?: string;
+  pin_sha256?: string;
+  port_hopping?: string;
+  ech_config_list?: string;
   country: string;
   isOnline: boolean;
   sortOrder: number;
@@ -1964,7 +2006,7 @@ function parseVlessUrl(url: string): VpnServer | null {
     const sni = p.get("sni") ?? "";
 
     return {
-      id: `${address}:${port}:${sni}`,
+      id: stableServerId({ address, port, sni }),
       name,
       address,
       port,
@@ -1984,12 +2026,116 @@ function parseVlessUrl(url: string): VpnServer | null {
       header_type: p.get("headerType")?.trim().toLowerCase() ?? "",
       service_name: p.get("serviceName") ?? "",
       extra: p.get("extra") ?? "",
+      protocol: PROTOCOL_VLESS,
       country: "",
       isOnline: true,
       sortOrder: 0,
     };
   } catch {
     console.warn("[parseVlessUrl] parse error");
+    return null;
+  }
+}
+
+const HYSTERIA2_SCHEMES = ["hysteria2://", "hy2://"];
+const PORT_LIST = /^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/;
+
+/** A hopping spec the core accepts, checked as config.rs does: ports
+ *  1..65535, ascending ranges. Anything else is dropped, not the server. */
+function isValidPortList(spec: string): boolean {
+  if (!spec || spec.length > 256 || !PORT_LIST.test(spec)) return false;
+  return spec.split(",").every((part) => {
+    const [low, high = low] = part.split("-").map((value) => Number.parseInt(value, 10));
+    return low >= 1 && high <= 65_535 && low <= high;
+  });
+}
+
+/**
+ * hysteria2:// (and the short hy2://) links, as Android's Hysteria2UrlParser:
+ * hysteria2://auth@host[:port][/]?sni=&obfs=salamander&obfs-password=
+ * &pinSHA256=&mport=&ech=#name. The port may itself be a hopping spec
+ * ("443,20000-30000"), which URL() rejects, so the authority is split by
+ * hand. fp= is ignored (uTLS shapes TLS over TCP, not QUIC) and insecure=1
+ * cannot be honoured: this Xray has no allowInsecure, a self-signed server
+ * publishes pinSHA256 instead.
+ */
+function parseHysteria2Url(url: string): VpnServer | null {
+  const scheme = HYSTERIA2_SCHEMES.find((prefix) => url.toLowerCase().startsWith(prefix));
+  if (!scheme) return null;
+  try {
+    const rest = url.slice(scheme.length);
+    const hashIndex = rest.indexOf("#");
+    const beforeHash = hashIndex >= 0 ? rest.slice(0, hashIndex) : rest;
+    const rawName = hashIndex >= 0 ? rest.slice(hashIndex + 1) : "";
+    const queryIndex = beforeHash.indexOf("?");
+    const authority = (queryIndex >= 0 ? beforeHash.slice(0, queryIndex) : beforeHash)
+      .replace(/\/+$/, "");
+    const query = queryIndex >= 0 ? beforeHash.slice(queryIndex + 1) : "";
+
+    const at = authority.lastIndexOf("@");
+    if (at <= 0) return null;
+    // The whole userinfo is the auth string, "user:pass" included.
+    const auth = decodeVlessComponent(authority.slice(0, at));
+    const hostPort = authority.slice(at + 1);
+    const bracketEnd = hostPort.indexOf("]");
+    const colon = hostPort.lastIndexOf(":");
+    const hasPort = colon > bracketEnd && colon >= 0;
+    const rawHost = hasPort ? hostPort.slice(0, colon) : hostPort;
+    const address = rawHost.replace(/^\[/, "").replace(/\]$/, "");
+    const portPart = hasPort ? hostPort.slice(colon + 1) : "";
+    let port = 443;
+    let portHopping = "";
+    if (portPart) {
+      if (!PORT_LIST.test(portPart)) return null;
+      const first = Number.parseInt(portPart.split(/[,-]/)[0], 10);
+      if ((portPart.includes(",") || portPart.includes("-")) && isValidPortList(portPart)) {
+        portHopping = portPart;
+      }
+      if (first >= 1 && first <= 65_535) port = first;
+      else if (!portHopping) return null;
+    }
+    if (!auth.trim() || !address) return null;
+
+    const p = new URLSearchParams(query.replace(/\+/g, "%2B"));
+    const obfs = p.get("obfs")?.trim().toLowerCase() ?? "";
+    const pinRaw = (p.get("pinSHA256") ?? p.get("pinsha256") ?? "").replace(/:/g, "").trim().toLowerCase();
+    const mport = p.get("mport")?.trim() ?? "";
+    const sni = p.get("sni")?.trim() ?? "";
+    const name = decodeVlessComponent(rawName).trim() || address;
+    return {
+      id: stableServerId({ address, port, sni, protocol: PROTOCOL_HYSTERIA2 }),
+      name,
+      address,
+      port,
+      uuid: auth,
+      flow: "",
+      security: "tls",
+      sni,
+      fingerprint: "",
+      public_key: "",
+      short_id: "",
+      network: "hysteria",
+      path: "",
+      mode: "",
+      spx: "",
+      host: "",
+      alpn: p.get("alpn")?.trim() || "h3",
+      header_type: "",
+      service_name: "",
+      extra: "",
+      protocol: PROTOCOL_HYSTERIA2,
+      // Only salamander is supported; an unknown obfs type is left out.
+      obfs_password: !obfs || obfs === "salamander" ? p.get("obfs-password") ?? "" : "",
+      // Hex SHA-256 only: Xray rejects the whole config on a malformed pin.
+      pin_sha256: /^[0-9a-f]{64}$/.test(pinRaw) ? pinRaw : "",
+      port_hopping: isValidPortList(mport) ? mport : portHopping,
+      ech_config_list: p.get("ech")?.trim() ?? "",
+      country: "",
+      isOnline: true,
+      sortOrder: 0,
+    };
+  } catch {
+    console.warn("[parseHysteria2Url] parse error");
     return null;
   }
 }
@@ -2019,7 +2165,7 @@ function clearVpnServersMemoryCache(shortUuid: string | null): void {
 
 function parseVpnServersFromLinks(links: string[]): VpnServer[] {
   return links
-    .map(parseVlessUrl)
+    .map((link) => parseVlessUrl(link) ?? parseHysteria2Url(link))
     .filter((server): server is VpnServer => server !== null)
     .filter((server) => !isSentinelServer(server));
 }

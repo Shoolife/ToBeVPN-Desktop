@@ -46,6 +46,22 @@ pub struct ServerConfig {
     /// Raw xhttp "extra" JSON object; ignored when it is not valid JSON.
     #[serde(default)]
     pub extra: String,
+    /// "vless" or "hysteria2". Hysteria2 runs Xray's "hysteria" outbound over
+    /// QUIC; `uuid` then carries its auth string (as on Android).
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    /// Hysteria2 salamander obfuscation password; empty = no obfuscation.
+    #[serde(default)]
+    pub obfs_password: String,
+    /// Hysteria2 pinned certificate, hex SHA-256.
+    #[serde(default)]
+    pub pin_sha256: String,
+    /// Hysteria2 port hopping spec, e.g. "443,20000-30000".
+    #[serde(default)]
+    pub port_hopping: String,
+    /// Hysteria2 ECH config list (base64).
+    #[serde(default)]
+    pub ech_config_list: String,
     #[serde(default)]
     pub bypass_hosts: Vec<String>,
     #[serde(default = "default_routing_mode")]
@@ -76,6 +92,12 @@ fn default_network() -> String {
 fn default_routing_mode() -> String {
     "blocked_only".into()
 }
+fn default_protocol() -> String {
+    PROTOCOL_VLESS.into()
+}
+
+pub const PROTOCOL_VLESS: &str = "vless";
+pub const PROTOCOL_HYSTERIA2: &str = "hysteria2";
 
 impl ServerConfig {
     /// Reject malformed or unreasonably large frontend input before a VPN
@@ -86,7 +108,19 @@ impl ServerConfig {
         if self.port == 0 {
             return Err("VPN server port must be between 1 and 65535".into());
         }
-        if !is_valid_vless_id(&self.uuid)
+        if self.is_hysteria2() {
+            validate_required_text(&self.uuid, 512, "Hysteria2 auth")?;
+            validate_optional_text(&self.obfs_password, 512, "Hysteria2 obfuscation password")?;
+            validate_optional_text(&self.ech_config_list, 4096, "Hysteria2 ECH config")?;
+            if !self.pin_sha256.is_empty() && !is_hex_sha256(&self.pin_sha256) {
+                return Err("VPN Hysteria2 certificate pin is invalid".into());
+            }
+            if !self.port_hopping.is_empty() && !is_valid_port_list(&self.port_hopping) {
+                return Err("VPN Hysteria2 port hopping range is invalid".into());
+            }
+        } else if self.protocol != PROTOCOL_VLESS {
+            return Err("Unsupported VPN protocol".into());
+        } else if !is_valid_vless_id(&self.uuid)
             || self
                 .uuid
                 .eq_ignore_ascii_case("00000000-0000-0000-0000-000000000000")
@@ -150,6 +184,10 @@ impl ServerConfig {
         Ok(())
     }
 
+    pub fn is_hysteria2(&self) -> bool {
+        self.protocol == PROTOCOL_HYSTERIA2
+    }
+
     pub fn requires_direct_interface(&self) -> bool {
         matches!(self.routing_mode.as_str(), "blocked_only" | "selective")
             || !self.direct_domains.is_empty()
@@ -177,6 +215,27 @@ fn is_valid_vless_id(value: &str) -> bool {
         || (!value.is_empty()
             && value.len() < 30
             && !value.chars().any(|character| character.is_control()))
+}
+
+fn is_hex_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// "443" or "443,20000-30000": ports 1..65535, ranges ascending.
+fn is_valid_port_list(value: &str) -> bool {
+    value.len() <= 256
+        && value.split(',').all(|part| {
+            let mut bounds = part.splitn(2, '-');
+            let port = |text: Option<&str>| {
+                text.and_then(|text| text.parse::<u16>().ok())
+                    .filter(|port| *port > 0)
+            };
+            match (port(bounds.next()), bounds.next()) {
+                (Some(_), None) => true,
+                (Some(low), Some(high)) => port(Some(high)).is_some_and(|high| low <= high),
+                _ => false,
+            }
+        })
 }
 
 fn validate_required_text(value: &str, max_len: usize, label: &str) -> Result<(), String> {
@@ -328,6 +387,9 @@ fn build_outbounds(server: &ServerConfig) -> Value {
 /// server check (server_probe.rs), so a check exercises exactly the profile
 /// a connection would use.
 pub fn build_proxy_outbound(server: &ServerConfig, tag: &str) -> Value {
+    if server.is_hysteria2() {
+        return build_hysteria2_outbound(server, tag);
+    }
     let mut user: serde_json::Map<String, Value> = serde_json::Map::new();
     user.insert("id".into(), json!(server.uuid));
     user.insert("level".into(), json!(8));
@@ -353,6 +415,57 @@ pub fn build_proxy_outbound(server: &ServerConfig, tag: &str) -> Value {
         proxy["mux"] = json!({ "enabled": false, "concurrency": -1 });
     }
     proxy
+}
+
+/// Xray's "hysteria" outbound for a Hysteria2 server, as Android's
+/// VpnConfig.buildHysteria2Outbound: TLS over QUIC (no uTLS fingerprint,
+/// allowInsecure no longer exists), auth in hysteriaSettings, salamander and
+/// port hopping as UDP finalmasks.
+fn build_hysteria2_outbound(server: &ServerConfig, tag: &str) -> Value {
+    let server_name = if server.sni.is_empty() {
+        server.address.as_str()
+    } else {
+        server.sni.as_str()
+    };
+    let alpn = alpn_list(&server.alpn);
+    let mut tls = json!({
+        "serverName": server_name,
+        "alpn": if alpn.is_empty() { vec!["h3".to_string()] } else { alpn },
+    });
+    if !server.pin_sha256.is_empty() {
+        tls["pinnedPeerCertSha256"] = json!(server.pin_sha256);
+    }
+    if !server.ech_config_list.is_empty() {
+        tls["echConfigList"] = json!(server.ech_config_list);
+    }
+    let mut stream = json!({
+        "network": "hysteria",
+        "security": "tls",
+        "tlsSettings": tls,
+        "hysteriaSettings": { "version": 2, "auth": server.uuid },
+    });
+    let mut masks = Vec::new();
+    if !server.port_hopping.is_empty() {
+        masks.push(json!({
+            "type": "udphop",
+            "settings": { "mode": "intervalRemote", "remotePorts": server.port_hopping },
+        }));
+    }
+    if !server.obfs_password.is_empty() {
+        masks.push(json!({
+            "type": "salamander",
+            "settings": { "password": server.obfs_password },
+        }));
+    }
+    if !masks.is_empty() {
+        stream["finalmask"] = json!({ "udp": masks });
+    }
+    json!({
+        "tag": tag,
+        "protocol": "hysteria",
+        "settings": { "version": 2, "address": server.address, "port": server.port },
+        "streamSettings": stream,
+    })
 }
 
 fn build_stream_settings(server: &ServerConfig) -> Value {
@@ -649,6 +762,11 @@ mod tests {
             header_type: String::new(),
             service_name: String::new(),
             extra: String::new(),
+            protocol: PROTOCOL_VLESS.into(),
+            obfs_password: String::new(),
+            pin_sha256: String::new(),
+            port_hopping: String::new(),
+            ech_config_list: String::new(),
             bypass_hosts: Vec::new(),
             routing_mode: "blocked_only".into(),
             direct_domains: Vec::new(),
@@ -832,6 +950,87 @@ mod tests {
         assert_eq!(rules[4]["domain"][8], "geosite:category-ru");
         assert_eq!(rules[4]["domain"][10], "geosite:ru-available-only-inside");
         assert_eq!(rules[4]["outboundTag"], "direct");
+    }
+
+    #[test]
+    fn profiles_without_protocol_stay_vless() {
+        let server: ServerConfig = serde_json::from_value(serde_json::json!({
+            "address": "1.2.3.4", "port": 443,
+            "uuid": "11111111-1111-4111-8111-111111111111"
+        }))
+        .unwrap();
+        assert_eq!(server.protocol, PROTOCOL_VLESS);
+        assert_eq!(build_proxy_outbound(&server, "proxy")["protocol"], "vless");
+    }
+
+    #[test]
+    fn hysteria2_outbound_matches_android() {
+        let mut server = test_server();
+        server.protocol = PROTOCOL_HYSTERIA2.into();
+        server.uuid = "a long hysteria2 auth string that is not a uuid".into();
+        server.security = "tls".into();
+        server.sni = String::new();
+        server.alpn = String::new();
+        assert!(server.validate().is_ok());
+
+        let outbound = build_proxy_outbound(&server, "proxy");
+        assert_eq!(outbound["protocol"], "hysteria");
+        assert_eq!(outbound["settings"]["version"], 2);
+        assert_eq!(outbound["settings"]["address"], "203.0.113.10");
+        assert_eq!(outbound["settings"]["port"], 443);
+        let stream = &outbound["streamSettings"];
+        assert_eq!(stream["network"], "hysteria");
+        assert_eq!(stream["security"], "tls");
+        assert_eq!(stream["tlsSettings"]["serverName"], "203.0.113.10");
+        assert_eq!(stream["tlsSettings"]["alpn"], serde_json::json!(["h3"]));
+        assert!(stream["tlsSettings"].get("fingerprint").is_none());
+        assert!(stream["tlsSettings"].get("allowInsecure").is_none());
+        assert_eq!(stream["hysteriaSettings"]["auth"], server.uuid);
+        assert!(stream.get("finalmask").is_none());
+        assert!(outbound.get("mux").is_none());
+
+        server.sni = "hy.example".into();
+        server.obfs_password = "secret".into();
+        server.port_hopping = "443,20000-30000".into();
+        server.pin_sha256 = "ab".repeat(32);
+        assert!(server.validate().is_ok());
+        let stream = build_proxy_outbound(&server, "proxy")["streamSettings"].clone();
+        assert_eq!(stream["tlsSettings"]["serverName"], "hy.example");
+        assert_eq!(
+            stream["tlsSettings"]["pinnedPeerCertSha256"],
+            "ab".repeat(32)
+        );
+        assert_eq!(stream["finalmask"]["udp"][0]["type"], "udphop");
+        assert_eq!(
+            stream["finalmask"]["udp"][0]["settings"]["remotePorts"],
+            "443,20000-30000"
+        );
+        assert_eq!(stream["finalmask"]["udp"][1]["type"], "salamander");
+        assert_eq!(
+            stream["finalmask"]["udp"][1]["settings"]["password"],
+            "secret"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_hysteria2_fields() {
+        let mut server = test_server();
+        server.protocol = PROTOCOL_HYSTERIA2.into();
+        server.port_hopping = "30000-20000".into();
+        assert!(server.validate().is_err());
+        server.port_hopping = "443,abc".into();
+        assert!(server.validate().is_err());
+        server.port_hopping = "443,20000-30000".into();
+        server.pin_sha256 = "not-hex".into();
+        assert!(server.validate().is_err());
+        server.pin_sha256 = String::new();
+        assert!(server.validate().is_ok());
+        server.uuid = String::new();
+        assert!(server.validate().is_err());
+
+        let mut unknown = test_server();
+        unknown.protocol = "trojan".into();
+        assert!(unknown.validate().is_err());
     }
 
     #[test]

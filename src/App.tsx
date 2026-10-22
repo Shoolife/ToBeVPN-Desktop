@@ -31,7 +31,12 @@ import {
 import { isPaired, useSession } from "./session/store";
 import { markMainWindowPresented } from "./session/windowPresentation";
 import { startDeviceLinkPolling, stopDeviceLinkPolling } from "./session/auth";
-import { findSameServer, hasSameVpnConfig, isSameServerSelection } from "./session/serverSelection";
+import {
+  findSameServer,
+  hasSameVpnConfig,
+  isSameServerSelection,
+  serverProtocol,
+} from "./session/serverSelection";
 import { connectVpn, disconnectVpn, getVpnRuntime } from "./session/vpnState";
 import {
   launchedFromAutostart,
@@ -169,6 +174,11 @@ function toSelectedServer(server: VpnServer): SelectedServer {
     header_type: server.header_type ?? "",
     service_name: server.service_name ?? "",
     extra: server.extra ?? "",
+    protocol: serverProtocol(server),
+    obfs_password: server.obfs_password ?? "",
+    pin_sha256: server.pin_sha256 ?? "",
+    port_hopping: server.port_hopping ?? "",
+    ech_config_list: server.ech_config_list ?? "",
   };
 }
 
@@ -194,6 +204,14 @@ export interface SelectedServer {
   header_type?: string;
   service_name?: string;
   extra?: string;
+  // Hysteria2 (absent on VLESS selections saved by earlier versions, which
+  // serverProtocol reads as VLESS). Without them a chosen Hysteria2 server
+  // would reach the core as a VLESS profile and fail to connect.
+  protocol?: string;
+  obfs_password?: string;
+  pin_sha256?: string;
+  port_hopping?: string;
+  ech_config_list?: string;
 }
 
 type Direction = "forward" | "backward" | "none";
@@ -608,6 +626,9 @@ export default function App({
   const [splashLeadsToPairing] = useState(() => !isPaired() && hasSeenOnboarding());
   const wantWideWindow =
     currentScreen === "pairing" || (currentScreen === "splash" && splashLeadsToPairing);
+  // Bumped to redo the portrait/landscape switch after the window comes back
+  // from the tray (see the visibility effect below the resize effect).
+  const [windowShapeRetry, setWindowShapeRetry] = useState(0);
   // The window's contents stay transparent until the first resize, which is
   // applied instantly, so the app appears already in its final shape.
   const startupResizeRef = useRef(true);
@@ -894,7 +915,38 @@ export default function App({
       unlistenScale?.();
       if (layoutAnimationFrame !== null) cancelAnimationFrame(layoutAnimationFrame);
     };
-  }, [browserPreview, interfaceScaleRequest, wantWideWindow]);
+  }, [browserPreview, interfaceScaleRequest, wantWideWindow, windowShapeRetry]);
+
+  // The session can end while the window is hidden in the tray: the device
+  // link poll runs in the background. A hidden webview pauses animation
+  // frames and the native resize may not apply, so the switch to the
+  // landscape sign-in window started then never landed - the QR screen came
+  // back in a portrait window. Redo it once the window is visible again.
+  useEffect(() => {
+    if (browserPreview) return;
+    const recheck = () => {
+      if (document.visibilityState === "hidden") return;
+      const landscapeNow = window.innerWidth > window.innerHeight;
+      if (landscapeNow !== wantWideWindow) setWindowShapeRetry((n) => n + 1);
+    };
+    document.addEventListener("visibilitychange", recheck);
+    let unlistenFocus: (() => void) | undefined;
+    let disposed = false;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) recheck();
+      })
+      .then((handle) => {
+        if (disposed) handle();
+        else unlistenFocus = handle;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", recheck);
+      unlistenFocus?.();
+    };
+  }, [browserPreview, wantWideWindow]);
 
   const renderScreen = (screen: Screen) => {
     switch (screen) {
@@ -962,13 +1014,14 @@ export default function App({
             onOutlinedTextChange={requestOutlinedText}
             onSectionChange={setSettingsSection}
             initialSection={
-              browserPreview && ["main", "personalization", "displayScale", "advanced", "support", "about"].includes(
+              browserPreview && ["main", "personalization", "displayScale", "serverListView", "advanced", "support", "about"].includes(
                 new URLSearchParams(window.location.search).get("settingsSection") ?? "",
               )
                 ? (new URLSearchParams(window.location.search).get("settingsSection") as
                     | "main"
                     | "personalization"
                     | "displayScale"
+                    | "serverListView"
                     | "advanced"
                     | "support"
                     | "about")

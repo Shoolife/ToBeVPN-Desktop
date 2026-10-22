@@ -10,7 +10,9 @@ export const FONT_SCALE_STEP = 0.1;
 export const FONT_SCALE_DEFAULT = 1;
 
 export const DESIGN_WINDOW_WIDTH = 494;
-export const DESIGN_WINDOW_HEIGHT = 776;
+// 782 + the 34px titlebar = 816 design px, 734 px on screen at the default
+// scale (x0.9); tauri.conf.json opens the window at that size.
+export const DESIGN_WINDOW_HEIGHT = 782;
 
 // The desktop frame paints its own titlebar inside the window, above the
 // content (see .app--desktop-frame .app__content in App.css). Without this the

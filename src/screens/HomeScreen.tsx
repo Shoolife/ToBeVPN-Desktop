@@ -19,7 +19,7 @@ import {
   serverCountryCodeForUi,
   serverDisplayName,
 } from "../components/serverDisplay";
-import { findSameServer, hasSameVpnConfig } from "../session/serverSelection";
+import { findSameServer, hasSameVpnConfig, serverProtocol } from "../session/serverSelection";
 import {
   fetchVpnServers,
   getSubscriptionUsageBlocked,
@@ -263,6 +263,11 @@ function toSelectedServer(server: VpnServer): SelectedServer {
     header_type: server.header_type ?? "",
     service_name: server.service_name ?? "",
     extra: server.extra ?? "",
+    protocol: serverProtocol(server),
+    obfs_password: server.obfs_password ?? "",
+    pin_sha256: server.pin_sha256 ?? "",
+    port_hopping: server.port_hopping ?? "",
+    ech_config_list: server.ech_config_list ?? "",
   };
 }
 

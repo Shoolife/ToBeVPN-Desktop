@@ -1171,6 +1171,7 @@ pub fn run() {
             notifications::show_system_notification,
             server_probe::probe_server_profiles,
             server_probe::cancel_server_probe,
+            server_probe::probe_core_delay,
             get_hostname,
             get_hwid,
             record_window_metrics,

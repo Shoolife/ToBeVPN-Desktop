@@ -1,12 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { VpnServer } from "./auth";
-import { serverProfileKey } from "./serverSelection";
-import { preparePingBypass } from "./vpn";
+import {
+  PROTOCOL_HYSTERIA2,
+  serverProfileKey,
+  serverProtocol,
+  stableServerId,
+} from "./serverSelection";
+import { preparePingBypass, serverProfileConfig } from "./vpn";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { recordDiagnosticEvent } from "./diagnostics";
 
 const STORAGE_KEY = "tobevpn_server_quality_v1";
 const PING_TIMEOUT_MS = 3_000;
+// Hysteria2 is timed by a request through its own Xray (it has no TCP port):
+// starting the core and the QUIC handshake need more than a TCP connect.
+const CORE_PING_TIMEOUT_MS = 5_000;
 const PING_CACHE_TTL_MS = 15_000;
 const HEALTHY_WRITE_INTERVAL_MS = 5 * 60 * 1_000;
 const FAILURE_FULL_PENALTY_MS = 30 * 60 * 1_000;
@@ -28,6 +36,7 @@ export interface ServerQualityIdentity {
   address: string;
   port: number;
   sni?: string | null;
+  protocol?: string | null;
 }
 
 export interface MeasuredVpnServer extends VpnServer {
@@ -86,7 +95,7 @@ function emptyRecord(): QualityRecord {
 }
 
 function qualityKey(server: ServerQualityIdentity): string {
-  return `${server.address}:${server.port}:${server.sni ?? ""}`;
+  return stableServerId(server);
 }
 
 function isAvailableServer(server: VpnServer): boolean {
@@ -126,11 +135,23 @@ function startPingProbeBatch(probes: PendingPingProbe[]): void {
             targets.get(probe.server.address) ?? probe.server.address;
           let ping = -1;
           try {
-            const measured = await invoke<number>("tcp_ping", {
-              host: target,
-              port: probe.server.port,
-              timeoutMs: PING_TIMEOUT_MS,
-            });
+            const measured = serverProtocol(probe.server) === PROTOCOL_HYSTERIA2
+              ? await invoke<number>("probe_core_delay", {
+                // Pinned to the IP the bypass route was installed for; the
+                // domain stays as SNI, as in the full server check.
+                server: serverProfileConfig({
+                  ...probe.server,
+                  address: target,
+                  sni: probe.server.sni ||
+                    (target !== probe.server.address ? probe.server.address : ""),
+                }),
+                timeoutMs: CORE_PING_TIMEOUT_MS,
+              })
+              : await invoke<number>("tcp_ping", {
+                host: target,
+                port: probe.server.port,
+                timeoutMs: PING_TIMEOUT_MS,
+              });
             ping = measured >= 0 ? Math.max(measured, 1) : -1;
           } catch {
             ping = -1;

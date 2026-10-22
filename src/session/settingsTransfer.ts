@@ -3,6 +3,10 @@
 // language, theme and display settings move between devices both ways.
 // Site routing is desktop-only and goes into its own `desktopRouting` field,
 // which the phone ignores; the phone's per-app routing does not apply here.
+// The admins' server-list view travels in `serverListView` (admins only, on
+// both sides: a regular account neither writes nor applies it). The server
+// check timeout is `serverPingTimeoutSeconds`, named and ranged as the
+// phone's own setting so the phone can read it later without a new format.
 import { invoke } from "@tauri-apps/api/core";
 import { getSavedLang, saveLang, type Lang } from "../i18n";
 import { getSavedTheme, saveTheme, type ThemeMode } from "./theme";
@@ -27,6 +31,17 @@ import {
   type RoutingSettings,
 } from "./routingSettings";
 import { reapplyRoutingSettings } from "./vpnState";
+import {
+  loadServerListView,
+  saveServerListView,
+  type ServerListView,
+} from "./serverListView";
+import {
+  MAX_SERVER_PING_TIMEOUT_SECONDS,
+  MIN_SERVER_PING_TIMEOUT_SECONDS,
+  getServerPingTimeoutSeconds,
+  setServerPingTimeoutSeconds,
+} from "./serverProbe";
 
 const FORMAT = "tobevpn-settings";
 const VERSION = 1;
@@ -38,9 +53,22 @@ export interface SettingsTransferSelection {
   theme: boolean;
   display: boolean;
   routing: boolean;
+  serverCheck: boolean;
+  /** Admins only. */
+  serverListView: boolean;
 }
 
-export const SETTINGS_TRANSFER_SECTION_COUNT = 4;
+/** Sections a user can move; admins also get the server-list view. */
+export function settingsTransferSectionCount(isAdmin: boolean): number {
+  return isAdmin ? 6 : 5;
+}
+
+const SERVER_LIST_SUBTITLES: readonly ServerListView["subtitle"][] = [
+  "country",
+  "protocol",
+  "protocolFull",
+  "none",
+];
 
 interface PortableDisplaySettings {
   interfaceScale: number;
@@ -60,6 +88,10 @@ export interface SettingsBackupDocument {
   /** Written by the phone; not applicable on desktop. */
   appRouting?: { mode: string; packages: string[] };
   desktopRouting?: RoutingSettings;
+  /** Server check timeout, whole seconds (the phone's range). */
+  serverPingTimeoutSeconds?: number;
+  /** Admins' server-list view (desktop). */
+  serverListView?: ServerListView;
 }
 
 export interface SettingsImportPreview {
@@ -68,7 +100,14 @@ export interface SettingsImportPreview {
 }
 
 export function countSelected(selection: SettingsTransferSelection): number {
-  return [selection.language, selection.theme, selection.display, selection.routing].filter(Boolean).length;
+  return [
+    selection.language,
+    selection.theme,
+    selection.display,
+    selection.routing,
+    selection.serverCheck,
+    selection.serverListView,
+  ].filter(Boolean).length;
 }
 
 export function buildSettingsDocument(selection: SettingsTransferSelection): SettingsBackupDocument {
@@ -88,6 +127,8 @@ export function buildSettingsDocument(selection: SettingsTransferSelection): Set
     };
   }
   if (selection.routing) document.desktopRouting = loadRoutingSettings();
+  if (selection.serverCheck) document.serverPingTimeoutSeconds = getServerPingTimeoutSeconds();
+  if (selection.serverListView) document.serverListView = loadServerListView();
   return document;
 }
 
@@ -167,17 +208,48 @@ export function decodeSettingsDocument(raw: string): SettingsBackupDocument {
       proxyDomains: routing.proxyDomains,
     };
   }
+  if (doc.serverPingTimeoutSeconds !== undefined && doc.serverPingTimeoutSeconds !== null) {
+    const seconds = doc.serverPingTimeoutSeconds;
+    if (
+      typeof seconds !== "number" ||
+      !Number.isInteger(seconds) ||
+      seconds < MIN_SERVER_PING_TIMEOUT_SECONDS ||
+      seconds > MAX_SERVER_PING_TIMEOUT_SECONDS
+    ) {
+      throw new Error("Invalid server check timeout");
+    }
+    result.serverPingTimeoutSeconds = seconds;
+  }
+  if (doc.serverListView !== undefined && doc.serverListView !== null) {
+    const view = doc.serverListView as Record<string, unknown>;
+    if (
+      !SERVER_LIST_SUBTITLES.includes(view.subtitle as ServerListView["subtitle"]) ||
+      typeof view.endpoint !== "boolean" ||
+      typeof view.protocol !== "boolean"
+    ) {
+      throw new Error("Invalid server list view");
+    }
+    result.serverListView = {
+      subtitle: view.subtitle as ServerListView["subtitle"],
+      endpoint: view.endpoint,
+      protocol: view.protocol,
+    };
+  }
   if (
     result.language === undefined && result.theme === undefined &&
     result.display === undefined && result.appRouting === undefined &&
-    result.desktopRouting === undefined
+    result.desktopRouting === undefined && result.serverListView === undefined &&
+    result.serverPingTimeoutSeconds === undefined
   ) {
     throw new Error("Settings file is empty");
   }
   return result;
 }
 
-export function previewSettingsDocument(document: SettingsBackupDocument): SettingsImportPreview {
+export function previewSettingsDocument(
+  document: SettingsBackupDocument,
+  isAdmin: boolean,
+): SettingsImportPreview {
   return {
     document,
     available: {
@@ -185,6 +257,9 @@ export function previewSettingsDocument(document: SettingsBackupDocument): Setti
       theme: document.theme !== undefined,
       display: document.display !== undefined,
       routing: document.desktopRouting !== undefined,
+      serverCheck: document.serverPingTimeoutSeconds !== undefined,
+      // Admins only: on a regular account the setting has no effect.
+      serverListView: isAdmin && document.serverListView !== undefined,
     },
   };
 }
@@ -228,6 +303,12 @@ export async function applySettingsImport(
   if (selection.routing && document.desktopRouting) {
     saveRoutingSettings(document.desktopRouting);
     await reapplyRoutingSettings();
+  }
+  if (selection.serverCheck && document.serverPingTimeoutSeconds !== undefined) {
+    setServerPingTimeoutSeconds(document.serverPingTimeoutSeconds);
+  }
+  if (selection.serverListView && document.serverListView) {
+    saveServerListView(document.serverListView);
   }
   if (selection.language && document.language) {
     saveLang(document.language);

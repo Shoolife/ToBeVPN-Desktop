@@ -18,24 +18,29 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
-      icon: "public",
-      titleKey: "whats_new_panel_ready_title",
-      descriptionKey: "whats_new_panel_ready_description",
-    },
-    {
-      icon: "percent",
-      titleKey: "whats_new_clear_discounts_title",
-      descriptionKey: "whats_new_clear_discounts_description",
-    },
-    {
       icon: "bolt",
-      titleKey: "whats_new_faster_server_check_title",
-      descriptionKey: "whats_new_faster_server_check_description",
+      titleKey: "whats_new_hysteria2_title",
+      descriptionKey: "whats_new_hysteria2_description",
     },
     {
-      icon: "dataUsage",
-      titleKey: "whats_new_live_usage_title",
-      descriptionKey: "whats_new_live_usage_description",
+      icon: "person",
+      titleKey: "whats_new_stay_signed_in_title",
+      descriptionKey: "whats_new_stay_signed_in_description",
+    },
+    {
+      icon: "contentCopy",
+      titleKey: "whats_new_copy_address_title",
+      descriptionKey: "whats_new_copy_address_description",
+    },
+    {
+      icon: "settingsBackupRestore",
+      titleKey: "whats_new_transfer_timeout_title",
+      descriptionKey: "whats_new_transfer_timeout_description",
+    },
+    {
+      icon: "schedule",
+      titleKey: "whats_new_referrer_limit_title",
+      descriptionKey: "whats_new_referrer_limit_description",
     },
     {
       icon: "security",

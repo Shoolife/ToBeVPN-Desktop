@@ -192,14 +192,18 @@ pub async fn probe_server_profiles(
                 let Ok(_permit) = tcp_slots.acquire_owned().await else {
                     return;
                 };
+                // Hysteria2 is QUIC over UDP: its port is usually closed for
+                // TCP, so the TCP pre-check would fail every such server.
+                // Xray's own request below is its check (as on Android).
                 server.config.validate().is_ok()
-                    && tcp_open(
-                        &server.config.address,
-                        server.config.port,
-                        timeout,
-                        bypass.as_deref(),
-                    )
-                    .await
+                    && (server.config.is_hysteria2()
+                        || tcp_open(
+                            &server.config.address,
+                            server.config.port,
+                            timeout,
+                            bypass.as_deref(),
+                        )
+                        .await)
             };
             if RUN_GENERATION.load(Ordering::SeqCst) != generation {
                 return;
@@ -282,6 +286,46 @@ pub async fn probe_server_profiles(
 }
 
 /// Stops reporting for the current run (screen closed or a new check).
+/// One server's delay through its own Xray, outside a full check. The server
+/// list and the automatic choice use it for Hysteria2, which has no TCP port
+/// to time. Does not cancel a running check; a new check cancels this one
+/// (it then reports -1). -1: not confirmed.
+#[tauri::command]
+pub async fn probe_core_delay(
+    state: tauri::State<'_, crate::AppVpn>,
+    server: ServerConfig,
+    timeout_ms: u64,
+) -> Result<i64, String> {
+    server.validate()?;
+    let timeout = Duration::from_millis(timeout_ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS));
+    let (xray, bypass_interface) = {
+        let guard = state.0.lock().await;
+        let manager = guard
+            .as_ref()
+            .ok_or_else(|| "VPN manager is not ready".to_string())?;
+        (
+            manager.xray_binary(),
+            manager.tunnel_bypass_interface().await,
+        )
+    };
+    let generation = RUN_GENERATION.load(Ordering::SeqCst);
+    let ports = std::sync::Mutex::new(HashSet::new());
+    let delay = match probe_one(
+        &xray,
+        &server,
+        bypass_interface.as_deref(),
+        timeout,
+        generation,
+        &ports,
+    )
+    .await
+    {
+        Ok((delay, _)) if delay > 0 => delay,
+        _ => -1,
+    };
+    Ok(delay)
+}
+
 #[tauri::command]
 pub fn cancel_server_probe() {
     RUN_GENERATION.fetch_add(1, Ordering::SeqCst);
