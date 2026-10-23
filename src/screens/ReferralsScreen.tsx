@@ -1229,10 +1229,22 @@ function ReferralRewardsDetails() {
       <h2 id="referrals-rewards-dialog-title">
         {t("referrals_rewards_dialog_title")}
       </h2>
-      <p className="referrals-rewards__description">
+      <p className="referrals-rewards__highlight">
         {t("referrals_rewards_description")}
       </p>
       <div className="referrals-rewards__tiers">
+        <div className="referrals-rewards__tier">
+          <span
+            className="referrals-rewards__tier-icon referrals-rewards__tier-icon--signup"
+            aria-hidden="true"
+          >
+            <MaterialIcon name="personAdd" size={18} />
+          </span>
+          <span className="referrals-rewards__label">
+            {t("referrals_rewards_signup")}
+          </span>
+          <strong>{t("referrals_rewards_signup_value")}</strong>
+        </div>
         <div className="referrals-rewards__tier">
           <span
             className="referrals-rewards__tier-icon referrals-rewards__tier-icon--direct"

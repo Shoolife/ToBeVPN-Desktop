@@ -18,6 +18,11 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
+      icon: "cardGiftcard",
+      titleKey: "whats_new_referral_rewards_title",
+      descriptionKey: "whats_new_referral_rewards_description",
+    },
+    {
       icon: "bolt",
       titleKey: "whats_new_hysteria2_title",
       descriptionKey: "whats_new_hysteria2_description",
@@ -26,11 +31,6 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
       icon: "person",
       titleKey: "whats_new_stay_signed_in_title",
       descriptionKey: "whats_new_stay_signed_in_description",
-    },
-    {
-      icon: "contentCopy",
-      titleKey: "whats_new_copy_address_title",
-      descriptionKey: "whats_new_copy_address_description",
     },
     {
       icon: "settingsBackupRestore",

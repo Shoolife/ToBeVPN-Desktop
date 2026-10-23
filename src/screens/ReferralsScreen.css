@@ -459,12 +459,17 @@
   text-align: center;
 }
 
-.referrals-rewards__description {
-  margin: 9px 0 0;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.45;
-  text-align: center;
+/* The new rule first: an invite alone now earns days. */
+.referrals-rewards__highlight {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--success);
+  border-radius: 4px 10px 10px 4px;
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
 }
 
 .referrals-rewards__tiers {
@@ -490,7 +495,7 @@
 .referrals-rewards__label {
   min-width: 0;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.35;
 }
 
@@ -501,6 +506,11 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
+}
+
+.referrals-rewards__tier-icon--signup {
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
 }
 
 .referrals-rewards__tier-icon--direct {
