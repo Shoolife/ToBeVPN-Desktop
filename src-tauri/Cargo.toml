@@ -29,7 +29,10 @@ tokio = { version = "1", features = ["net", "time", "process", "sync", "macros",
 hostname = "0.4"
 log = "0.4"
 tauri-plugin-http = "2.5.8"
-tauri-plugin-updater = "2"
+# Updates ship as the NSIS .exe and the .deb, never as archives: without the
+# default "zip" feature the vulnerable zip crate (RUSTSEC-2026-0367/0368/0369)
+# and the archive extraction code are left out entirely.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls"] }
 tauri-plugin-process = "2"
 machine-uid = "0.6"
 os_info = { version = "3", default-features = false }
