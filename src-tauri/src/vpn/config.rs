@@ -62,6 +62,10 @@ pub struct ServerConfig {
     /// Hysteria2 ECH config list (base64).
     #[serde(default)]
     pub ech_config_list: String,
+    /// The link's fm= (Xray finalmask, v2rayN share format) as JSON; it
+    /// replaces streamSettings.finalmask. Ignored when not a JSON object.
+    #[serde(default)]
+    pub final_mask: String,
     #[serde(default)]
     pub bypass_hosts: Vec<String>,
     #[serde(default = "default_routing_mode")]
@@ -147,6 +151,9 @@ impl ServerConfig {
         // object is simply left out of the config (xhttp_extra).
         if self.extra.len() > MAX_EXTRA_BYTES {
             return Err("XHTTP extra settings are too large".into());
+        }
+        if self.final_mask.len() > MAX_EXTRA_BYTES {
+            return Err("Final mask settings are too large".into());
         }
 
         if !matches!(
@@ -387,9 +394,20 @@ fn build_outbounds(server: &ServerConfig) -> Value {
 /// server check (server_probe.rs), so a check exercises exactly the profile
 /// a connection would use.
 pub fn build_proxy_outbound(server: &ServerConfig, tag: &str) -> Value {
-    if server.is_hysteria2() {
-        return build_hysteria2_outbound(server, tag);
+    let mut proxy = if server.is_hysteria2() {
+        build_hysteria2_outbound(server, tag)
+    } else {
+        build_vless_outbound(server, tag)
+    };
+    // The link's own finalmask (fm=) replaces whatever was built, salamander
+    // and port hopping included, the way v2rayN applies it.
+    if let Some(mask) = final_mask(&server.final_mask) {
+        proxy["streamSettings"]["finalmask"] = mask;
     }
+    proxy
+}
+
+fn build_vless_outbound(server: &ServerConfig, tag: &str) -> Value {
     let mut user: serde_json::Map<String, Value> = serde_json::Map::new();
     user.insert("id".into(), json!(server.uuid));
     user.insert("level".into(), json!(8));
@@ -569,6 +587,17 @@ fn alpn_list(raw: &str) -> Vec<String> {
         .filter(|protocol| !protocol.is_empty() && seen.insert(protocol.to_string()))
         .map(str::to_string)
         .collect()
+}
+
+/// The fm= finalmask; anything but a non-empty JSON object is ignored, as on
+/// Android (VlessUrlParser.normalizeFinalMask).
+fn final_mask(raw: &str) -> Option<Value> {
+    if raw.trim().is_empty() || raw.len() > MAX_EXTRA_BYTES {
+        return None;
+    }
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .filter(|value| value.as_object().is_some_and(|object| !object.is_empty()))
 }
 
 /// The xhttp "extra" object; anything that is not a JSON object is ignored,
@@ -767,6 +796,7 @@ mod tests {
             pin_sha256: String::new(),
             port_hopping: String::new(),
             ech_config_list: String::new(),
+            final_mask: String::new(),
             bypass_hosts: Vec::new(),
             routing_mode: "blocked_only".into(),
             direct_domains: Vec::new(),
@@ -961,6 +991,41 @@ mod tests {
         .unwrap();
         assert_eq!(server.protocol, PROTOCOL_VLESS);
         assert_eq!(build_proxy_outbound(&server, "proxy")["protocol"], "vless");
+    }
+
+    #[test]
+    fn final_mask_replaces_stream_finalmask() {
+        let mut server = test_server();
+        server.final_mask =
+            r#"{"tcp":[{"type":"fragment","settings":{"packets":"tlshello"}}]}"#.into();
+        assert!(server.validate().is_ok());
+        let stream = build_proxy_outbound(&server, "proxy")["streamSettings"].clone();
+        assert_eq!(stream["finalmask"]["tcp"][0]["type"], "fragment");
+
+        server.protocol = PROTOCOL_HYSTERIA2.into();
+        server.uuid = "hysteria2 auth".into();
+        server.security = "tls".into();
+        server.obfs_password = "from-link".into();
+        server.final_mask =
+            r#"{"udp":[{"type":"salamander","settings":{"password":"from-fm"}}]}"#.into();
+        let stream = build_proxy_outbound(&server, "proxy")["streamSettings"].clone();
+        let masks = stream["finalmask"]["udp"].as_array().unwrap();
+        assert_eq!(masks.len(), 1);
+        assert_eq!(masks[0]["settings"]["password"], "from-fm");
+    }
+
+    #[test]
+    fn malformed_or_empty_final_mask_is_ignored() {
+        for raw in ["", "not json", "[1]", "{}"] {
+            let mut server = test_server();
+            server.final_mask = raw.into();
+            assert!(server.validate().is_ok());
+            let stream = build_proxy_outbound(&server, "proxy")["streamSettings"].clone();
+            assert!(stream.get("finalmask").is_none(), "{raw}");
+        }
+        let mut server = test_server();
+        server.final_mask = "x".repeat(MAX_EXTRA_BYTES + 1);
+        assert!(server.validate().is_err());
     }
 
     #[test]

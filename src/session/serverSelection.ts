@@ -35,6 +35,7 @@ export interface ServerVpnConfigIdentity {
   pin_sha256?: string | null;
   port_hopping?: string | null;
   ech_config_list?: string | null;
+  final_mask?: string | null;
 }
 
 /** Full identity of a server profile. Ids built from address:port:sni can
@@ -173,6 +174,7 @@ export function hasSameVpnConfig(
     value(a.obfs_password) === value(b.obfs_password) &&
     value(a.pin_sha256) === value(b.pin_sha256) &&
     value(a.port_hopping) === value(b.port_hopping) &&
-    value(a.ech_config_list) === value(b.ech_config_list)
+    value(a.ech_config_list) === value(b.ech_config_list) &&
+    value(a.final_mask) === value(b.final_mask)
   );
 }

@@ -11,7 +11,11 @@ import { isBrowserPreviewRuntime } from "./browserPreview";
 import { recordDiagnosticEvent } from "./diagnostics";
 
 const STORAGE_KEY = "tobevpn_server_quality_v1";
-const PING_TIMEOUT_MS = 3_000;
+// As on LG webOS and Android: a TCP ping that has not connected in 2 s is
+// "unavailable". That covers one SYN retransmit (sent after 1 s); a working
+// server answers in well under 0.2 s, and the list stops waiting on a silent
+// one. The full server check keeps the user's timeout.
+const PING_TIMEOUT_MS = 2_000;
 // Hysteria2 is timed by a request through its own Xray (it has no TCP port):
 // starting the core and the QUIC handshake need more than a TCP connect.
 const CORE_PING_TIMEOUT_MS = 5_000;

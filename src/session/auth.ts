@@ -1909,6 +1909,8 @@ export interface VpnServer {
   pin_sha256?: string;
   port_hopping?: string;
   ech_config_list?: string;
+  /** The link's fm= (Xray finalmask, v2rayN share format), compact JSON. */
+  final_mask?: string;
   country: string;
   isOnline: boolean;
   sortOrder: number;
@@ -1980,6 +1982,25 @@ function normalizeNetwork(raw: string | null): string {
   return network;
 }
 
+const MAX_FINAL_MASK_CHARS = 16_384;
+
+/**
+ * The fm= value (Xray finalmask) as compact JSON when it is a non-empty JSON
+ * object, else "": Xray rejects the whole config on a malformed finalmask,
+ * so a broken one is dropped instead of the server (as on Android).
+ */
+export function normalizeFinalMask(raw: string | null | undefined): string {
+  const text = raw?.trim() ?? "";
+  if (!text || text.length > MAX_FINAL_MASK_CHARS) return "";
+  try {
+    const value: unknown = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    return Object.keys(value).length ? JSON.stringify(value) : "";
+  } catch {
+    return "";
+  }
+}
+
 function parseVlessUrl(url: string): VpnServer | null {
   if (!url.startsWith("vless://")) return null;
   try {
@@ -2026,6 +2047,7 @@ function parseVlessUrl(url: string): VpnServer | null {
       header_type: p.get("headerType")?.trim().toLowerCase() ?? "",
       service_name: p.get("serviceName") ?? "",
       extra: p.get("extra") ?? "",
+      final_mask: normalizeFinalMask(p.get("fm")),
       protocol: PROTOCOL_VLESS,
       country: "",
       isOnline: true,
@@ -2130,6 +2152,7 @@ function parseHysteria2Url(url: string): VpnServer | null {
       pin_sha256: /^[0-9a-f]{64}$/.test(pinRaw) ? pinRaw : "",
       port_hopping: isValidPortList(mport) ? mport : portHopping,
       ech_config_list: p.get("ech")?.trim() ?? "",
+      final_mask: normalizeFinalMask(p.get("fm")),
       country: "",
       isOnline: true,
       sortOrder: 0,

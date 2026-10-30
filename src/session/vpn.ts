@@ -33,6 +33,7 @@ export interface ServerVpnConfig {
   pin_sha256?: string;
   port_hopping?: string;
   ech_config_list?: string;
+  final_mask?: string;
   bypass_hosts?: string[];
   routing_mode?: RoutingMode;
   select_all_services?: boolean;
@@ -71,6 +72,7 @@ export interface ServerProfileFields {
   pin_sha256?: string | null;
   port_hopping?: string | null;
   ech_config_list?: string | null;
+  final_mask?: string | null;
 }
 
 export function serverProfileConfig(server: ServerProfileFields): ServerVpnConfig {
@@ -99,6 +101,7 @@ export function serverProfileConfig(server: ServerProfileFields): ServerVpnConfi
     pin_sha256: server.pin_sha256 ?? "",
     port_hopping: server.port_hopping ?? "",
     ech_config_list: server.ech_config_list ?? "",
+    final_mask: server.final_mask ?? "",
   };
 }
 

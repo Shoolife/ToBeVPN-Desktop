@@ -69,9 +69,16 @@ const SYSTEM_RESUME_GAP_MS = 60_000;
 const SYSTEM_RESUME_NETWORK_SETTLE_MS = 3_000;
 const SYSTEM_RESUME_ONLINE_WAIT_MS = 15_000;
 const SYSTEM_RESUME_ONLINE_POLL_MS = 500;
-const SYSTEM_RESUME_HEALTH_ATTEMPTS = 3;
-const SYSTEM_RESUME_HEALTH_RETRY_MS = 2_000;
-const SYSTEM_RESUME_HEALTH_TIMEOUT_MS = 5_000;
+// After a short sleep the old tunnel often still works: one quick probe
+// decides. Three 5 s probes with pauses kept a dead tunnel looking
+// "connected" for about 20 s after the network came back.
+const SYSTEM_RESUME_HEALTH_ATTEMPTS = 1;
+const SYSTEM_RESUME_HEALTH_RETRY_MS = 1_000;
+const SYSTEM_RESUME_HEALTH_TIMEOUT_MS = 4_000;
+// After a long sleep the server has dropped the old connections and NAT
+// mappings have expired, so validation only delays the inevitable restart
+// (a fresh connect takes about a second).
+const SYSTEM_RESUME_RESTART_GAP_MS = 5 * 60_000;
 const NETWORK_CHANGE_SETTLE_MS = 1_500;
 
 export interface VpnRuntimeState {
@@ -133,6 +140,10 @@ let tunnelHealthFailedCycles = 0;
 let lastTunnelTrafficAt: number | null = null;
 let currentServerForRecovery: ServerVpnConfig | null = null;
 let resumeRecoveryInFlight = false;
+// A long sleep whose network came back only after the resume wait gave up:
+// the "online" event restarts the tunnel instead of a slow health recheck.
+// Tied to the connection generation, so a newer connection ignores it.
+let pendingResumeRestart: { gapMs: number; gen: number } | null = null;
 let tunnelRecoveryInFlight = false;
 let trafficQualityConfirmed = false;
 let lastDiagnosticTrafficAt = 0;
@@ -848,11 +859,14 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
   resumeRecoveryInFlight = true;
   tunnelRecoveryInFlight = true;
   tunnelHealthFailedCycles = 0;
+  pendingResumeRestart = null;
   const gen = ++connectionGeneration;
-  console.info(`[VPN] system resume detected after ${Math.round(gapMs / 1000)}s, validating tunnel`);
+  console.info(`[VPN] system resume detected after ${Math.round(gapMs / 1000)}s`);
   recordDiagnosticEvent(
     "VPN-Recovery",
-    `System resume detected after ${Math.round(gapMs / 1000)} seconds; validating existing tunnel before recovery`,
+    gapMs >= SYSTEM_RESUME_RESTART_GAP_MS
+      ? `System resume detected after ${Math.round(gapMs / 1000)} seconds; restarting the tunnel once the network is back`
+      : `System resume detected after ${Math.round(gapMs / 1000)} seconds; validating existing tunnel before recovery`,
     "W",
   );
   stopTunnelHealthCheck();
@@ -863,6 +877,9 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
     if (gen !== connectionGeneration) return;
 
     if (!networkAvailable) {
+      if (gapMs >= SYSTEM_RESUME_RESTART_GAP_MS) {
+        pendingResumeRestart = { gapMs, gen };
+      }
       recordDiagnosticEvent(
         "VPN-Recovery",
         "Underlying network is still offline after resume; preserving tunnel and waiting for the online event",
@@ -872,12 +889,21 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
       return;
     }
 
-    const healthy = await probeTunnelWithRetries(
-      SYSTEM_RESUME_HEALTH_ATTEMPTS,
-      SYSTEM_RESUME_HEALTH_RETRY_MS,
-      SYSTEM_RESUME_HEALTH_TIMEOUT_MS,
-    );
-    if (gen !== connectionGeneration || healthy === null) return;
+    const longSleep = gapMs >= SYSTEM_RESUME_RESTART_GAP_MS;
+    // The "online" event may have started its own recheck meanwhile. After
+    // a long sleep it would only probe the tunnel about to be replaced; after
+    // a short one, joining it would mean waiting out its longer retries.
+    stopTunnelHealthCheck();
+    let healthy = false;
+    if (!longSleep) {
+      const probed = await probeTunnelWithRetries(
+        SYSTEM_RESUME_HEALTH_ATTEMPTS,
+        SYSTEM_RESUME_HEALTH_RETRY_MS,
+        SYSTEM_RESUME_HEALTH_TIMEOUT_MS,
+      );
+      if (gen !== connectionGeneration || probed === null) return;
+      healthy = probed;
+    }
     if (healthy) {
       watchdogRecoveryAttempts = 0;
       tunnelHealthFailedCycles = 0;
@@ -895,7 +921,9 @@ async function recoverTunnelAfterSystemResume(gapMs: number): Promise<void> {
 
     recordDiagnosticEvent(
       "VPN-Recovery",
-      "Existing tunnel failed post-resume validation; performing one serialized restart",
+      longSleep
+        ? `Long sleep (${Math.round(gapMs / 60_000)} min); restarting the tunnel without validation`
+        : "Existing tunnel failed post-resume validation; performing one serialized restart",
       "W",
     );
     setState({ connected: false, connecting: true, disconnecting: false, lastError: null });
@@ -1156,7 +1184,25 @@ function ensureNetworkChangeListeners() {
     );
     stopTunnelHealthCheck();
   });
-  window.addEventListener("online", () => scheduleRecheck("NETWORK_ONLINE"));
+  window.addEventListener("online", () => {
+    const pending = pendingResumeRestart;
+    if (
+      pending &&
+      pending.gen === connectionGeneration &&
+      state.connected &&
+      !resumeRecoveryInFlight
+    ) {
+      pendingResumeRestart = null;
+      recordDiagnosticEvent(
+        "VPN-Recovery",
+        "Network is back after a long sleep; restarting the tunnel",
+        "W",
+      );
+      void recoverTunnelAfterSystemResume(pending.gapMs);
+      return;
+    }
+    scheduleRecheck("NETWORK_ONLINE");
+  });
 }
 ensureNetworkChangeListeners();
 

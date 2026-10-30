@@ -179,6 +179,7 @@ function toSelectedServer(server: VpnServer): SelectedServer {
     pin_sha256: server.pin_sha256 ?? "",
     port_hopping: server.port_hopping ?? "",
     ech_config_list: server.ech_config_list ?? "",
+    final_mask: server.final_mask ?? "",
   };
 }
 
@@ -212,6 +213,7 @@ export interface SelectedServer {
   pin_sha256?: string;
   port_hopping?: string;
   ech_config_list?: string;
+  final_mask?: string;
 }
 
 type Direction = "forward" | "backward" | "none";

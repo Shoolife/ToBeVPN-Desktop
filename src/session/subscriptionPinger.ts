@@ -569,10 +569,25 @@ function buildFallbackUrlFromKey(subscriptionKey: string | null | undefined): st
   if (!SUBS_FALLBACK_URL) return null;
   const key = subscriptionKey?.trim();
   if (!key) return null;
+  return fallbackSubscriptionUrl(SUBS_FALLBACK_URL, key);
+}
+
+// "{key}" / "{sub}" as written in the build setting, or percent-encoded the
+// way URL parsing in config.ts leaves it.
+const FALLBACK_KEY_PLACEHOLDER = /\{(?:key|sub)\}|%7B(?:key|sub)%7D/i;
+
+/**
+ * The fallback subscription URL for a key, as on Android: a "{key}" (or
+ * "{sub}") placeholder anywhere ("https://cdn.example/api/sub/{key}"),
+ * otherwise the "sub" query parameter ("https://fn.example/?sub=").
+ */
+export function fallbackSubscriptionUrl(base: string, key: string): string | null {
   try {
-    const url = new URL(SUBS_FALLBACK_URL);
+    const url = FALLBACK_KEY_PLACEHOLDER.test(base)
+      ? new URL(base.replace(FALLBACK_KEY_PLACEHOLDER, encodeURIComponent(key)))
+      : new URL(base);
     if (url.protocol !== "https:" || url.username || url.password) return null;
-    url.searchParams.set("sub", key);
+    if (!FALLBACK_KEY_PLACEHOLDER.test(base)) url.searchParams.set("sub", key);
     return url.toString();
   } catch {
     return null;

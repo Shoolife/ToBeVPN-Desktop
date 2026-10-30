@@ -64,10 +64,11 @@ export const BOT_API_FALLBACK_URL: string | null =
     ? normalizeConfiguredUrl(fallbackBot, "VITE_FALLBACK_BOT_DOMAIN")
     : null;
 
-// Subscription URL fallback. The .env entry already ends with `?sub=` so
-// the caller just appends the short_uuid (taken from the panel's public
-// <panel-host>/<KEY> URL). Empty if the operator hasn't set it — in
-// which case we skip the retry path.
+// Subscription URL fallback: either a template with a `{key}` placeholder
+// (`https://cdn.example/api/sub/{key}`) or a URL ending with `?sub=`; the
+// short_uuid from the panel's public <panel-host>/<KEY> URL fills it in
+// (subscriptionPinger.fallbackSubscriptionUrl). Empty if the operator
+// hasn't set it — in which case we skip the retry path.
 const fallbackSubs = (import.meta.env.VITE_FALLBACK_SUBS_DOMAIN ?? "").trim();
 export const SUBS_FALLBACK_URL: string | null = fallbackSubs
   ? normalizeConfiguredUrl(fallbackSubs, "VITE_FALLBACK_SUBS_DOMAIN")

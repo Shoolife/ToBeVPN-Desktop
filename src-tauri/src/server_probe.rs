@@ -200,7 +200,7 @@ pub async fn probe_server_profiles(
                         || tcp_open(
                             &server.config.address,
                             server.config.port,
-                            timeout,
+                            timeout.min(TCP_PING_BUDGET),
                             bypass.as_deref(),
                         )
                         .await)
@@ -337,6 +337,12 @@ fn take_results(results: &std::sync::Mutex<HashMap<String, i64>>) -> HashMap<Str
         .unwrap_or_else(|poison| poison.into_inner())
         .clone()
 }
+
+/// The TCP step of the full check: like the list's TCP ping (and Android and
+/// LG webOS), a server that has not accepted a connection within 2 s, DNS
+/// included, counts as unavailable. The Xray request after it keeps the
+/// user's timeout.
+const TCP_PING_BUDGET: Duration = Duration::from_secs(2);
 
 async fn tcp_open(host: &str, port: u16, timeout: Duration, bypass: Option<&str>) -> bool {
     match bypass {
