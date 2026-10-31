@@ -33,11 +33,6 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
       descriptionKey: "whats_new_final_mask_description",
     },
     {
-      icon: "cloudOff",
-      titleKey: "whats_new_fallback_subscription_title",
-      descriptionKey: "whats_new_fallback_subscription_description",
-    },
-    {
       icon: "security",
       titleKey: "whats_new_xray_core_title",
       descriptionKey: "whats_new_xray_core_description",
