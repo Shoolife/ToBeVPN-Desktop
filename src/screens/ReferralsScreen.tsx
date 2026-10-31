@@ -32,6 +32,7 @@ import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import { getSavedLang, t, tf, type StringKey } from "../i18n";
 import { useSession } from "../session/store";
+import { PERSONAL_DATA_MASK, usePersonalDataHidden } from "../session/profileDisplay";
 import "./ReferralsScreen.css";
 
 const PAGE_SIZE = 20;
@@ -302,6 +303,7 @@ export default function ReferralsScreen({
   browserPreview?: boolean;
 }) {
   const session = useSession();
+  const personalHidden = usePersonalDataHidden();
   const previewParams = browserPreview
     ? new URLSearchParams(window.location.search)
     : null;
@@ -622,7 +624,11 @@ export default function ReferralsScreen({
                   <span>{t("referrals_your_link")}</span>
                 </div>
                 <div className="referrals-link-card__value">
-                  {referralUrl || t("referrals_link_unavailable")}
+                  {referralUrl
+                    ? personalHidden
+                      ? PERSONAL_DATA_MASK
+                      : referralUrl
+                    : t("referrals_link_unavailable")}
                 </div>
               </div>
 
@@ -718,7 +724,9 @@ export default function ReferralsScreen({
                 <div>
                   <p>{t("referrals_referred_by")}</p>
                   <h2>
-                    {safeText(data.referrer.display_name, 200) ??
+                    {personalHidden
+                      ? PERSONAL_DATA_MASK
+                      : safeText(data.referrer.display_name, 200) ??
                       (data.referrer.telegram_id
                         ? tf(
                             "referrals_referrer_id_value",
@@ -867,6 +875,7 @@ function ReferralInlineError({
 }
 
 function ReferralListRow({ item }: { item: ReferralListItemDto }) {
+  const personalHidden = usePersonalDataHidden();
   const date = formatReferralDate(item.created_at);
   return (
     <article className="referrals-list-row">
@@ -875,7 +884,9 @@ function ReferralListRow({ item }: { item: ReferralListItemDto }) {
       </span>
       <div className="referrals-list-row__info">
         <strong>
-          {safeText(item.display_name, 200) ?? t("referrals_unknown_user")}
+          {personalHidden
+            ? PERSONAL_DATA_MASK
+            : safeText(item.display_name, 200) ?? t("referrals_unknown_user")}
         </strong>
         {date && <span>{tf("referrals_joined", date)}</span>}
       </div>

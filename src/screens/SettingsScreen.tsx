@@ -12,7 +12,11 @@ import { getAutostartEnabled, setAutostartEnabled } from "../session/autostart";
 import { getUserAvatarUrl, clearUserAvatarCache } from "../session/avatar";
 import { getUserProfile, clearUserProfileCache, type TelegramProfile } from "../session/profileName";
 import {
+  getProfileHidden,
   getProfileNameDisplay,
+  PERSONAL_DATA_MASK,
+  saveProfileHidden,
+  usePersonalDataHidden,
   saveProfileNameDisplay,
   type ProfileNameDisplay,
 } from "../session/profileDisplay";
@@ -306,6 +310,7 @@ export default function SettingsScreen({
   const [avatarLoading, setAvatarLoading] = useState(false);
   const [profile, setProfile] = useState<TelegramProfile>({ name: null, username: null });
   const [nameMode, setNameMode] = useState<ProfileNameDisplay>(() => getProfileNameDisplay());
+  const [profileHiddenSaved, setProfileHiddenSaved] = useState(() => getProfileHidden());
   const [routingMode, setRoutingMode] = useState<RoutingMode>(
     () => loadRoutingSettings().mode,
   );
@@ -1004,6 +1009,7 @@ export default function SettingsScreen({
       commitFontScale(value);
     });
   };
+  const profileHidden = usePersonalDataHidden();
   // Text under the avatar, resolved from the profile + chosen display mode.
   const fullName = profile.name;
   const handle = profile.username ? `@${profile.username}` : null;
@@ -1139,8 +1145,9 @@ export default function SettingsScreen({
             <SettingsAccountCard
               session={session}
               tier={tier}
-              avatarUrl={avatarUrl}
-              avatarLoading={avatarLoading}
+              avatarUrl={profileHidden ? null : avatarUrl}
+              avatarLoading={avatarLoading && !profileHidden}
+              nameHidden={profileHidden}
               nameMode={nameMode}
               animatedLabels={animatedLabels}
               primaryName={primaryName}
@@ -1363,6 +1370,36 @@ export default function SettingsScreen({
                 </div>
               </div>
             )}
+
+            {/* Admins only: hide the photo and the name on the account card. */}
+            {session.isAdminProfile && (
+              <div className="settings-card">
+                <SectionTitle
+                  accent="#4CAF50"
+                  title={t("settings_profile_hidden_title")}
+                  iconPath="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"
+                />
+                <div className="display-scale-group">
+                  <button
+                    type="button"
+                    className="display-text-style-row"
+                    onClick={() => setProfileHiddenSaved(saveProfileHidden(!profileHiddenSaved))}
+                  >
+                    <span className="display-text-style-row__copy">
+                      <span>{t("settings_profile_hidden_switch")}</span>
+                      <small>{t("settings_profile_hidden_description")}</small>
+                    </span>
+                    <span
+                      className={`settings-switch ${profileHiddenSaved ? "settings-switch--on" : ""}`}
+                      role="switch"
+                      aria-checked={profileHiddenSaved}
+                    >
+                      <span className="settings-switch__thumb" />
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         )}
 
@@ -1384,8 +1421,9 @@ export default function SettingsScreen({
                 <SettingsAccountCard
                   session={session}
                   tier={tier}
-                  avatarUrl={avatarUrl}
-                  avatarLoading={avatarLoading}
+                  avatarUrl={profileHidden ? null : avatarUrl}
+                  avatarLoading={avatarLoading && !profileHidden}
+                  nameHidden={profileHidden}
                   nameMode={nameMode}
                   animatedLabels={animatedLabels}
                   primaryName={primaryName}
@@ -1839,7 +1877,11 @@ export default function SettingsScreen({
               ) : (
                 <div className="settings-info-row">
                   <span className="settings-info-row__value">
-                    {session.email ?? t("email_not_set")}
+                    {session.email
+                      ? profileHidden
+                        ? PERSONAL_DATA_MASK
+                        : session.email
+                      : t("email_not_set")}
                   </span>
                   <button className="settings-email-edit-btn" onClick={handleEditEmail}>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2021,6 +2063,7 @@ function SettingsAccountCard({
   tier,
   avatarUrl,
   avatarLoading,
+  nameHidden,
   nameMode,
   animatedLabels,
   primaryName,
@@ -2032,6 +2075,7 @@ function SettingsAccountCard({
   tier: AccentTier;
   avatarUrl: string | null;
   avatarLoading: boolean;
+  nameHidden: boolean;
   nameMode: ProfileNameDisplay;
   animatedLabels: string[];
   primaryName: string | null;
@@ -2065,7 +2109,9 @@ function SettingsAccountCard({
             )}
           </div>
         </div>
-        {nameMode === "animated"
+        {nameHidden
+          ? null
+          : nameMode === "animated"
           ? animatedLabels.length > 0 && (
               <CyclingName labels={animatedLabels} className="settings-account__name" />
             )
@@ -2080,7 +2126,9 @@ function SettingsAccountCard({
         <span className={`settings-account__plan settings-account__plan--${planTier(session.userPlan)}`}>
           {planLabel(session.userPlan, session.planDisplayName)}
         </span>
-        {session.telegramId !== null ? (
+        {nameHidden ? (
+          <span className="settings-account__id">ID {PERSONAL_DATA_MASK}</span>
+        ) : session.telegramId !== null ? (
           <button
             type="button"
             className="settings-account__id settings-account__id--button"

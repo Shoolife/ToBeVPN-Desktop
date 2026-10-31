@@ -6,6 +6,7 @@ import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import type { LinkedDeviceDto } from "../api/types";
+import { usePersonalDataHidden } from "../session/profileDisplay";
 import "./DevicesScreen.css";
 
 type DeviceKind = "phone" | "desktop" | "tv";
@@ -76,17 +77,23 @@ function cleanDesktopModel(model: string | null | undefined, platform: string | 
   return trimmed;
 }
 
-function deviceName(dto: LinkedDeviceDto): string {
+// With personal data hidden the user-given device name (often the owner's
+// name) is skipped in favour of the model.
+function deviceName(dto: LinkedDeviceDto, hideName = false): string {
   const kind = inferDeviceKind(dto);
   if (kind === "desktop") {
-    const name = dto.device_name?.trim() ?? "";
+    const name = hideName ? "" : dto.device_name?.trim() ?? "";
     if (name && !isTechnicalDesktopName(name)) return name;
     const model = cleanDesktopModel(dto.device_model, dto.platform);
     if (model) return model;
     const platform = dto.platform?.trim();
     return platform ? `${t("devices_type_desktop")} ${platform}` : t("devices_type_desktop");
   }
-  return dto.device_name?.trim() || dto.device_model?.trim() || deviceTypeLabel(dto);
+  return (
+    (hideName ? "" : dto.device_name?.trim()) ||
+    dto.device_model?.trim() ||
+    deviceTypeLabel(dto)
+  );
 }
 
 function DeviceCardSkeleton({ action = false }: { action?: boolean }) {
@@ -103,6 +110,7 @@ function DeviceCardSkeleton({ action = false }: { action?: boolean }) {
 }
 
 export default function DevicesScreen({ onBack }: { onBack: () => void }) {
+  const personalHidden = usePersonalDataHidden();
   const [devices, setDevices] = useState<LinkedDeviceDto[]>([]);
   const [maxDevices, setMaxDevices] = useState(0);
   const [currentCount, setCurrentCount] = useState<number | null>(null);
@@ -247,7 +255,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
                   <div className="devices-card__icon">{deviceTypeIcon(currentDevice)}</div>
                   <div className="devices-card__info">
                     <div className="devices-card__name">
-                      {deviceName(currentDevice)}
+                      {deviceName(currentDevice, personalHidden)}
                     </div>
                     <div className="devices-card__meta">
                       {deviceTypeLabel(currentDevice)}
@@ -282,7 +290,7 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
               <div key={d.device_id} className="devices-card">
                 <div className="devices-card__icon">{deviceTypeIcon(d)}</div>
                 <div className="devices-card__info">
-                  <div className="devices-card__name">{deviceName(d)}</div>
+                  <div className="devices-card__name">{deviceName(d, personalHidden)}</div>
                   <div className="devices-card__meta">
                     {deviceTypeLabel(d)}
                     {d.platform ? ` \u00B7 ${d.platform}` : ""}

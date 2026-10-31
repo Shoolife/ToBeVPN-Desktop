@@ -195,13 +195,22 @@ async function buildSubscriptionRequestContext(): Promise<SubscriptionRequestCon
   };
 }
 
-async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
+async function timedFetch(
+  url: string,
+  headers: HeadersInit,
+  timeoutMs: number,
+  cancel?: AbortSignal,
+): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  const onCancel = () => controller.abort();
+  if (cancel?.aborted) controller.abort();
+  cancel?.addEventListener("abort", onCancel, { once: true });
   try {
     return await httpFetch(url, { method: "GET", headers, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
+    cancel?.removeEventListener("abort", onCancel);
   }
 }
 
@@ -229,10 +238,44 @@ export function fallbackHeaders(headers: Record<string, string>): Record<string,
 }
 
 /** Every request to the fallback goes through here; primary ones keep x-hwid. */
-async function fallbackFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
+async function fallbackFetch(
+  url: string,
+  headers: HeadersInit,
+  timeoutMs: number,
+  cancel?: AbortSignal,
+): Promise<Response> {
   const converted = fallbackHeaders(headers as Record<string, string>);
   if (!converted) throw new Error("Fallback device reference cannot be encoded");
-  return timedFetch(url, converted, timeoutMs);
+  return timedFetch(url, converted, timeoutMs, cancel);
+}
+
+/**
+ * The fallback leg of a hedged request. It is sent only when the primary
+ * has not answered within FALLBACK_HEDGE_DELAY_MS, or failed sooner; once
+ * the primary answers, a fallback still waiting is dropped and one in
+ * flight is aborted. A fast primary therefore costs exactly one request.
+ */
+function hedgedFallback(
+  fallbackUrl: string,
+  headers: HeadersInit,
+  primaryAnswered: Promise<boolean>,
+): { response: Promise<Response>; cancel: () => void } {
+  const controller = new AbortController();
+  const response = (async () => {
+    const answered = await Promise.race([
+      delayMs(FALLBACK_HEDGE_DELAY_MS).then(() => false),
+      primaryAnswered,
+    ]);
+    if (answered || controller.signal.aborted) {
+      throw new Error("Primary answered; fallback not sent");
+    }
+    const result = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS, controller.signal);
+    if (await isProxyGatewayAuthError(result)) {
+      throw new Error("Fallback route rejected request");
+    }
+    return result;
+  })();
+  return { response, cancel: () => controller.abort() };
 }
 
 function buildPrimaryUrlFromKey(rawKey: string | null | undefined): string | null {
@@ -319,14 +362,11 @@ async function primaryThenFallback(
     }
     return { source: "primary", response };
   });
-  const fallbackPromise: Promise<HedgedResponse> = (async () => {
-    await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
-    if (await isProxyGatewayAuthError(response)) {
-      throw new Error("Fallback route rejected request");
-    }
-    return response;
-  })().then((response) => ({ source: "fallback", response }));
+  // true once the primary gave a usable answer, false if it failed.
+  const primaryAnswered = primaryPromise.then(() => true, () => false);
+  const fallback = hedgedFallback(fallbackUrl, headers, primaryAnswered);
+  const fallbackPromise: Promise<HedgedResponse> = fallback.response
+    .then((response) => ({ source: "fallback", response }));
 
   let winner: HedgedResponse;
   try {
@@ -339,6 +379,7 @@ async function primaryThenFallback(
     throw error;
   }
   if (winner.source === "primary") {
+    fallback.cancel();
     primaryUnavailableUntil = 0;
   } else {
     primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
@@ -389,14 +430,11 @@ async function primaryThenFallbackProfile(
     }
     return { source: "primary", response };
   });
-  const fallbackPromise: Promise<HedgedResponse> = (async () => {
-    await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
-    if (await isProxyGatewayAuthError(response)) {
-      throw new Error("Fallback route rejected request");
-    }
-    return response;
-  })().then((response) => ({ source: "fallback", response }));
+  // true once the primary gave a usable answer, false if it failed.
+  const primaryAnswered = primaryPromise.then(() => true, () => false);
+  const fallback = hedgedFallback(fallbackUrl, headers, primaryAnswered);
+  const fallbackPromise: Promise<HedgedResponse> = fallback.response
+    .then((response) => ({ source: "fallback", response }));
 
   let winner: HedgedResponse;
   try {
@@ -409,6 +447,7 @@ async function primaryThenFallbackProfile(
     throw error;
   }
   if (winner.source === "primary") {
+    fallback.cancel();
     primaryUnavailableUntil = 0;
   } else {
     primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
@@ -602,6 +641,30 @@ function buildFallbackUrlFromKey(subscriptionKey: string | null | undefined): st
   return fallbackSubscriptionUrl(SUBS_FALLBACK_URL, key);
 }
 
+/**
+ * Extensions the fallback CDN serves the subscription under (each checked
+ * against the live service); the proxy strips it to find the key.
+ */
+export const FALLBACK_SUBS_EXTENSIONS = [
+  "txt", "json", "css", "js", "html",
+  "xml", "svg", "png", "jpg", "woff2",
+] as const;
+
+// "{ext}" as written in the build setting, or percent-encoded by URL parsing.
+const FALLBACK_EXT_PLACEHOLDER = /\{ext\}|%7Bext%7D/i;
+
+/**
+ * The template with its "{ext}" replaced by a random allowed extension; a
+ * template without "{ext}" is returned as is (no extension is added).
+ */
+export function resolveFallbackExtension(
+  base: string,
+  pick: () => string = () =>
+    FALLBACK_SUBS_EXTENSIONS[Math.floor(Math.random() * FALLBACK_SUBS_EXTENSIONS.length)],
+): string {
+  return FALLBACK_EXT_PLACEHOLDER.test(base) ? base.replace(FALLBACK_EXT_PLACEHOLDER, pick()) : base;
+}
+
 // "{key}" / "{sub}" as written in the build setting, or percent-encoded the
 // way URL parsing in config.ts leaves it.
 const FALLBACK_KEY_PLACEHOLDER = /\{(?:key|sub)\}|%7B(?:key|sub)%7D/i;
@@ -612,6 +675,9 @@ const FALLBACK_KEY_PLACEHOLDER = /\{(?:key|sub)\}|%7B(?:key|sub)%7D/i;
  * otherwise the "sub" query parameter ("https://fn.example/?sub=").
  */
 export function fallbackSubscriptionUrl(base: string, key: string): string | null {
+  // One extension per built fallback URL; the retries of one subscription
+  // request reuse that URL.
+  base = resolveFallbackExtension(base);
   try {
     const url = FALLBACK_KEY_PLACEHOLDER.test(base)
       ? new URL(base.replace(FALLBACK_KEY_PLACEHOLDER, encodeURIComponent(key)))
