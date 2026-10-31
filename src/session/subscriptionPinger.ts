@@ -93,7 +93,7 @@ export async function pingSubscriptionUrl(
         ));
       }
       if (!fallbackUrl) return finish(null);
-      const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) return finish(null);
       return finish(readResult(response, minimumVersionHeader));
     }
@@ -145,7 +145,7 @@ export async function fetchSubscriptionProfile(
         ));
       }
       if (!fallbackUrl) return finish(null);
-      const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) return finish(null);
       return finish(await readProfileResult(response, minimumVersionHeader));
     }
@@ -205,6 +205,36 @@ async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number):
   }
 }
 
+const DEVICE_UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * The device id as the fallback proxy expects it: "u1." and the same UUID
+ * without dashes, case kept; the proxy restores the dashes. Null when the
+ * id is not a UUID (as on Android).
+ */
+export function encodeFallbackDeviceRef(deviceId: string): string | null {
+  return DEVICE_UUID.test(deviceId) ? `u1.${deviceId.replace(/-/g, "")}` : null;
+}
+
+/**
+ * Headers for a request to the fallback: x-hwid is replaced by x-device-ref
+ * (the fallback CDN answers 403 to a UUID in x-hwid; its proxy turns the
+ * reference back into x-hwid for Remnawave). Null without a usable id: the
+ * fallback is never sent anonymously or with a made-up id.
+ */
+export function fallbackHeaders(headers: Record<string, string>): Record<string, string> | null {
+  const { "x-hwid": hwid, "x-device-ref": _stale, ...rest } = headers;
+  const ref = hwid ? encodeFallbackDeviceRef(hwid) : null;
+  return ref ? { ...rest, "x-device-ref": ref } : null;
+}
+
+/** Every request to the fallback goes through here; primary ones keep x-hwid. */
+async function fallbackFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
+  const converted = fallbackHeaders(headers as Record<string, string>);
+  if (!converted) throw new Error("Fallback device reference cannot be encoded");
+  return timedFetch(url, converted, timeoutMs);
+}
+
 function buildPrimaryUrlFromKey(rawKey: string | null | undefined): string | null {
   const key = rawKey?.trim();
   if (!SUBSCRIPTION_BASE_URL || !key) return null;
@@ -261,7 +291,7 @@ async function primaryThenFallback(
 
   if (primaryUnavailableUntil > performance.now()) {
     try {
-      const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) {
         throw new Error("Fallback route rejected request");
       }
@@ -291,7 +321,7 @@ async function primaryThenFallback(
   });
   const fallbackPromise: Promise<HedgedResponse> = (async () => {
     await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+    const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
     if (await isProxyGatewayAuthError(response)) {
       throw new Error("Fallback route rejected request");
     }
@@ -331,7 +361,7 @@ async function primaryThenFallbackProfile(
 
   if (primaryUnavailableUntil > performance.now()) {
     try {
-      const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+      const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
       if (await isProxyGatewayAuthError(response)) {
         throw new Error("Fallback route rejected request");
       }
@@ -361,7 +391,7 @@ async function primaryThenFallbackProfile(
   });
   const fallbackPromise: Promise<HedgedResponse> = (async () => {
     await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    const response = await timedFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+    const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
     if (await isProxyGatewayAuthError(response)) {
       throw new Error("Fallback route rejected request");
     }
