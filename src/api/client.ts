@@ -430,6 +430,15 @@ function splitPrimaryFallbackInit(init: RequestInit, headers: Headers): {
   };
 }
 
+// Answers by which the fallback proxy rejects a route before it reaches the
+// backend: an unknown route (400/404/405) or the gateway's own 403.
+const FALLBACK_ROUTE_REFUSAL_STATUSES = new Set([400, 404, 405]);
+
+async function isFallbackRouteRefusal(response: Response): Promise<boolean> {
+  if (FALLBACK_ROUTE_REFUSAL_STATUSES.has(response.status)) return true;
+  return response.status === FALLBACK_HTTP_STATUS && (await isProxyGatewayAuthError(response));
+}
+
 async function rejectProxyGatewayAuthError(response: Response): Promise<Response> {
   if (response.status !== FALLBACK_HTTP_STATUS) return response;
   if (!(await isProxyGatewayAuthError(response))) return response;
@@ -477,7 +486,32 @@ async function performFetchRoute(
       "D",
     );
     const response = await attemptFetch(fallbackUrl, fallbackInit, FALLBACK_TIMEOUT_MS, userSignal);
-    return await rejectProxyGatewayAuthError(response);
+    if (userSignal?.aborted || !(await isFallbackRouteRefusal(response))) {
+      return await rejectProxyGatewayAuthError(response);
+    }
+    // The proxy refused the route itself (it can lack newer routes), so the
+    // write never reached the backend and the primary may still serve it.
+    // A transport failure above is not retried: the write may have landed.
+    recordDiagnosticEvent(
+      "API-Route",
+      `Fallback route refused write with HTTP ${response.status}; retrying primary; route=${diagnosticRoute}`,
+      "W",
+    );
+    let primaryResponse: Response;
+    try {
+      primaryResponse = await attemptFetch(
+        primaryUrl,
+        primaryInit,
+        BOT_API_FALLBACK_URL ? PRIMARY_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+        userSignal,
+      );
+    } catch (primaryError) {
+      if (response.status === FALLBACK_HTTP_STATUS) throw primaryError;
+      return response;
+    }
+    void response.body?.cancel().catch(() => {});
+    primaryUnavailableUntil = 0;
+    return primaryResponse;
   }
 
   // Endpoints that explicitly require a successful response must not inherit

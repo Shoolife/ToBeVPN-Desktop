@@ -166,6 +166,39 @@ test("writes use the known fallback route once, with proxy authorization", async
   assert.equal(call.headers.has("Authorization"), false);
 });
 
+test("a write the fallback proxy cannot route is retried once on primary", async () => {
+  const client = createClient({ fetch: (call) => {
+    if (call.method === "GET") {
+      if (!call.isFallback) throw new Error("Primary network unavailable");
+      return json({ response: [] });
+    }
+    return call.isFallback ? json({ message: "Unknown route" }, 404) : json({ success: true });
+  } });
+  await client.api.getNodes();
+  client.calls.length = 0;
+  const body = { device_name: "test PC", device_type: "pc", platform: "windows" };
+  await client.api.registerDevice(body);
+  assert.deepEqual(client.calls.map((call) => call.isFallback), [true, false]);
+  assert.deepEqual(JSON.parse(client.calls[1].body), body);
+  assert.equal(client.calls[1].headers.get("Authorization"), "Bearer initial-access");
+});
+
+test("a gateway 403 on a fallback write is retried once on primary", async () => {
+  const client = createClient({ fetch: (call) => {
+    if (call.method === "GET") {
+      if (!call.isFallback) throw new Error("Primary network unavailable");
+      return json({ response: [] });
+    }
+    return call.isFallback
+      ? json({ errorCode: 403, errorMessage: "Forbidden: Not authorized", errorType: "ClientError" }, 403)
+      : json({ success: true });
+  } });
+  await client.api.getNodes();
+  client.calls.length = 0;
+  await client.api.registerDevice({ device_name: "test PC", device_type: "pc", platform: "windows" });
+  assert.deepEqual(client.calls.map((call) => call.isFallback), [true, false]);
+});
+
 test("a failed mutation is not replayed on another route", async () => {
   const client = createClient({ fetch: () => { throw new Error("Response lost"); } });
   await assert.rejects(client.api.unlinkDevice({ device_id: "another-device" }), /Network request failed/);
