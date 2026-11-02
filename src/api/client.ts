@@ -430,6 +430,15 @@ function splitPrimaryFallbackInit(init: RequestInit, headers: Headers): {
   };
 }
 
+// Answers by which the fallback proxy rejects a route before it reaches the
+// backend: an unknown route (400/404/405) or the gateway's own 403.
+const FALLBACK_ROUTE_REFUSAL_STATUSES = new Set([400, 404, 405]);
+
+async function isFallbackRouteRefusal(response: Response): Promise<boolean> {
+  if (FALLBACK_ROUTE_REFUSAL_STATUSES.has(response.status)) return true;
+  return response.status === FALLBACK_HTTP_STATUS && (await isProxyGatewayAuthError(response));
+}
+
 async function rejectProxyGatewayAuthError(response: Response): Promise<Response> {
   if (response.status !== FALLBACK_HTTP_STATUS) return response;
   if (!(await isProxyGatewayAuthError(response))) return response;
@@ -460,7 +469,50 @@ async function performFetchRoute(
     : null;
   const method = (init.method ?? "GET").toUpperCase();
   const isSafeMethod = method === "GET" || method === "HEAD";
+  // Session acquisition must remain available when only the proxy is reachable.
+  // Keep these POSTs sequential: racing refreshes can rotate the same token twice.
+  const isSessionRequest = method === "POST" && [
+    "api/device/bootstrap",
+    "api/device/refresh",
+  ].includes(path.replace(/^\/+/, ""));
   const diagnosticRoute = diagnosticApiRoute(path);
+
+  if (fallbackUrl && !isSafeMethod && primaryUnavailableUntil > performance.now()) {
+    // Select the known reachable route before sending a mutation. Never replay
+    // it on primary if the fallback response is lost after committing the write.
+    recordDiagnosticEvent(
+      "API-Route",
+      `Write request using fallback route; route=${diagnosticRoute}`,
+      "D",
+    );
+    const response = await attemptFetch(fallbackUrl, fallbackInit, FALLBACK_TIMEOUT_MS, userSignal);
+    if (userSignal?.aborted || !(await isFallbackRouteRefusal(response))) {
+      return await rejectProxyGatewayAuthError(response);
+    }
+    // The proxy refused the route itself (it can lack newer routes), so the
+    // write never reached the backend and the primary may still serve it.
+    // A transport failure above is not retried: the write may have landed.
+    recordDiagnosticEvent(
+      "API-Route",
+      `Fallback route refused write with HTTP ${response.status}; retrying primary; route=${diagnosticRoute}`,
+      "W",
+    );
+    let primaryResponse: Response;
+    try {
+      primaryResponse = await attemptFetch(
+        primaryUrl,
+        primaryInit,
+        BOT_API_FALLBACK_URL ? PRIMARY_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+        userSignal,
+      );
+    } catch (primaryError) {
+      if (response.status === FALLBACK_HTTP_STATUS) throw primaryError;
+      return response;
+    }
+    void response.body?.cancel().catch(() => {});
+    primaryUnavailableUntil = 0;
+    return primaryResponse;
+  }
 
   // Endpoints that explicitly require a successful response must not inherit
   // the global fallback-first cooldown. The fallback proxy can legitimately
@@ -496,21 +548,26 @@ async function performFetchRoute(
     );
   }
 
+  let primaryResponse: Response;
   try {
-    return await attemptFetch(
+    primaryResponse = await attemptFetch(
       primaryUrl,
       primaryInit,
       BOT_API_FALLBACK_URL ? PRIMARY_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
       userSignal,
     );
   } catch (primaryError) {
-    // Retrying a state-changing request can duplicate an unlink, purchase,
-    // or registration when the primary committed it but its response was lost.
-    if (!BOT_API_FALLBACK_URL || !isSafeMethod) throw primaryError;
     if (userSignal?.aborted) throw primaryError;
-    console.warn(`[bot-api] primary request to ${path} failed, retrying via fallback`);
     if (!fallbackUrl) throw primaryError;
     primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    // Only session acquisition may retry a POST. Replaying another mutation
+    // could duplicate an unlink or activation after a lost primary response.
+    if (!isSafeMethod && !isSessionRequest) throw primaryError;
+    recordDiagnosticEvent(
+      "API-Route",
+      `Primary transport failed; retrying via fallback; route=${diagnosticRoute}`,
+      "W",
+    );
     const response = await attemptFetch(
       fallbackUrl,
       fallbackInit,
@@ -519,6 +576,21 @@ async function performFetchRoute(
     );
     return await rejectProxyGatewayAuthError(response);
   }
+
+  if (!fallbackUrl || !isSessionRequest || primaryResponse.status !== FALLBACK_HTTP_STATUS) {
+    return primaryResponse;
+  }
+  // Restricted networks can answer with 403 instead of a transport error,
+  // including on the bootstrap/refresh endpoints (as on the Android client).
+  recordDiagnosticEvent(
+    "API-Route",
+    `Primary session route returned HTTP 403; retrying via fallback; route=${diagnosticRoute}`,
+    "W",
+  );
+  const response = await attemptFetch(fallbackUrl, fallbackInit, FALLBACK_TIMEOUT_MS, userSignal);
+  const validated = await rejectProxyGatewayAuthError(response);
+  if (validated.ok) primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+  return validated;
 }
 
 async function performFetch(

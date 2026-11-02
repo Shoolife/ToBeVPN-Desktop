@@ -283,6 +283,7 @@ jobs:
       - name: Type-check frontend
         run: |
           npm run check:window-scale-config
+          npm run test:api-fallback
           npx tsc --noEmit
 
       - name: Check and test Rust core
@@ -549,6 +550,7 @@ jobs:
       - name: Type-check frontend
         run: |
           npm run check:window-scale-config
+          npm run test:api-fallback
           npx tsc --noEmit
 
       - name: Test Windows Rust core

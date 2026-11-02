@@ -4,6 +4,7 @@
   "version": "1.0.97",
   "type": "module",
   "scripts": {
+    "test:api-fallback": "node --test scripts/api-fallback.test.mjs",
     "check:window-scale-config": "node scripts/check-window-scale-config.mjs",
     "inject-host": "bash scripts/inject-backend-host.sh",
     "restore-host": "bash scripts/restore-placeholder.sh",
