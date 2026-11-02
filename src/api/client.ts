@@ -122,7 +122,9 @@ function buildFallbackBotUrl(
 const PRIMARY_TIMEOUT_MS = 8_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
 const REQUEST_TIMEOUT_MS = PRIMARY_TIMEOUT_MS + FALLBACK_TIMEOUT_MS;
-const FALLBACK_HEDGE_DELAY_MS = 400;
+// Reads wait this long for the primary before trying the fallback, as the
+// Android client does.
+const FAST_PRIMARY_TIMEOUT_MS = 1_200;
 const PRIMARY_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
 const FALLBACK_HTTP_STATUS = 403;
 
@@ -208,9 +210,8 @@ function isInvalidSessionStatus(status: number): boolean {
   return status === 401 || status === 403;
 }
 
-// Single attempt against one base URL with its own abort controller. Lifting
-// this out of performFetch lets read requests use a delayed fallback hedge
-// while each route keeps its own timeout and honours the caller's abort signal.
+// Single attempt against one base URL with its own abort controller, so each
+// route keeps its own timeout and honours the caller's abort signal.
 async function attemptFetch(
   url: string,
   init: RequestInit,
@@ -238,28 +239,6 @@ async function attemptFetch(
     clearTimeout(timeoutId);
     userSignal?.removeEventListener("abort", abortFromUser);
   }
-}
-
-function delayMs(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function firstSuccessful<T>(promises: Promise<T>[]): Promise<T> {
-  return new Promise((resolve, reject) => {
-    let pending = promises.length;
-    let firstError: unknown = null;
-    for (const promise of promises) {
-      promise
-        .then(resolve)
-        .catch((error) => {
-          if (firstError === null) firstError = error;
-          pending -= 1;
-          if (pending === 0) {
-            reject(firstError instanceof Error ? firstError : new Error("Network request failed"));
-          }
-        });
-    }
-  });
 }
 
 async function fallbackFirstFetch(
@@ -314,7 +293,7 @@ async function fallbackFirstFetch(
   }
 }
 
-async function hedgedGetFetch(
+async function primaryThenFallbackGet(
   primaryUrl: string,
   fallbackUrl: string,
   primaryInit: RequestInit,
@@ -323,90 +302,46 @@ async function hedgedGetFetch(
   waitForOkResponse = false,
   diagnosticRoute = "other",
 ): Promise<Response> {
-  type HedgedResponse = {
-    source: "primary" | "fallback";
-    response: Response;
-  };
-
-  const primaryController = new AbortController();
-  const fallbackController = new AbortController();
+  // One request at a time, as on Android: the fallback is sent only after
+  // the primary failed, timed out or answered with an unusable response.
   let rejectedPrimaryResponse: Response | null = null;
-  let rejectedFallbackResponse: Response | null = null;
-  if (userSignal) {
-    const abortBoth = () => {
-      primaryController.abort();
-      fallbackController.abort();
-    };
-    if (userSignal.aborted) abortBoth();
-    else userSignal.addEventListener("abort", abortBoth, { once: true });
+  try {
+    const response = await attemptFetch(primaryUrl, primaryInit, FAST_PRIMARY_TIMEOUT_MS, userSignal);
+    // A completed HTTP request is not necessarily a usable response: a 403
+    // from a restricted network, or any non-2xx for endpoints that need the
+    // data (such as /api/user/avatar), still gets the fallback's chance.
+    if (response.status !== FALLBACK_HTTP_STATUS && (!waitForOkResponse || response.ok)) {
+      primaryUnavailableUntil = 0;
+      return response;
+    }
+    rejectedPrimaryResponse = response;
+  } catch (primaryError) {
+    if (userSignal?.aborted) throw primaryError;
   }
 
-  const primaryPromise: Promise<HedgedResponse> = attemptFetch(
-    primaryUrl,
-    primaryInit,
-    PRIMARY_TIMEOUT_MS,
-    primaryController.signal,
-  ).then((response) => {
-    // A completed HTTP request is not necessarily a usable response.  In
-    // particular the fallback gateway can answer with a fast 404/429 while
-    // the (slightly slower) primary is about to return the requested data.
-    // Treating that first non-2xx response as the hedge winner made binary
-    // endpoints such as /api/user/avatar disappear intermittently.
-    if (response.status === FALLBACK_HTTP_STATUS || (waitForOkResponse && !response.ok)) {
-      rejectedPrimaryResponse = response;
-      throw new Error(`Primary route returned HTTP ${response.status}`);
-    }
-    return { source: "primary" as const, response };
-  });
-  const fallbackPromise: Promise<HedgedResponse> = (async () => {
-    await delayMs(FALLBACK_HEDGE_DELAY_MS);
-    const response = await attemptFetch(
-      fallbackUrl,
-      fallbackInit,
-      FALLBACK_TIMEOUT_MS,
-      fallbackController.signal,
-    );
-    const validated = await rejectProxyGatewayAuthError(response);
-    // Never let a non-2xx response from the fallback win the hedge. The
-    // primary response remains authoritative; the rejected fallback is only
-    // returned later when the primary route itself cannot produce a response.
-    if (!validated.ok) {
-      rejectedFallbackResponse = validated;
-      throw new Error(`Fallback route returned HTTP ${validated.status}`);
-    }
-    return validated;
-  })().then((response) => ({ source: "fallback" as const, response }));
-
+  // A non-2xx primary still proves that the primary route is reachable;
+  // only prefer the fallback for later requests when the primary did not
+  // produce an HTTP response at all (network failure/timeout).
+  primaryUnavailableUntil = waitForOkResponse && rejectedPrimaryResponse
+    ? 0
+    : performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
   try {
-    const winner = await firstSuccessful([primaryPromise, fallbackPromise]);
-    if (winner.source === "primary") {
-      fallbackController.abort();
-      primaryUnavailableUntil = 0;
-    } else {
-      primaryController.abort();
-      // A non-2xx primary still proves that the primary route is reachable;
-      // only prefer the fallback for later requests when the primary did not
-      // produce an HTTP response at all (network failure/timeout).
-      primaryUnavailableUntil = waitForOkResponse && rejectedPrimaryResponse
-        ? 0
-        : performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+    const response = await attemptFetch(fallbackUrl, fallbackInit, FALLBACK_TIMEOUT_MS, userSignal);
+    const validated = await rejectProxyGatewayAuthError(response);
+    // Never let a non-2xx fallback replace the primary's own answer. The
+    // primary response remains authoritative when it produced one.
+    if (validated.ok || !rejectedPrimaryResponse) {
       recordDiagnosticEvent(
         "API-Route",
-        `Fallback route won delayed request; route=${diagnosticRoute}`,
-        "D",
+        `Fallback route answered after primary; route=${diagnosticRoute}, status=${validated.status}`,
+        validated.ok ? "D" : "W",
       );
+      return validated;
     }
-    return winner.response;
-  } catch {
-    primaryController.abort();
-    fallbackController.abort();
-    primaryUnavailableUntil = waitForOkResponse && rejectedPrimaryResponse
-      ? 0
-      : performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
-    if (rejectedPrimaryResponse) return rejectedPrimaryResponse;
-    if (rejectedFallbackResponse) return rejectedFallbackResponse;
-    throw new Error("Network request failed");
+  } catch (fallbackError) {
+    if (userSignal?.aborted || !rejectedPrimaryResponse) throw fallbackError;
   }
+  return rejectedPrimaryResponse;
 }
 
 function splitPrimaryFallbackInit(init: RequestInit, headers: Headers): {
@@ -518,7 +453,7 @@ async function performFetchRoute(
   // the global fallback-first cooldown. The fallback proxy can legitimately
   // lack a newer/account-specific route (for example purchase plans) and
   // answer quickly with 400 while the healthy primary would return the data.
-  // Keep the primary + fallback hedge for those requests so a stale cooldown
+  // Keep primary-then-fallback for those requests so a stale cooldown
   // from an unrelated endpoint cannot hide tariffs or the user avatar.
   if (
     fallbackUrl &&
@@ -537,7 +472,7 @@ async function performFetchRoute(
   }
 
   if (fallbackUrl && isSafeMethod) {
-    return hedgedGetFetch(
+    return primaryThenFallbackGet(
       primaryUrl,
       fallbackUrl,
       primaryInit,

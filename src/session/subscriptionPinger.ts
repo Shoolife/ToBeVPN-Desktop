@@ -20,7 +20,8 @@ const httpFetch: typeof fetch =
 
 const PRIMARY_TIMEOUT_MS = 8_000;
 const FALLBACK_TIMEOUT_MS = 7_000;
-const FALLBACK_HEDGE_DELAY_MS = 400;
+// Wait this long for the primary before trying the fallback, as on Android.
+const FAST_PRIMARY_TIMEOUT_MS = 1_200;
 const PRIMARY_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
 const FALLBACK_HTTP_STATUS = 403;
 const BLOCK_HEADER = "is-hack";
@@ -195,22 +196,13 @@ async function buildSubscriptionRequestContext(): Promise<SubscriptionRequestCon
   };
 }
 
-async function timedFetch(
-  url: string,
-  headers: HeadersInit,
-  timeoutMs: number,
-  cancel?: AbortSignal,
-): Promise<Response> {
+async function timedFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-  const onCancel = () => controller.abort();
-  if (cancel?.aborted) controller.abort();
-  cancel?.addEventListener("abort", onCancel, { once: true });
   try {
     return await httpFetch(url, { method: "GET", headers, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
-    cancel?.removeEventListener("abort", onCancel);
   }
 }
 
@@ -238,44 +230,45 @@ export function fallbackHeaders(headers: Record<string, string>): Record<string,
 }
 
 /** Every request to the fallback goes through here; primary ones keep x-hwid. */
-async function fallbackFetch(
-  url: string,
-  headers: HeadersInit,
-  timeoutMs: number,
-  cancel?: AbortSignal,
-): Promise<Response> {
+async function fallbackFetch(url: string, headers: HeadersInit, timeoutMs: number): Promise<Response> {
   const converted = fallbackHeaders(headers as Record<string, string>);
   if (!converted) throw new Error("Fallback device reference cannot be encoded");
-  return timedFetch(url, converted, timeoutMs, cancel);
+  return timedFetch(url, converted, timeoutMs);
 }
 
 /**
- * The fallback leg of a hedged request. It is sent only when the primary
- * has not answered within FALLBACK_HEDGE_DELAY_MS, or failed sooner; once
- * the primary answers, a fallback still waiting is dropped and one in
- * flight is aborted. A fast primary therefore costs exactly one request.
+ * One request at a time, as on Android: the primary gets
+ * FAST_PRIMARY_TIMEOUT_MS, and the fallback is sent only after it failed,
+ * timed out or answered 403. A rejected primary answer is kept as the result
+ * when the fallback cannot do better.
  */
-function hedgedFallback(
+async function primaryOrFallback(
+  primaryUrl: string,
   fallbackUrl: string,
   headers: HeadersInit,
-  primaryAnswered: Promise<boolean>,
-): { response: Promise<Response>; cancel: () => void } {
-  const controller = new AbortController();
-  const response = (async () => {
-    const answered = await Promise.race([
-      delayMs(FALLBACK_HEDGE_DELAY_MS).then(() => false),
-      primaryAnswered,
-    ]);
-    if (answered || controller.signal.aborted) {
-      throw new Error("Primary answered; fallback not sent");
+): Promise<Response> {
+  let rejectedPrimary: Response | null = null;
+  try {
+    const response = await timedFetch(primaryUrl, headers, FAST_PRIMARY_TIMEOUT_MS);
+    if (response.status !== FALLBACK_HTTP_STATUS) {
+      primaryUnavailableUntil = 0;
+      return response;
     }
-    const result = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS, controller.signal);
-    if (await isProxyGatewayAuthError(result)) {
+    rejectedPrimary = response;
+  } catch {
+    // Network failure or timeout: try the fallback below.
+  }
+  primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
+  try {
+    const response = await fallbackFetch(fallbackUrl, headers, FALLBACK_TIMEOUT_MS);
+    if (await isProxyGatewayAuthError(response)) {
       throw new Error("Fallback route rejected request");
     }
-    return result;
-  })();
-  return { response, cancel: () => controller.abort() };
+    return response;
+  } catch (error) {
+    if (rejectedPrimary) return rejectedPrimary;
+    throw error;
+  }
 }
 
 function buildPrimaryUrlFromKey(rawKey: string | null | undefined): string | null {
@@ -291,32 +284,10 @@ function buildPrimaryUrlFromKey(rawKey: string | null | undefined): string | nul
   }
 }
 
-function delayMs(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function firstSuccessful<T>(promises: Promise<T>[]): Promise<T> {
-  return new Promise((resolve, reject) => {
-    let pending = promises.length;
-    let firstError: unknown = null;
-    for (const promise of promises) {
-      promise
-        .then(resolve)
-        .catch((error) => {
-          if (firstError === null) firstError = error;
-          pending -= 1;
-          if (pending === 0) {
-            reject(firstError instanceof Error ? firstError : new Error("Network request failed"));
-          }
-        });
-    }
-  });
-}
-
 /**
- * Start the primary subscription URL first, then hedge through the configured
- * fallback after a short delay. This avoids an 8-second stall on networks
- * where the primary route is blocked while still preferring a fast primary.
+ * Try the primary subscription URL first and the configured fallback only
+ * after it fails (see primaryOrFallback). The short primary timeout avoids
+ * an 8-second stall on networks where the primary route is blocked.
  * Both hosts must remain in the Tauri HTTP scope and control-plane bypass.
  */
 async function primaryThenFallback(
@@ -346,45 +317,7 @@ async function primaryThenFallback(
     }
   }
 
-  type HedgedResponse = {
-    source: "primary" | "fallback";
-    response: Response;
-  };
-  let rejectedPrimaryResult: SubscriptionPingResult | null = null;
-  const primaryPromise: Promise<HedgedResponse> = timedFetch(
-    primaryUrl,
-    headers,
-    PRIMARY_TIMEOUT_MS,
-  ).then((response) => {
-    if (response.status === FALLBACK_HTTP_STATUS) {
-      rejectedPrimaryResult = readResult(response, minimumVersionHeader);
-      throw new Error("Primary subscription route rejected request");
-    }
-    return { source: "primary", response };
-  });
-  // true once the primary gave a usable answer, false if it failed.
-  const primaryAnswered = primaryPromise.then(() => true, () => false);
-  const fallback = hedgedFallback(fallbackUrl, headers, primaryAnswered);
-  const fallbackPromise: Promise<HedgedResponse> = fallback.response
-    .then((response) => ({ source: "fallback", response }));
-
-  let winner: HedgedResponse;
-  try {
-    winner = await firstSuccessful([primaryPromise, fallbackPromise]);
-  } catch (error) {
-    if (rejectedPrimaryResult) {
-      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
-      return rejectedPrimaryResult;
-    }
-    throw error;
-  }
-  if (winner.source === "primary") {
-    fallback.cancel();
-    primaryUnavailableUntil = 0;
-  } else {
-    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
-  }
-  return readResult(winner.response, minimumVersionHeader);
+  return readResult(await primaryOrFallback(primaryUrl, fallbackUrl, headers), minimumVersionHeader);
 }
 
 async function primaryThenFallbackProfile(
@@ -414,45 +347,7 @@ async function primaryThenFallbackProfile(
     }
   }
 
-  type HedgedResponse = {
-    source: "primary" | "fallback";
-    response: Response;
-  };
-  let rejectedPrimaryResult: SubscriptionProfileResult | null = null;
-  const primaryPromise: Promise<HedgedResponse> = timedFetch(
-    primaryUrl,
-    headers,
-    PRIMARY_TIMEOUT_MS,
-  ).then(async (response) => {
-    if (response.status === FALLBACK_HTTP_STATUS) {
-      rejectedPrimaryResult = await readProfileResult(response, minimumVersionHeader);
-      throw new Error("Primary subscription route rejected request");
-    }
-    return { source: "primary", response };
-  });
-  // true once the primary gave a usable answer, false if it failed.
-  const primaryAnswered = primaryPromise.then(() => true, () => false);
-  const fallback = hedgedFallback(fallbackUrl, headers, primaryAnswered);
-  const fallbackPromise: Promise<HedgedResponse> = fallback.response
-    .then((response) => ({ source: "fallback", response }));
-
-  let winner: HedgedResponse;
-  try {
-    winner = await firstSuccessful([primaryPromise, fallbackPromise]);
-  } catch (error) {
-    if (rejectedPrimaryResult) {
-      primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
-      return rejectedPrimaryResult;
-    }
-    throw error;
-  }
-  if (winner.source === "primary") {
-    fallback.cancel();
-    primaryUnavailableUntil = 0;
-  } else {
-    primaryUnavailableUntil = performance.now() + PRIMARY_FAILURE_COOLDOWN_MS;
-  }
-  return readProfileResult(winner.response, minimumVersionHeader);
+  return readProfileResult(await primaryOrFallback(primaryUrl, fallbackUrl, headers), minimumVersionHeader);
 }
 
 async function isProxyGatewayAuthError(response: Response): Promise<boolean> {
