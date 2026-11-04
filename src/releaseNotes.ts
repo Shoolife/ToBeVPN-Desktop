@@ -18,6 +18,11 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
+      icon: "dns",
+      titleKey: "whats_new_openvpn_dns_title",
+      descriptionKey: "whats_new_openvpn_dns_description",
+    },
+    {
       icon: "refresh",
       titleKey: "whats_new_resume_title",
       descriptionKey: "whats_new_resume_description",

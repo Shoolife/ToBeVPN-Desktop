@@ -1194,6 +1194,27 @@ const TUNNEL_DNS_SERVERS: &str = "'1.1.1.1','8.8.8.8'";
 /// Marks our Name Resolution Policy Table rule; other rules are never touched.
 const NRPT_RULE_COMMENT: &str = "ToBeVPN";
 const DNS_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+/// Local NRPT container. On Windows 10 (dnsclientpsprovider 10.0.19041)
+/// Remove-DnsClientNrptRule deletes the whole key together with the last
+/// rule, and OpenVPN 3 only opens this key (never creates it), so its next
+/// connection failed with "cannot open NRPT base key" and lost corporate DNS.
+/// Windows 11 keeps the key. Our scripts recreate it empty when it is gone.
+const NRPT_LOCAL_KEY: &str =
+    r"HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
+/// Printed by the DNS scripts when they had to recreate NRPT_LOCAL_KEY.
+const NRPT_KEY_RESTORED_MARKER: &str = "tobevpn-nrpt-key-restored";
+
+/// PowerShell tail that recreates an empty local NRPT container if removing
+/// our rule took it away. Only the key is created: no rule, no ACL change,
+/// and the group-policy container is never touched.
+fn ensure_nrpt_key_script() -> String {
+    format!(
+        "if (-not (Test-Path -LiteralPath '{NRPT_LOCAL_KEY}')) {{ \
+           New-Item -Path '{NRPT_LOCAL_KEY}' -Force | Out-Null; \
+           if (Test-Path -LiteralPath '{NRPT_LOCAL_KEY}') {{ Write-Output '{NRPT_KEY_RESTORED_MARKER}' }} \
+           else {{ Write-Error 'NRPT container could not be recreated' }} }}"
+    )
+}
 
 /// Points every name lookup at the tunnel DNS servers.
 ///
@@ -1210,7 +1231,8 @@ async fn apply_tunnel_dns(interface_index: u32) {
          Set-DnsClientServerAddress -InterfaceIndex {interface_index} -ServerAddresses {TUNNEL_DNS_SERVERS}; \
          Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_RULE_COMMENT}' }} | Remove-DnsClientNrptRule -Force; \
          Add-DnsClientNrptRule -Namespace '.' -NameServers {TUNNEL_DNS_SERVERS} -Comment '{NRPT_RULE_COMMENT}' | Out-Null; \
-         Clear-DnsClientCache"
+         Clear-DnsClientCache; {}",
+        ensure_nrpt_key_script()
     );
     run_dns_script("apply", &script).await;
 }
@@ -1220,7 +1242,8 @@ async fn restore_system_dns() {
     let script = format!(
         "$ErrorActionPreference = 'Continue'; \
          $rules = @(Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_RULE_COMMENT}' }}); \
-         if ($rules.Count -gt 0) {{ $rules | Remove-DnsClientNrptRule -Force; Clear-DnsClientCache }}"
+         if ($rules.Count -gt 0) {{ $rules | Remove-DnsClientNrptRule -Force; Clear-DnsClientCache }}; {}",
+        ensure_nrpt_key_script()
     );
     run_dns_script("restore", &script).await;
 }
@@ -1244,6 +1267,11 @@ async fn run_dns_script(label: &str, script: &str) {
     .await;
     match result {
         Ok(Ok(output)) => {
+            if String::from_utf8_lossy(&output.stdout).contains(NRPT_KEY_RESTORED_MARKER) {
+                log_win!(
+                    "[VPN-WIN] Tunnel DNS {label}: local NRPT container was missing, recreated"
+                );
+            }
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stderr = stderr.trim();
             if output.status.success() && stderr.is_empty() {
