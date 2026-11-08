@@ -541,7 +541,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       <span>{t("router_login")}</span>
                       <input
                         value={user}
-                        placeholder={defaultRouterUser(info)}
+                        placeholder={tf("router_login_placeholder", defaultRouterUser(info))}
                         onChange={(event) => setUser(event.target.value)}
                         autoComplete="off"
                         spellCheck={false}
