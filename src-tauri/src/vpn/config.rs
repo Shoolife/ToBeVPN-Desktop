@@ -282,7 +282,7 @@ fn validate_text_list(
 pub const SOCKS_PORT: u16 = 10809;
 pub const STATS_API_PORT: u16 = 10086;
 
-const RU_DIRECT_DOMAIN_GROUPS: &[&str] = &[
+pub(crate) const RU_DIRECT_DOMAIN_GROUPS: &[&str] = &[
     "geosite:category-bank-ru",
     "geosite:category-betting-ru",
     "geosite:category-ecommerce-ru",

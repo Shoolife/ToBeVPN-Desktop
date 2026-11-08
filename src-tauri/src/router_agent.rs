@@ -7,7 +7,7 @@
 //! hev-socks5-tunnel, home devices sent into the tunnel by source address.
 //! Its runtime changes are undone by "stop" or a reboot.
 
-use crate::vpn::config::{build_proxy_outbound, ServerConfig};
+use crate::vpn::config::{build_proxy_outbound, ServerConfig, RU_DIRECT_DOMAIN_GROUPS};
 use flate2::read::DeflateDecoder;
 use russh::client;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
@@ -551,6 +551,8 @@ pub struct RouterStatus {
     pub name: Option<String>,
     /// The router's device id in the account (from its LAN MAC).
     pub hwid: Option<String>,
+    /// Russian sites go around the VPN (as "blocked only" in the app).
+    pub ru_direct: bool,
 }
 
 /// Traffic through the router's tunnels in one hour.
@@ -1042,7 +1044,7 @@ async fn install(
             "755",
         )
         .await?;
-    write_servers(&session, &servers).await?;
+    write_servers(&app, &session, &servers).await?;
     session
         .write_file(
             "/opt/tobevpn/subscription.conf",
@@ -1112,7 +1114,7 @@ async fn install(
 #[serde(rename_all = "camelCase")]
 pub struct RouterUpdate {
     pub available: bool,
-    /// "xray", "hev-socks5-tunnel", "agent".
+    /// "xray", "hev-socks5-tunnel", "agent", "sites" (the Russian sites list).
     pub components: Vec<String>,
     /// Xray on the router and the version it would get.
     pub xray_current: Option<String>,
@@ -1121,11 +1123,12 @@ pub struct RouterUpdate {
 
 /// Binaries the router should get (Xray by version against the newest
 /// suitable GitHub release, the rest by MD5), the router's Xray version,
-/// and whether the agent script differs.
+/// whether the agent script differs, and the Russian sites list when the
+/// router's one is older (only while the bypass is on).
 async fn outdated_components(
     app: &AppHandle,
     session: &Session,
-) -> Result<(Vec<Binary>, Option<String>, bool), String> {
+) -> Result<(Vec<Binary>, Option<String>, bool, Option<&'static [u8]>), String> {
     let arch = router_arch(session).await?;
     let binaries = router_binaries(app, arch).await;
     let facts = parse_key_values(
@@ -1144,7 +1147,17 @@ async fn outdated_components(
     let (agent, _) = session
         .run("cat /opt/tobevpn/tobevpn-router.sh 2>/dev/null", None)
         .await?;
-    Ok((needed, current, agent != AGENT_SCRIPT))
+    let sites = if ru_direct_enabled(session).await? {
+        let (digest, _) = session
+            .run(&format!("cat {RU_SITES_DIGEST} 2>/dev/null"), None)
+            .await?;
+        ru_sites(app)
+            .ok()
+            .filter(|sites| digest.trim() != sha256_hex(sites))
+    } else {
+        None
+    };
+    Ok((needed, current, agent != AGENT_SCRIPT, sites))
 }
 
 /// Whether the router runs older components than this app carries. Uses
@@ -1156,7 +1169,7 @@ pub async fn router_update_check(
     user: String,
 ) -> Result<RouterUpdate, String> {
     let session = open(&app, &host, &user).await?;
-    let (binaries, xray_current, agent) = outdated_components(&app, &session).await?;
+    let (binaries, xray_current, agent, sites) = outdated_components(&app, &session).await?;
     let xray_target = binaries
         .iter()
         .find(|binary| binary.name == "xray")
@@ -1167,6 +1180,9 @@ pub async fn router_update_check(
         .collect();
     if agent {
         components.push("agent".into());
+    }
+    if sites.is_some() {
+        components.push("sites".into());
     }
     Ok(RouterUpdate {
         available: !components.is_empty(),
@@ -1196,7 +1212,7 @@ async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus,
     progress(app, "connect");
     let session = open(app, host, user).await?;
     progress(app, "check");
-    let (needed, _, _) = outdated_components(app, &session).await?;
+    let (needed, _, _, sites) = outdated_components(app, &session).await?;
     if !needed.is_empty() {
         let free_kb: u64 = session
             .run_ok("df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'", None)
@@ -1260,6 +1276,15 @@ async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus,
     session
         .write_file("/etc/init.d/tobevpn", INIT_SCRIPT.as_bytes(), "755")
         .await?;
+    if let Some(sites) = sites {
+        progress(app, "upload:sites");
+        write_ru_sites(&session, sites).await?;
+        log(
+            app,
+            "info",
+            format!("Russian sites list: {} KB", sites.len() / 1024),
+        );
+    }
 
     progress(app, "start");
     let started = session
@@ -1595,7 +1620,7 @@ pub async fn router_set_servers(
             "644",
         )
         .await?;
-    write_servers(&session, &servers).await?;
+    write_servers(&app, &session, &servers).await?;
     session
         .run_ok("/opt/tobevpn/tobevpn-router.sh restart", None)
         .await?;
@@ -1631,11 +1656,31 @@ fn validate_slots(servers: &[SlotServer]) -> Result<(), String> {
 }
 
 /// Xray config, one tunnel config per slot and the slot list on the router.
-async fn write_servers(session: &Session, servers: &[SlotServer]) -> Result<(), String> {
+async fn write_servers(
+    app: &AppHandle,
+    session: &Session,
+    servers: &[SlotServer],
+) -> Result<(), String> {
+    let ru_direct = ru_direct_enabled(session).await?;
+    let sites = if ru_direct {
+        match ru_sites(app) {
+            Ok(sites) => {
+                write_ru_sites(session, sites).await?;
+                true
+            }
+            // Without the list the VPN still works, only without the bypass.
+            Err(error) => {
+                log(app, "warn", format!("Russian sites list: {error}"));
+                false
+            }
+        }
+    } else {
+        false
+    };
     session
         .write_file(
             "/opt/tobevpn/xray.json",
-            router_xray_config(servers).as_bytes(),
+            router_xray_config(servers, sites).as_bytes(),
             "600",
         )
         .await?;
@@ -1676,6 +1721,114 @@ async fn write_servers(session: &Session, servers: &[SlotServer]) -> Result<(), 
         .await
 }
 
+const RU_DIRECT_FLAG: &str = "/opt/tobevpn/ru_direct";
+const RU_SITES_PATH: &str = "/opt/tobevpn/geosite.dat";
+const RU_SITES_DIGEST: &str = "/opt/tobevpn/geosite.sha256";
+
+/// Whether Russian sites go around the VPN on this router; on unless the
+/// owner turned it off.
+async fn ru_direct_enabled(session: &Session) -> Result<bool, String> {
+    let (flag, _) = session
+        .run(&format!("cat {RU_DIRECT_FLAG} 2>/dev/null"), None)
+        .await?;
+    Ok(flag.trim() != "0")
+}
+
+static RU_SITES: std::sync::OnceLock<Result<Vec<u8>, String>> = std::sync::OnceLock::new();
+
+/// The app's geosite.dat cut down to the Russian categories the app itself
+/// sends direct: about 40 KB instead of 70 MB, so it fits any router. Xray
+/// finds it next to its binary under the usual "geosite:" names.
+fn ru_sites(app: &AppHandle) -> Result<&'static [u8], String> {
+    RU_SITES
+        .get_or_init(|| {
+            let mut candidates = Vec::new();
+            if let Ok(dir) = app.path().resource_dir() {
+                candidates.push(dir.join("bin/geosite.dat"));
+            }
+            candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin/geosite.dat"));
+            let path = candidates
+                .into_iter()
+                .find(|path| path.is_file())
+                .ok_or("geosite.dat is missing")?;
+            let data = std::fs::read(&path).map_err(|error| format!("{path:?}: {error}"))?;
+            trim_geosite(&data, RU_DIRECT_DOMAIN_GROUPS)
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+fn read_varint(data: &[u8], position: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *data.get(*position)?;
+        *position += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Keeps the entries of a geosite list (protobuf: repeated GeoSite = 1,
+/// each starting with its code = 1) whose code is one of `groups`, copied
+/// byte for byte. Fails when any group is missing.
+fn trim_geosite(data: &[u8], groups: &[&str]) -> Result<Vec<u8>, String> {
+    let wanted: Vec<String> = groups
+        .iter()
+        .map(|group| group.trim_start_matches("geosite:").to_ascii_lowercase())
+        .collect();
+    let mut found = vec![false; wanted.len()];
+    let mut out = Vec::new();
+    let mut position = 0;
+    while position < data.len() {
+        let start = position;
+        let bad = || "geosite.dat is damaged".to_string();
+        let key = read_varint(data, &mut position).ok_or_else(bad)?;
+        let length = read_varint(data, &mut position).ok_or_else(bad)? as usize;
+        let end = position
+            .checked_add(length)
+            .filter(|end| *end <= data.len())
+            .ok_or_else(bad)?;
+        if key == 0x0a {
+            let entry = &data[position..end];
+            let mut inner = 0;
+            if read_varint(entry, &mut inner) == Some(0x0a) {
+                let code_length = read_varint(entry, &mut inner).unwrap_or(0) as usize;
+                let code = entry
+                    .get(inner..inner + code_length)
+                    .map(|code| String::from_utf8_lossy(code).to_ascii_lowercase());
+                if let Some(index) = code.and_then(|code| wanted.iter().position(|w| *w == code)) {
+                    found[index] = true;
+                    out.extend_from_slice(&data[start..end]);
+                }
+            }
+        }
+        position = end;
+    }
+    match found.iter().position(|found| !found) {
+        Some(index) => Err(format!("geosite.dat has no {}", wanted[index])),
+        None => Ok(out),
+    }
+}
+
+/// Puts the list on the router unless the same one is already there.
+async fn write_ru_sites(session: &Session, sites: &[u8]) -> Result<(), String> {
+    let digest = sha256_hex(sites);
+    let (current, _) = session
+        .run(&format!("cat {RU_SITES_DIGEST} 2>/dev/null"), None)
+        .await?;
+    if current.trim() == digest {
+        return Ok(());
+    }
+    session.write_file(RU_SITES_PATH, sites, "644").await?;
+    session
+        .write_file(RU_SITES_DIGEST, format!("{digest}\n").as_bytes(), "644")
+        .await
+}
+
 fn hev_config(slot: u8) -> String {
     format!(
         "tunnel:\n  name: tobe{slot}\n  mtu: 1500\n  multi-queue: false\n  ipv4: 198.18.{slot}.1\n\
@@ -1687,7 +1840,7 @@ fn hev_config(slot: u8) -> String {
 // ------------------------------------------------------------- helpers ---
 
 /// One SOCKS input per slot, each sent to its own server.
-fn router_xray_config(servers: &[SlotServer]) -> String {
+fn router_xray_config(servers: &[SlotServer], ru_direct: bool) -> String {
     let inbounds: Vec<_> = servers
         .iter()
         .map(|server| {
@@ -1719,14 +1872,92 @@ fn router_xray_config(servers: &[SlotServer]) -> String {
         .find(|server| server.slot == 0)
         .map(|server| server.server.uuid.clone())
         .unwrap_or_default();
-    let config = json!({
+    let mut config = json!({
         "log": { "loglevel": "warning" },
         "inbounds": inbounds,
         "outbounds": outbounds,
         "routing": { "domainStrategy": "AsIs", "rules": rules },
         "xudp": { "baseKey": base_key }
     });
+    apply_ru_direct(&mut config, ru_direct);
     serde_json::to_string_pretty(&config).unwrap_or_default()
+}
+
+/// Turns the Russian sites bypass on or off in a router Xray config: the
+/// site's name is read from each connection (only to pick the route; the
+/// device's own address stays the destination) and the app's Russian
+/// categories go direct, right after the home network rule.
+fn apply_ru_direct(config: &mut serde_json::Value, enabled: bool) {
+    if let Some(inbounds) = config["inbounds"].as_array_mut() {
+        for inbound in inbounds {
+            let Some(object) = inbound.as_object_mut() else {
+                continue;
+            };
+            if enabled {
+                object.insert(
+                    "sniffing".into(),
+                    json!({
+                        "enabled": true,
+                        "destOverride": ["http", "tls", "quic"],
+                        "routeOnly": true
+                    }),
+                );
+            } else {
+                object.remove("sniffing");
+            }
+        }
+    }
+    if let Some(rules) = config["routing"]["rules"].as_array_mut() {
+        let ours = json!(RU_DIRECT_DOMAIN_GROUPS);
+        rules.retain(|rule| rule["domain"] != ours);
+        if enabled {
+            let at = usize::from(!rules.is_empty());
+            rules.insert(
+                at,
+                json!({ "type": "field", "domain": ours, "outboundTag": "direct" }),
+            );
+        }
+    }
+}
+
+/// Turns the Russian sites bypass on or off on the router, in the config
+/// already there (the servers stay as they are), and restarts the VPN.
+#[tauri::command]
+pub async fn router_set_ru_direct(
+    app: AppHandle,
+    host: String,
+    user: String,
+    enabled: bool,
+) -> Result<RouterStatus, String> {
+    let session = open(&app, &host, &user).await?;
+    if enabled {
+        write_ru_sites(&session, ru_sites(&app)?).await?;
+    }
+    let (text, _) = session
+        .run("cat /opt/tobevpn/xray.json 2>/dev/null", None)
+        .await?;
+    let mut config: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("router xray.json: {error}"))?;
+    apply_ru_direct(&mut config, enabled);
+    session
+        .write_file(
+            "/opt/tobevpn/xray.json",
+            serde_json::to_string_pretty(&config)
+                .unwrap_or_default()
+                .as_bytes(),
+            "600",
+        )
+        .await?;
+    session
+        .write_file(RU_DIRECT_FLAG, if enabled { b"1\n" } else { b"0\n" }, "644")
+        .await?;
+    session
+        .run_ok("/opt/tobevpn/tobevpn-router.sh restart", None)
+        .await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh status", None)
+        .await?;
+    Ok(parse_status(&output))
 }
 
 /// ToBeVPN server hosts, one per line; anything but a plain host name or
@@ -1804,6 +2035,7 @@ fn parse_status(text: &str) -> RouterStatus {
         server_bypass_rules: number("bypass_rules").unwrap_or(0),
         name: values.get("name").filter(|name| !name.is_empty()).cloned(),
         hwid: values.get("hwid").filter(|hwid| !hwid.is_empty()).cloned(),
+        ru_direct: values.get("ru_direct").map(String::as_str) != Some("0"),
     }
 }
 
@@ -2003,6 +2235,64 @@ fn unzip_member(zip: &[u8], name: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn geosite_entry(code: &str, domain: &str) -> Vec<u8> {
+        let mut site = vec![0x0a, code.len() as u8];
+        site.extend_from_slice(code.as_bytes());
+        let mut item = vec![0x08, 2, 0x12, domain.len() as u8];
+        item.extend_from_slice(domain.as_bytes());
+        site.push(0x12);
+        site.push(item.len() as u8);
+        site.extend(item);
+        let mut entry = vec![0x0a, site.len() as u8];
+        entry.extend(site);
+        entry
+    }
+
+    #[test]
+    fn ru_direct_toggles_cleanly() {
+        let mut config = json!({
+            "inbounds": [{ "tag": "socks0" }, { "tag": "socks1" }],
+            "routing": { "rules": [{ "ip": ["10.0.0.0/8"] }, { "inboundTag": ["socks0"] }] }
+        });
+        let original = config.clone();
+        apply_ru_direct(&mut config, true);
+        apply_ru_direct(&mut config, true);
+        let rules = config["routing"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[1]["outboundTag"], "direct");
+        assert_eq!(rules[1]["domain"][0], RU_DIRECT_DOMAIN_GROUPS[0]);
+        assert_eq!(config["inbounds"][1]["sniffing"]["routeOnly"], true);
+        apply_ru_direct(&mut config, false);
+        assert_eq!(config, original);
+    }
+
+    #[test]
+    fn trim_geosite_keeps_only_wanted_groups() {
+        let ru = geosite_entry("CATEGORY-RU", "yandex.ru");
+        let cn = geosite_entry("CN", "baidu.com");
+        let gov = geosite_entry("CATEGORY-GOV-RU", "gosuslugi.ru");
+        let data = [ru.clone(), cn, gov.clone()].concat();
+        let trimmed =
+            trim_geosite(&data, &["geosite:category-ru", "geosite:category-gov-ru"]).unwrap();
+        assert_eq!(trimmed, [ru, gov].concat());
+        assert!(trim_geosite(&data, &["geosite:category-bank-ru"]).is_err());
+        assert!(trim_geosite(&data[..data.len() - 1], &["geosite:cn"]).is_err());
+    }
+
+    #[test]
+    fn trim_geosite_real_list_is_small() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin/geosite.dat");
+        let Ok(data) = std::fs::read(path) else {
+            return;
+        };
+        let trimmed = trim_geosite(&data, RU_DIRECT_DOMAIN_GROUPS).unwrap();
+        assert!(
+            trimmed.len() > 10_000 && trimmed.len() < 512 * 1024,
+            "{}",
+            trimmed.len()
+        );
+    }
 
     #[test]
     fn parses_agent_status() {

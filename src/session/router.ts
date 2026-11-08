@@ -93,6 +93,8 @@ export interface RouterStatus {
   name: string | null;
   /** The router's device id in the account. */
   hwid: string | null;
+  /** Russian sites go around the VPN, as in the app. */
+  ruDirect: boolean;
   serverBypassRules: number;
 }
 
@@ -237,6 +239,13 @@ function remember(link: RouterLink, status: RouterStatus): void {
 /** Name to show: the owner's name, else the model. */
 export function routerDisplayName(link: RouterLink | null, info: RouterInfo | null): string | null {
   return link?.name || info?.model || null;
+}
+
+/** Russian sites around the VPN on the router, for every device on VPN; restarts the VPN. */
+export async function setRouterRuDirect(link: RouterLink, enabled: boolean): Promise<RouterStatus> {
+  const status = await invoke<RouterStatus>("router_set_ru_direct", { host: link.host, user: link.user, enabled });
+  remember(getRouterLink() ?? link, status);
+  return status;
 }
 
 export async function setRouterName(link: RouterLink, name: string): Promise<RouterStatus> {

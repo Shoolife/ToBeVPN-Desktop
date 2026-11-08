@@ -537,7 +537,7 @@ hev_count() {
 
 start_core() {
     if ! pidof xray >/dev/null; then
-        GOMEMLIMIT=40MiB GOGC=50 "$DIR/xray" run -c "$DIR/xray.json" >"$RUN/xray.log" 2>&1 &
+        XRAY_LOCATION_ASSET="$DIR" GOMEMLIMIT=40MiB GOGC=50 "$DIR/xray" run -c "$DIR/xray.json" >"$RUN/xray.log" 2>&1 &
     fi
     if [ "$(pidof hev-socks5-tunnel | wc -w)" -lt "$(hev_count)" ]; then
         # Restart every tunnel: hev does not tell which config a pid runs.
@@ -697,6 +697,7 @@ status() {
     echo "tun_tx_bytes=$tx"
     echo "default_mode=$(default_mode)"
     echo "name=$(cat "$DIR/name" 2>/dev/null)"
+    echo "ru_direct=$(cat "$DIR/ru_direct" 2>/dev/null || echo 1)"
     sed -n "s/^HWID='\(.*\)'$/hwid=\1/p" "$DIR/subscription.conf" 2>/dev/null
     echo "client_ip=${SSH_CLIENT%% *}"
     grep -i '^subscription-userinfo:' "$RUN/subscription.headers" 2>/dev/null |

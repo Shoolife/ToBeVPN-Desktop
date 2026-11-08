@@ -28,6 +28,7 @@ import {
   routerStatus,
   setRouterServers,
   setRouterName,
+  setRouterRuDirect,
   refreshRouterTraffic,
   routerTrafficBetween,
   routerDeviceLabel,
@@ -89,6 +90,7 @@ const INSTALL_STEPS: Record<string, StringKey> = {
   "download:hev-socks5-tunnel": "router_step_download",
   "upload:xray": "router_step_upload",
   "upload:hev-socks5-tunnel": "router_step_upload",
+  "upload:sites": "router_step_upload",
   configure: "router_step_configure",
   start: "router_step_start",
   done: "router_step_done",
@@ -400,6 +402,19 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const toggleRuDirect = async () => {
+    if (!link || !status) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await setRouterRuDirect(link, !status.ruDirect));
+    } catch (toggleError) {
+      setError(routerErrorText(toggleError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveName = async () => {
     if (!link) return;
     setBusy(true);
@@ -530,12 +545,16 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               </span>
               <span className="router-update__text">
                 {t("router_update_available")}
-                {update?.components.includes("xray") && update.xrayTarget && (
+                {update?.components.includes("xray") && update.xrayTarget ? (
                   <span className="router-update__versions">
                     {update.xrayCurrent
                       ? tf("router_update_xray_versions", update.xrayCurrent, update.xrayTarget)
                       : tf("router_update_xray_version", update.xrayTarget)}
                   </span>
+                ) : (
+                  update?.components.includes("sites") && (
+                    <span className="router-update__versions">{t("router_update_sites")}</span>
+                  )
                 )}
               </span>
               <button type="button" className="router-update__button" disabled={busy} onClick={() => setUpdateOpen(true)}>
@@ -588,6 +607,18 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     <span className="settings-switch__thumb" />
                   </span>
                 </button>
+                <button
+                  type="button"
+                  className="router-row router-row--toggle"
+                  disabled={busy}
+                  onClick={() => void toggleRuDirect()}
+                >
+                  <span>{t("router_ru_direct")}</span>
+                  <span className={`settings-switch ${status.ruDirect ? "settings-switch--on" : ""}`} role="switch" aria-checked={status.ruDirect}>
+                    <span className="settings-switch__thumb" />
+                  </span>
+                </button>
+                <p className="router-panel__hint">{t("router_ru_direct_hint")}</p>
               </div>
 
               <div className="router-bottom">
