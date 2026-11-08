@@ -808,6 +808,30 @@ function deviceChoice(device: RouterDevice, network: RouterNetwork): string {
  * for it. Devices keep their choice by MAC, so a new address after
  * reconnecting does not change it; new devices start without VPN.
  */
+const NOTICE_VISIBLE_MS = 6000;
+const NOTICE_FADE_MS = 280;
+
+// A short-lived notice: slides in, stays a few seconds, then folds away so
+// the list below moves up smoothly instead of jumping.
+function FadingNotice({ text, onDone }: { text: string; onDone: () => void }) {
+  const [leaving, setLeaving] = useState(false);
+  const doneRef = useRef(onDone);
+  doneRef.current = onDone;
+  useEffect(() => {
+    const hide = window.setTimeout(() => setLeaving(true), NOTICE_VISIBLE_MS);
+    const done = window.setTimeout(() => doneRef.current(), NOTICE_VISIBLE_MS + NOTICE_FADE_MS);
+    return () => {
+      window.clearTimeout(hide);
+      window.clearTimeout(done);
+    };
+  }, []);
+  return (
+    <div className={`router-notice-wrap${leaving ? " router-notice-wrap--leaving" : ""}`} role="status">
+      <p className="router-notice">{text}</p>
+    </div>
+  );
+}
+
 function HomeNetwork({
   link,
   status,
@@ -832,7 +856,7 @@ function HomeNetwork({
   onError: (message: string | null) => void;
 }) {
   const [savingMac, setSavingMac] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ id: number; text: string } | null>(null);
   const [pickingMac, setPickingMac] = useState<string | null>(null);
   const [lanNames, setLanNames] = useState<Record<string, string>>(cachedLanNames);
   const migratingRef = useRef(false);
@@ -924,11 +948,12 @@ function HomeNetwork({
       } else if (device.online) {
         const label = routerDeviceLabel(device, lanNames);
         const reconnected = await reconnectRouterDevice(link, device.mac).catch(() => false);
-        setNotice(
-          reconnected
+        setNotice({
+          id: Date.now(),
+          text: reconnected
             ? tf("router_device_reconnected", label)
             : tf("router_device_reconnect_hint", label),
-        );
+        });
       }
     } catch (error) {
       const message = String(error);
@@ -951,7 +976,7 @@ function HomeNetwork({
   return (
     <div className="router-panel">
       <p className="router-panel__hint">{t("router_devices_hint")}</p>
-      {notice && <p className="router-notice">{notice}</p>}
+      {notice && <FadingNotice key={notice.id} text={notice.text} onDone={() => setNotice(null)} />}
       {devices === null || !network ? (
         <Spinner size={20} />
       ) : devices.length === 0 ? (

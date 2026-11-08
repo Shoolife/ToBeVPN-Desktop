@@ -1150,6 +1150,38 @@
   min-width: 0;
 }
 
+.router-notice-wrap {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: router-notice-in 280ms ease-out;
+  transition: grid-template-rows 280ms ease, opacity 280ms ease, margin 280ms ease;
+}
+
+.router-notice-wrap > .router-notice {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.router-notice-wrap--leaving {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  margin-top: -10px;
+}
+
+@keyframes router-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .router-notice-wrap {
+    animation: none;
+    transition: none;
+  }
+}
+
 .router-notice {
   margin: 0;
   padding: 8px 12px;
