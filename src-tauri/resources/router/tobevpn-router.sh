@@ -292,8 +292,9 @@ dns_upstream() {
     # resolved through the tunnel they build: keep the provider's DNS.
     [ -n "$isp" ] || set -- isp
     if [ "$1" = tunnel ]; then
+        # $2: the routing table of the tunnel to ask through.
         for server in "$TUNNEL_DNS" "$TUNNEL_DNS2"; do
-            ip rule add to "$server" iif lo lookup "$TABLE" prio "$DNS_PRIO"
+            ip rule add to "$server" iif lo lookup "${2:-$TABLE}" prio "$DNS_PRIO"
         done
         want=$(
             printf 'no-resolv\nserver=%s\nserver=%s' "$TUNNEL_DNS" "$TUNNEL_DNS2"
@@ -411,11 +412,25 @@ apply_routes() {
     main_down=0
     slot_down 0 && main_down=1
     if [ "$(default_mode)" = vpn ] && [ $main_down = 0 ]; then
-        dns_upstream tunnel
+        dns_upstream tunnel "$TABLE"
         dns_router_ip=
     else
-        dns_upstream isp
+        # While any device goes through the VPN, the router's own DNS asks
+        # through the tunnel of a server in use that answers. Devices also
+        # ask the router over IPv6, which the IPv4 redirect below does not
+        # catch: from the provider those queries got its block page for
+        # blocked sites. With no device on the VPN, the provider's DNS.
         dns_router_ip=$router_ip
+        dns_slot=$(device_choices | awk '$2 == "vpn" {print $3; exit}')
+        if [ -n "$dns_slot" ]; then
+            if [ "$dns_slot" = 0 ]; then
+                dns_upstream tunnel "$TABLE"
+            else
+                dns_upstream tunnel "$((SLOT_TABLE_BASE + dns_slot))"
+            fi
+        else
+            dns_upstream isp
+        fi
     fi
     device_choices | while read -r mac mode slot; do
         ip=$(mac_address_ip "$mac")
