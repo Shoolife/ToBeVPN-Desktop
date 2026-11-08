@@ -343,3 +343,13 @@
 .router-log__time {
   color: var(--text-muted);
 }
+
+/* Section titles get room from the card above and the panel below. */
+.router-content .devices-section-title {
+  margin: 24px 6px 10px;
+}
+
+.router-content > .devices-card + .router-status,
+.router-content > .devices-card + .router-error {
+  margin-top: 12px;
+}
