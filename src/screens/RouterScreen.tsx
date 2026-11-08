@@ -9,6 +9,8 @@ import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import "../components/SubscriptionSheet.css";
+import "../components/WhatsNewDialog.css";
+import { createPortal } from "react-dom";
 import { getCachedVpnServers, isAvailableVpnServer, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
@@ -1188,6 +1190,60 @@ function ServerSheet({
   );
 }
 
+/**
+ * A centred window over the screen, as the app's other dialogs (What's new,
+ * demo login): blurred backdrop, rise in, fade out. While `locked` it cannot
+ * be closed.
+ */
+function CenterDialog({
+  label,
+  locked = false,
+  onClose,
+  children,
+}: {
+  label: string;
+  locked?: boolean;
+  onClose: () => void;
+  children: (close: (after?: () => void) => void) => ReactNode;
+}) {
+  const { closing, requestClose } = useAnimatedDialogClose(onClose);
+  const lockedRef = useRef(locked);
+  lockedRef.current = locked;
+  const close = (after?: () => void) =>
+    requestClose(after ? () => {
+      onClose();
+      after();
+    } : undefined);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !lockedRef.current) close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  return createPortal(
+    <div
+      className={`whats-new-overlay ${closing ? "whats-new-overlay--closing" : ""}`}
+      onClick={() => {
+        if (!locked) close();
+      }}
+    >
+      <div
+        className="whats-new-dialog router-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {children(close)}
+      </div>
+    </div>,
+    document.getElementById("overlay-root") ?? document.body,
+  );
+}
+
 type StepState = "pending" | "active" | "done" | "failed";
 
 /**
@@ -1231,7 +1287,13 @@ function UninstallSheet({
       setPhase("done");
     } catch (failure) {
       setSteps((current) => current.map((value) => (value === "active" ? "failed" : value)));
-      setError(routerErrorText(failure));
+      // The router step fails with the router's errors; the account step
+      // with the account's.
+      setError(
+        removedRef.current
+          ? tf("router_uninstall_account_failed", String(failure ?? "").replace(/^\w*Error:\s*/, "").slice(0, 200))
+          : routerErrorText(failure),
+      );
       setPhase("failed");
     }
   };
@@ -1244,21 +1306,19 @@ function UninstallSheet({
   const labels = [t("router_uninstall_step_router"), t("router_uninstall_step_account")];
 
   return (
-    <BottomSheet
+    <CenterDialog
       label={t("router_uninstall")}
       locked={phase === "working"}
       onClose={() => {
         onClose();
         if (removedRef.current) onRemoved();
       }}
-      heading={
-        <span className="router-sheet__title">
-          {phase === "done" ? t("router_uninstall_done_title") : t("router_uninstall")}
-        </span>
-      }
     >
       {(close) => (
         <div className="router-uninstall-sheet">
+          <h2 className="whats-new-dialog__title">
+            {phase === "done" ? t("router_uninstall_done_title") : t("router_uninstall")}
+          </h2>
           {phase === "confirm" ? (
             <p className="router-uninstall-sheet__text">{t("router_uninstall_explain")}</p>
           ) : phase === "done" ? (
@@ -1314,6 +1374,6 @@ function UninstallSheet({
           </div>
         </div>
       )}
-    </BottomSheet>
+    </CenterDialog>
   );
 }
