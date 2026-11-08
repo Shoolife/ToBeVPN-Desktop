@@ -606,7 +606,7 @@ export default function HomeScreen({
     : connected
       ? t("state_connected")
       : routerOnly
-        ? t("state_router_vpn")
+        ? [t("state_router_vpn"), routerVpn.serverName].filter(Boolean).join(" · ")
         : t("state_disconnected");
 
   const statusClass = activating
@@ -664,9 +664,6 @@ export default function HomeScreen({
             </svg>
           </button>
           <div className={`home__status-label ${statusClass}`}>{statusText}</div>
-          {routerOnly && routerVpn.serverName && (
-            <div className="home__status-sub">{routerVpn.serverName}</div>
-          )}
           {connected && routerVpn.active && (
             <div className="home-router-hint">
               <span className="home-router-hint__text">

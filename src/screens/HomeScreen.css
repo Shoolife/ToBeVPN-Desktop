@@ -320,12 +320,6 @@
 }
 
 /* The home router already sends this computer through the VPN */
-.home__status-sub {
-  margin-top: 2px;
-  color: var(--text-muted);
-  font-size: 14px;
-}
-
 .home-router-hint {
   display: flex;
   align-items: center;
