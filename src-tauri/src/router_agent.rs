@@ -69,31 +69,87 @@ struct Binary {
     version: Option<String>,
 }
 
+/// Router CPU families the VPN runs on. MIPS routers are left out: Xray
+/// needs more memory and CPU than they have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arch {
+    Arm64,
+    Armv7,
+}
+
+impl Arch {
+    /// From `uname -m`: aarch64, or 32-bit ARM v7 (armv8l is a 64-bit core
+    /// running a 32-bit system).
+    fn from_uname(machine: &str) -> Option<Arch> {
+        match machine.trim() {
+            "aarch64" | "arm64" => Some(Arch::Arm64),
+            "armv7l" | "armv7" | "armv8l" => Some(Arch::Armv7),
+            _ => None,
+        }
+    }
+
+    fn xray_asset(self) -> &'static str {
+        match self {
+            Arch::Arm64 => "Xray-linux-arm64-v8a.zip",
+            Arch::Armv7 => "Xray-linux-arm32-v7a.zip",
+        }
+    }
+}
+
 /// Xray build carried by this app: the fallback when GitHub cannot be read.
 const PINNED_XRAY_VERSION: &str = "26.10.31";
 
-fn pinned_xray() -> Binary {
+fn pinned_xray(arch: Arch) -> Binary {
+    let (download_sha256, sha256, md5) = match arch {
+        Arch::Arm64 => (
+            "1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d",
+            "5939649960deaf535bcd5f7ce0467a2b1d63b72a2758a6f42eade714ae8d5328",
+            "1ac186b69bff1fa9937de653fbb2bd19",
+        ),
+        Arch::Armv7 => (
+            "2387f55239ee7799fd67d5382e79f589c1da07a97d993e86b058f2290b8e456b",
+            "2a893d5b5f7cf5a33168c102f01771ed69a674abeab0b8fb085b1ddf098cf52c",
+            "57da9fbd8d2262f9d4f6356d16829a44",
+        ),
+    };
     Binary {
         name: "xray",
         url: format!(
-            "https://github.com/XTLS/Xray-core/releases/download/v{PINNED_XRAY_VERSION}/Xray-linux-arm64-v8a.zip"
+            "https://github.com/XTLS/Xray-core/releases/download/v{PINNED_XRAY_VERSION}/{}",
+            arch.xray_asset()
         ),
-        download_sha256: "1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d".into(),
+        download_sha256: download_sha256.into(),
         zip_member: Some("xray"),
-        sha256: Some("5939649960deaf535bcd5f7ce0467a2b1d63b72a2758a6f42eade714ae8d5328"),
-        md5: Some("1ac186b69bff1fa9937de653fbb2bd19"),
+        sha256: Some(sha256),
+        md5: Some(md5),
         version: Some(PINNED_XRAY_VERSION.into()),
     }
 }
 
-fn hev_tunnel() -> Binary {
+/// hev-socks5-tunnel; both builds are static, the ARMv7 one soft-float so
+/// it runs on any ARMv7 core.
+fn hev_tunnel(arch: Arch) -> Binary {
+    let (asset, sha256, md5) = match arch {
+        Arch::Arm64 => (
+            "hev-socks5-tunnel-linux-arm64",
+            "3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d",
+            "7720e92733082f4920c511205bb115da",
+        ),
+        Arch::Armv7 => (
+            "hev-socks5-tunnel-linux-arm32v7",
+            "51a8e91cc346d29e1521223535a4e4c54e3aacc9ea08f10e046910430a3f616e",
+            "53991f8f4bee88214dbc54015492ebdf",
+        ),
+    };
     Binary {
         name: "hev-socks5-tunnel",
-        url: "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.19.2/hev-socks5-tunnel-linux-arm64".into(),
-        download_sha256: "3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d".into(),
+        url: format!(
+            "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.19.2/{asset}"
+        ),
+        download_sha256: sha256.into(),
         zip_member: None,
-        sha256: Some("3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d"),
-        md5: Some("7720e92733082f4920c511205bb115da"),
+        sha256: Some(sha256),
+        md5: Some(md5),
         version: None,
     }
 }
@@ -103,23 +159,23 @@ fn hev_tunnel() -> Binary {
 const RELEASE_MIN_AGE_DAYS: i64 = 3;
 /// GitHub answers 60 unauthenticated requests an hour per address.
 const RELEASE_CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
-const XRAY_ASSET: &str = "Xray-linux-arm64-v8a.zip";
-
-static XRAY_TARGET: std::sync::Mutex<Option<(std::time::Instant, Binary)>> =
-    std::sync::Mutex::new(None);
+#[allow(clippy::type_complexity)]
+static XRAY_TARGET: std::sync::Mutex<Vec<(Arch, std::time::Instant, Binary)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// The Xray build routers should run: the newest GitHub release that is
 /// not a pre-release, at least three days old, and publishes the ARM64
 /// archive with its digest file; else the build pinned in this app.
-async fn xray_target(app: &AppHandle) -> Binary {
+async fn xray_target(app: &AppHandle, arch: Arch) -> Binary {
     if let Ok(guard) = XRAY_TARGET.lock() {
-        if let Some((at, binary)) = guard.as_ref() {
-            if at.elapsed() < RELEASE_CHECK_EVERY {
-                return binary.clone();
-            }
+        if let Some((_, _, binary)) = guard
+            .iter()
+            .find(|(cached, at, _)| *cached == arch && at.elapsed() < RELEASE_CHECK_EVERY)
+        {
+            return binary.clone();
         }
     }
-    let latest = tokio::task::spawn_blocking(latest_xray_release)
+    let latest = tokio::task::spawn_blocking(move || latest_xray_release(arch))
         .await
         .unwrap_or_else(|error| Err(format!("release check task: {error}")));
     let target = match latest {
@@ -145,7 +201,7 @@ async fn xray_target(app: &AppHandle) -> Binary {
                 "info",
                 format!("xray: no newer suitable GitHub release, using {PINNED_XRAY_VERSION}"),
             );
-            pinned_xray()
+            pinned_xray(arch)
         }
         Err(error) => {
             log(
@@ -155,16 +211,17 @@ async fn xray_target(app: &AppHandle) -> Binary {
                     "xray: GitHub releases not readable ({error}), using {PINNED_XRAY_VERSION}"
                 ),
             );
-            return pinned_xray();
+            return pinned_xray(arch);
         }
     };
     if let Ok(mut guard) = XRAY_TARGET.lock() {
-        *guard = Some((std::time::Instant::now(), target.clone()));
+        guard.retain(|(cached, _, _)| *cached != arch);
+        guard.push((arch, std::time::Instant::now(), target.clone()));
     }
     target
 }
 
-fn latest_xray_release() -> Result<Option<Binary>, String> {
+fn latest_xray_release(arch: Arch) -> Result<Option<Binary>, String> {
     // reqwest is built without a default TLS provider: install it before the
     // first client, whatever ran first in the app.
     crate::update_download::install_rustls_provider();
@@ -183,7 +240,7 @@ fn latest_xray_release() -> Result<Option<Binary>, String> {
         .map_err(|error| error_chain(&error))?;
     let now = chrono::Utc::now();
     for release in releases.as_array().into_iter().flatten() {
-        let Some(candidate) = suitable_release(release, now) else {
+        let Some(candidate) = suitable_release(release, now, arch.xray_asset()) else {
             continue;
         };
         let (version, zip_url, digest_url) = candidate;
@@ -213,6 +270,7 @@ fn latest_xray_release() -> Result<Option<Binary>, String> {
 fn suitable_release(
     release: &serde_json::Value,
     now: chrono::DateTime<chrono::Utc>,
+    asset: &str,
 ) -> Option<(String, String, String)> {
     if release["draft"].as_bool() != Some(false) || release["prerelease"].as_bool() != Some(false) {
         return None;
@@ -236,8 +294,8 @@ fn suitable_release(
                 .flatten()
         })
     };
-    let zip_url = url_of(XRAY_ASSET)?;
-    let digest_url = url_of(&format!("{XRAY_ASSET}.dgst"))?;
+    let zip_url = url_of(asset)?;
+    let digest_url = url_of(&format!("{asset}.dgst"))?;
     // Only GitHub's own download host.
     if !zip_url.starts_with("https://github.com/XTLS/Xray-core/releases/download/")
         || !digest_url.starts_with("https://github.com/XTLS/Xray-core/releases/download/")
@@ -270,8 +328,28 @@ fn version_tuple(version: &str) -> Vec<u32> {
 }
 
 /// Components routers should run, Xray resolved against GitHub.
-async fn router_binaries(app: &AppHandle) -> Vec<Binary> {
-    vec![xray_target(app).await, hev_tunnel()]
+async fn router_binaries(app: &AppHandle, arch: Arch) -> Vec<Binary> {
+    vec![xray_target(app, arch).await, hev_tunnel(arch)]
+}
+
+/// The router's CPU family, or why the VPN cannot run on it.
+async fn router_arch(session: &Session) -> Result<Arch, String> {
+    let machine = session.run_ok("uname -m", None).await?;
+    Arch::from_uname(&machine).ok_or_else(|| format!("unsupported router CPU: {}", machine.trim()))
+}
+
+/// Memory the router must have: in all, and free besides our own Xray.
+const MIN_TOTAL_MEMORY_KB: u64 = 120 * 1024;
+const MIN_FREE_MEMORY_KB: u64 = 64 * 1024;
+
+/// Packages a stock OpenWrt may lack; installed by apk (OpenWrt 25) or opkg.
+fn package_install_command(packages: &[&str]) -> String {
+    let list = packages.join(" ");
+    format!(
+        "if command -v apk >/dev/null 2>&1; then apk update >/tmp/tobevpn-pkg.log 2>&1; apk add {list} >>/tmp/tobevpn-pkg.log 2>&1; \
+         elif command -v opkg >/dev/null 2>&1; then opkg update >/tmp/tobevpn-pkg.log 2>&1; opkg install {list} >>/tmp/tobevpn-pkg.log 2>&1; \
+         else echo 'no package manager' >/tmp/tobevpn-pkg.log; false; fi"
+    )
 }
 
 /// Shell lines reporting what the router has: MD5 per binary, Xray's version.
@@ -674,7 +752,8 @@ async fn install(
     let session = open(&app, &host, &user).await?;
 
     progress(&app, "check");
-    let binaries = router_binaries(&app).await;
+    let arch = router_arch(&session).await?;
+    let binaries = router_binaries(&app, arch).await;
     let md5_checks = component_facts_command(&binaries);
     let facts = parse_key_values(
         &session
@@ -682,7 +761,11 @@ async fn install(
                 &format!(
                     "echo arch=$(uname -m); echo free_kb=$(df -k /overlay 2>/dev/null | awk 'NR==2{{print $4}}'); \
                      echo tun=$([ -c /dev/net/tun ] || grep -qw tun /proc/modules && echo 1 || echo 0); \
-                     echo opkg=$(command -v opkg >/dev/null && echo 1 || echo 0); \
+                     echo pkg=$(command -v apk >/dev/null || command -v opkg >/dev/null && echo 1 || echo 0); \
+                     echo curl=$(command -v curl >/dev/null && echo 1 || echo 0); \
+                     echo mem_total_kb=$(awk '/^MemTotal:/{{print $2}}' /proc/meminfo); \
+                     echo mem_available_kb=$(awk '/^MemAvailable:/{{print $2}}' /proc/meminfo); \
+                     echo own_xray_kb=$(p=$(pidof xray); [ -n \"$p\" ] && awk '/^VmRSS:/{{print $2}}' /proc/$p/status || echo 0); \
                      {md5_checks}\
                      echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
                      . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_RELEASE\"; \
@@ -697,16 +780,46 @@ async fn install(
         &app,
         "info",
         format!(
-            "router: {} · {} {} · free {} KB on /overlay · TUN {}",
+            "router: {} · {} {} · free {} KB on /overlay · memory {} MB, {} MB free · TUN {} · curl {}",
             fact("model"),
             fact("arch"),
             fact("os").trim_matches('"'),
             fact("free_kb"),
-            if fact("tun") == "1" { "yes" } else { "no" }
+            fact("mem_total_kb").parse::<u64>().unwrap_or(0) / 1024,
+            fact("mem_available_kb").parse::<u64>().unwrap_or(0) / 1024,
+            if fact("tun") == "1" { "yes" } else { "no" },
+            if fact("curl") == "1" { "yes" } else { "no" }
         ),
     );
-    if fact("arch") != "aarch64" {
-        return Err(format!("unsupported router CPU: {}", fact("arch")));
+    // Before anything changes: a router without the memory for Xray would
+    // freeze or reboot under it.
+    let total_kb: u64 = fact("mem_total_kb").parse().unwrap_or(0);
+    let free_kb: u64 = fact("mem_available_kb").parse::<u64>().unwrap_or(0)
+        + fact("own_xray_kb").parse::<u64>().unwrap_or(0);
+    if total_kb > 0 && total_kb < MIN_TOTAL_MEMORY_KB {
+        return Err(format!(
+            "router has too little memory: {} MB",
+            total_kb / 1024
+        ));
+    }
+    if total_kb > 0 && free_kb < MIN_FREE_MEMORY_KB {
+        return Err(format!(
+            "not enough free memory on the router: {} MB free",
+            free_kb / 1024
+        ));
+    }
+    let mut packages: Vec<&str> = Vec::new();
+    if fact("tun") != "1" {
+        packages.push("kmod-tun");
+    }
+    if fact("curl") != "1" {
+        packages.push("curl");
+    }
+    if !packages.is_empty() && fact("pkg") != "1" {
+        return Err(format!(
+            "the router lacks {} and has no package manager",
+            packages.join(", ")
+        ));
     }
     let needed: Vec<&Binary> = binaries
         .iter()
@@ -755,22 +868,42 @@ async fn install(
         .await?;
     log_output(&app, &stopped);
 
-    if fact("tun") != "1" {
+    session.run_ok("mkdir -p /opt/tobevpn", None).await?;
+    if !packages.is_empty() {
         progress(&app, "tun");
-        if fact("opkg") != "1" {
-            return Err("the router has no TUN support and no package manager".into());
-        }
-        session
-            .run_ok(
-                "opkg update >/tmp/tobevpn-opkg.log 2>&1; opkg install kmod-tun >>/tmp/tobevpn-opkg.log 2>&1; \
-                 modprobe tun 2>/dev/null; [ -c /dev/net/tun ] || grep -qw tun /proc/modules || { tail -5 /tmp/tobevpn-opkg.log; exit 1; }",
+        let (_, code) = session
+            .run(&package_install_command(&packages), None)
+            .await?;
+        let (log_tail, _) = session.run("tail -5 /tmp/tobevpn-pkg.log", None).await?;
+        log_output(&app, &log_tail);
+        let (check, _) = session
+            .run(
+                "modprobe tun 2>/dev/null; echo tun=$([ -c /dev/net/tun ] || grep -qw tun /proc/modules && echo 1 || echo 0); \
+                 echo curl=$(command -v curl >/dev/null && echo 1 || echo 0)",
                 None,
             )
             .await?;
-        log(&app, "info", "kmod-tun installed");
+        let after = parse_key_values(&check);
+        if code != 0
+            || after.get("tun").map(String::as_str) != Some("1")
+            || after.get("curl").map(String::as_str) != Some("1")
+        {
+            return Err(format!(
+                "could not install {} on the router: {}",
+                packages.join(", "),
+                log_tail.trim()
+            ));
+        }
+        // Remembered, so removing ToBeVPN removes only what it added.
+        session
+            .write_file(
+                "/opt/tobevpn/packages",
+                format!("{}\n", packages.join(" ")).as_bytes(),
+                "644",
+            )
+            .await?;
+        log(&app, "info", format!("installed {}", packages.join(", ")));
     }
-
-    session.run_ok("mkdir -p /opt/tobevpn", None).await?;
     for (binary, content) in downloads {
         progress(&app, &format!("upload:{}", binary.name));
         session
@@ -910,7 +1043,8 @@ async fn outdated_components(
     app: &AppHandle,
     session: &Session,
 ) -> Result<(Vec<Binary>, Option<String>, bool), String> {
-    let binaries = router_binaries(app).await;
+    let arch = router_arch(session).await?;
+    let binaries = router_binaries(app, arch).await;
     let facts = parse_key_values(
         &session
             .run_ok(&component_facts_command(&binaries), None)
@@ -1086,7 +1220,9 @@ pub async fn router_control(
         "autostart-on" => "/etc/init.d/tobevpn enable".into(),
         "autostart-off" => "/etc/init.d/tobevpn disable".into(),
         "uninstall" => {
-            "/opt/tobevpn/tobevpn-router.sh uninstall; opkg remove kmod-tun >/dev/null 2>&1; true"
+            // Only the packages the install added (kmod-tun, curl) are removed.
+            "added=$(cat /opt/tobevpn/packages 2>/dev/null); /opt/tobevpn/tobevpn-router.sh uninstall; \
+             if [ -n \"$added\" ]; then if command -v apk >/dev/null 2>&1; then apk del $added; else opkg remove $added; fi; fi >/dev/null 2>&1; true"
                 .into()
         }
         _ => return Err(format!("unknown router action: {action}")),
@@ -1815,17 +1951,27 @@ mod tests {
         };
         // Old enough, final: taken.
         assert_eq!(
-            suitable_release(&release("v26.11.2", "2026-11-04T10:00:00Z", false), now)
-                .map(|found| found.0),
+            suitable_release(
+                &release("v26.11.2", "2026-11-04T10:00:00Z", false),
+                now,
+                "Xray-linux-arm64-v8a.zip"
+            )
+            .map(|found| found.0),
             Some("26.11.2".to_string())
         );
         // Too fresh, or a pre-release: skipped.
-        assert!(
-            suitable_release(&release("v26.11.7", "2026-11-07T10:00:00Z", false), now).is_none()
-        );
-        assert!(
-            suitable_release(&release("v26.11.2", "2026-11-01T10:00:00Z", true), now).is_none()
-        );
+        assert!(suitable_release(
+            &release("v26.11.7", "2026-11-07T10:00:00Z", false),
+            now,
+            "Xray-linux-arm64-v8a.zip"
+        )
+        .is_none());
+        assert!(suitable_release(
+            &release("v26.11.2", "2026-11-01T10:00:00Z", true),
+            now,
+            "Xray-linux-arm64-v8a.zip"
+        )
+        .is_none());
         assert_eq!(
             sha256_from_dgst("MD5= 00\nSHA1= 11\nSHA2-256= 1811C8F1DA0C3B6DC707EBAF1C8390E987BA39859A8F0A7AADD8526157F2EC8D\n"),
             Some("1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d".to_string())
@@ -1836,23 +1982,30 @@ mod tests {
 
         let mut facts = HashMap::new();
         facts.insert("xray_version".to_string(), "26.10.31".to_string());
-        let mut target = pinned_xray();
+        let mut target = pinned_xray(Arch::Arm64);
         assert!(!binary_outdated(&target, &facts));
         target.version = Some("26.11.2".into());
         assert!(binary_outdated(&target, &facts));
         facts.insert("xray_version".to_string(), String::new());
-        assert!(binary_outdated(&pinned_xray(), &facts));
+        assert!(binary_outdated(&pinned_xray(Arch::Arm64), &facts));
         facts.insert(
             "md5_hev-socks5-tunnel".to_string(),
             "7720e92733082f4920c511205bb115da".to_string(),
         );
-        assert!(!binary_outdated(&hev_tunnel(), &facts));
+        assert!(!binary_outdated(&hev_tunnel(Arch::Arm64), &facts));
+        assert!(binary_outdated(&hev_tunnel(Arch::Armv7), &facts));
+        assert_eq!(Arch::from_uname("aarch64\n"), Some(Arch::Arm64));
+        assert_eq!(Arch::from_uname("armv7l"), Some(Arch::Armv7));
+        assert_eq!(Arch::from_uname("mips"), None);
+        assert!(pinned_xray(Arch::Armv7)
+            .url
+            .ends_with("Xray-linux-arm32-v7a.zip"));
     }
 
     #[test]
     #[ignore]
     fn live_latest_xray_release() {
-        println!("LIVE {:?}", latest_xray_release());
+        println!("LIVE {:?}", latest_xray_release(Arch::Armv7));
     }
 
     #[test]

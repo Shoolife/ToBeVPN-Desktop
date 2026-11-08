@@ -34,7 +34,13 @@ DNS_CHAIN=TOBEVPN_DNS
 TUNNEL_DNS=1.1.1.1
 TUNNEL_DNS2=1.0.0.1
 DNS_PRIO=98
-DNSMASQ_CONF=/tmp/dnsmasq.d/tobevpn.conf
+# dnsmasq's extra config folder: /tmp/dnsmasq.d on older OpenWrt, a folder
+# per instance (/tmp/dnsmasq.<cfg>.d) from OpenWrt 22.
+dnsmasq_conf_dir() {
+    dir=$(sed -n 's/^conf-dir=\([^,]*\).*/\1/p' /var/etc/dnsmasq.conf* 2>/dev/null | head -n 1)
+    echo "${dir:-/tmp/dnsmasq.d}"
+}
+DNSMASQ_CONF="$(dnsmasq_conf_dir)/tobevpn.conf"
 LAN_DEV=br-lan
 TAG=tobevpn
 SOCKS_PORT=10808
@@ -76,14 +82,78 @@ refresh_subscription() {
         "$SUB_URL" || true
 }
 
+# Firewall: iptables up to OpenWrt 21 (fw3), nftables from OpenWrt 22 (fw4).
+# The same rules either way: LAN may forward into the tunnels, TCP MSS is
+# clamped for them, and DNS of VPN devices can be sent into their tunnel.
+fw_kind() {
+    if command -v nft >/dev/null 2>&1 &&
+        { [ -x /sbin/fw4 ] || ! command -v iptables >/dev/null 2>&1; }; then
+        echo nft
+    else
+        echo iptables
+    fi
+}
+FW=$(fw_kind)
+NFT_TABLE=tobevpn
+NFT_DNS_TABLE=tobevpn_dns
+# fw4 includes these files at the top of its forward chain on every reload,
+# so a firewall restart keeps LAN -> tunnel forwarding.
+NFT_FORWARD_INCLUDE=/usr/share/nftables.d/chain-pre/forward/90-tobevpn.nft
+
+# firewall_rule TABLE CHAIN POSITION RULE...: inserted once. The position
+# goes to -I only; -C takes none, and with it the check always failed.
 firewall_rule() {
     table=$1
-    shift
-    iptables -t "$table" -C "$@" -m comment --comment "$TAG" 2>/dev/null ||
-        iptables -t "$table" -I "$@" -m comment --comment "$TAG"
+    chain=$2
+    position=$3
+    shift 3
+    iptables -t "$table" -C "$chain" "$@" -m comment --comment "$TAG" 2>/dev/null ||
+        iptables -t "$table" -I "$chain" "$position" "$@" -m comment --comment "$TAG"
+}
+
+# LAN <-> tunnels forwarding and the MSS clamp. Idempotent: the watchdog
+# calls it again, which also restores it after a firewall reload.
+fw_open() {
+    if [ "$FW" = nft ]; then
+        nft list table inet "$NFT_TABLE" >/dev/null 2>&1 || nft -f - <<EOF
+table inet $NFT_TABLE {
+    chain mss {
+        type filter hook forward priority mangle; policy accept;
+        oifname "tobe*" tcp flags syn tcp option maxseg size set rt mtu
+    }
+}
+EOF
+        # fw4 drops forwarding into interfaces of no zone, as the tunnels are.
+        if [ -d /usr/share/firewall4 ]; then
+            want=$(printf 'iifname "%s" oifname "tobe*" counter accept comment "%s"\niifname "tobe*" oifname "%s" counter accept comment "%s"' \
+                "$LAN_DEV" "$TAG" "$LAN_DEV" "$TAG")
+            if [ "$(cat "$NFT_FORWARD_INCLUDE" 2>/dev/null)" != "$want" ]; then
+                mkdir -p "${NFT_FORWARD_INCLUDE%/*}"
+                printf '%s\n' "$want" >"$NFT_FORWARD_INCLUDE"
+            fi
+        fi
+        if nft list chain inet fw4 forward >/dev/null 2>&1 &&
+            ! nft list chain inet fw4 forward | grep -q "comment \"$TAG\""; then
+            nft insert rule inet fw4 forward iifname "\"$LAN_DEV\"" oifname '"tobe*"' counter accept comment "\"$TAG\""
+            nft insert rule inet fw4 forward iifname '"tobe*"' oifname "\"$LAN_DEV\"" counter accept comment "\"$TAG\""
+        fi
+    else
+        firewall_rule filter FORWARD 1 -i "$LAN_DEV" -o "tobe+" -j ACCEPT
+        firewall_rule filter FORWARD 1 -i "tobe+" -o "$LAN_DEV" -j ACCEPT
+        firewall_rule mangle FORWARD 1 -o "tobe+" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    fi
 }
 
 remove_firewall_rules() {
+    if [ "$FW" = nft ]; then
+        rm -f "$NFT_FORWARD_INCLUDE"
+        nft delete table inet "$NFT_TABLE" 2>/dev/null
+        nft -a list chain inet fw4 forward 2>/dev/null | grep "comment \"$TAG\"" |
+            awk '{print $NF}' | while read -r handle; do
+                nft delete rule inet fw4 forward handle "$handle" 2>/dev/null
+            done
+        return 0
+    fi
     for table in filter mangle; do
         iptables -t "$table" -S 2>/dev/null | grep -- "--comment $TAG" | sed 's/^-A /-D /' |
             while read -r rule; do
@@ -91,6 +161,17 @@ remove_firewall_rules() {
                 iptables -t "$table" $rule 2>/dev/null
             done
     done
+}
+
+# IPv4 addresses of a name: resolveip where installed, else busybox nslookup.
+resolve4() {
+    if command -v resolveip >/dev/null 2>&1; then
+        resolveip -4 -t 5 "$1" 2>/dev/null
+    else
+        nslookup "$1" 2>/dev/null | awk '
+            /^Name:/ {named = 1; next}
+            named && /^Address/ {sub(/^Address[^:]*:[ \t]*/, ""); if ($0 ~ /^[0-9]+(\.[0-9]+){3}$/) print $0}'
+    fi
 }
 
 # Connections to ToBeVPN servers stay outside the tunnel: a device with its
@@ -101,7 +182,7 @@ apply_server_bypass() {
         if echo "$host" | grep -qE '^[0-9.]+$'; then
             addresses=$host
         else
-            addresses=$(resolveip -4 -t 5 "$host" 2>/dev/null)
+            addresses=$(resolve4 "$host")
         fi
         for address in $addresses; do
             ip rule add to "$address" lookup main prio "$BYPASS_PRIO" 2>/dev/null
@@ -137,14 +218,50 @@ device_choices() {
         }' "$DIR/devices" 2>/dev/null
 }
 
+# DNS redirect: rebuilt on every apply. dns_rule sends a device's queries
+# to the router into its tunnel; dns_skip leaves a device's queries alone.
+dns_begin() {
+    if [ "$FW" = nft ]; then
+        nft delete table ip "$NFT_DNS_TABLE" 2>/dev/null
+        nft add table ip "$NFT_DNS_TABLE"
+        nft add chain ip "$NFT_DNS_TABLE" prerouting "{ type nat hook prerouting priority -105; policy accept; }"
+    else
+        iptables -t nat -N "$DNS_CHAIN" 2>/dev/null || iptables -t nat -F "$DNS_CHAIN"
+    fi
+}
+
 dns_rule() {
+    if [ "$FW" = nft ]; then
+        nft add rule ip "$NFT_DNS_TABLE" prerouting ip saddr "$1" ip daddr "$2" \
+            meta l4proto "{ tcp, udp }" th dport 53 dnat to "$TUNNEL_DNS:53"
+        return
+    fi
     for proto in udp tcp; do
         iptables -t nat -A "$DNS_CHAIN" -s "$1" -d "$2" -p "$proto" --dport 53 \
             -j DNAT --to-destination "$TUNNEL_DNS:53"
     done
 }
 
+dns_skip() {
+    if [ "$FW" = nft ]; then
+        nft add rule ip "$NFT_DNS_TABLE" prerouting ip saddr "$1" return
+    else
+        iptables -t nat -A "$DNS_CHAIN" -s "$1" -j RETURN
+    fi
+}
+
+dns_hook() {
+    # The nft chain is hooked itself; the iptables chain is jumped to.
+    [ "$FW" = nft ] && return 0
+    iptables -t nat -C PREROUTING -j "$DNS_CHAIN" -m comment --comment "$TAG" 2>/dev/null ||
+        iptables -t nat -I PREROUTING 1 -j "$DNS_CHAIN" -m comment --comment "$TAG"
+}
+
 remove_dns_redirect() {
+    if [ "$FW" = nft ]; then
+        nft delete table ip "$NFT_DNS_TABLE" 2>/dev/null
+        return 0
+    fi
     while iptables -t nat -D PREROUTING -j "$DNS_CHAIN" -m comment --comment "$TAG" 2>/dev/null; do :; done
     iptables -t nat -F "$DNS_CHAIN" 2>/dev/null
     iptables -t nat -X "$DNS_CHAIN" 2>/dev/null
@@ -288,7 +405,7 @@ apply_routes() {
         [ -n "$subnet" ] && ip route replace "$subnet" dev "$LAN_DEV" table "$table"
     done
     clear_device_rules
-    iptables -t nat -N "$DNS_CHAIN" 2>/dev/null || iptables -t nat -F "$DNS_CHAIN"
+    dns_begin
     # The router's DNS goes through the tunnel when the home does; otherwise
     # only queries of VPN devices are sent through their tunnel.
     main_down=0
@@ -306,7 +423,7 @@ apply_routes() {
         if [ "$mode" = direct ]; then
             # Only matters when the rest of the home goes through the VPN.
             ip rule add from "$ip" lookup main prio "$DEVICE_PRIO"
-            iptables -t nat -A "$DNS_CHAIN" -s "$ip" -j RETURN
+            dns_skip "$ip"
         elif [ "$slot" != 0 ]; then
             ip rule add from "$ip" lookup "$((SLOT_TABLE_BASE + slot))" prio "$DEVICE_PRIO"
             [ -n "$dns_router_ip" ] && dns_rule "$ip" "$dns_router_ip"
@@ -323,12 +440,9 @@ apply_routes() {
         ip rule add from "$subnet" lookup "$TABLE" prio "$PRIO"
     fi
     # DNS of VPN devices when the home is direct: resolved inside their tunnel.
-    iptables -t nat -C PREROUTING -j "$DNS_CHAIN" -m comment --comment "$TAG" 2>/dev/null ||
-        iptables -t nat -I PREROUTING 1 -j "$DNS_CHAIN" -m comment --comment "$TAG"
+    dns_hook
     apply_server_bypass
-    firewall_rule filter FORWARD 1 -i "$LAN_DEV" -o "tobe+" -j ACCEPT
-    firewall_rule filter FORWARD 1 -i "tobe+" -o "$LAN_DEV" -j ACCEPT
-    firewall_rule mangle FORWARD 1 -o "tobe+" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    fw_open
 }
 
 # One line per home device: device=MAC|IP|HOSTNAME|MODE|NAME|ONLINE|SLOT,

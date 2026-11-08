@@ -96,7 +96,13 @@ function routerErrorText(error: unknown): string {
   if (raw.includes("did not answer on SSH")) return t("router_error_ssh");
   if (raw.includes("host key changed")) return t("router_error_host_key");
   if (raw.includes("not enough space")) return t("router_error_space");
-  if (raw.includes("unsupported router CPU") || raw.includes("no TUN support")) return t("router_error_unsupported");
+  const memory = raw.match(/too little memory: (\d+) MB/);
+  if (memory) return tf("router_error_memory_total", memory[1]);
+  const free = raw.match(/not enough free memory on the router: (\d+) MB/);
+  if (free) return tf("router_error_memory_free", free[1]);
+  const cpu = raw.match(/unsupported router CPU: (\S+)/);
+  if (cpu) return tf("router_error_cpu", cpu[1]);
+  if (raw.includes("no package manager") || raw.includes("could not install")) return t("router_error_packages");
   if (raw.includes("not paired") || raw.includes("rejected the app key")) return t("router_error_not_paired");
   return tf("router_error_generic", raw.replace(/^Error:\s*/, "").slice(0, 200));
 }
@@ -670,13 +676,16 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   <button
                     type="button"
                     className="router-button router-button--primary"
-                    disabled={!info.supported || !accountSubscriptionUrl() || servers.length === 0}
+                    disabled={!info.firmware || !accountSubscriptionUrl() || servers.length === 0}
                     onClick={() => setFormOpen(true)}
                   >
                     {t("router_install")}
                   </button>
                 )}
-                {!info.supported && <p className="router-panel__hint">{t("router_install_unsupported")}</p>}
+                {!info.firmware && <p className="router-panel__hint">{t("router_install_unsupported")}</p>}
+                {info.firmware && !info.supported && (
+                  <p className="router-panel__hint">{t("router_install_compatibility")}</p>
+                )}
               </div>
             </>
           )}
