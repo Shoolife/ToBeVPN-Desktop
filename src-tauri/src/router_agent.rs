@@ -51,38 +51,265 @@ const PRIVATE_RANGES: &[&str] = &[
     "100.64.0.0/10",
 ];
 
-/// A pinned release asset for the router (aarch64), verified by SHA-256.
+/// A release asset for the router (aarch64), verified by SHA-256.
+#[derive(Clone, Debug)]
 struct Binary {
     name: &'static str,
-    url: &'static str,
+    url: String,
     /// Digest of the downloaded file (the zip for Xray).
-    download_sha256: &'static str,
+    download_sha256: String,
     /// Member to extract from a zip download; None for a plain binary.
     zip_member: Option<&'static str>,
-    /// Digest of the binary installed on the router.
-    sha256: &'static str,
-    /// MD5 of the same binary: the router's busybox has md5sum, not sha256sum.
-    md5: &'static str,
+    /// Digest and MD5 of the binary on the router, for builds pinned in this
+    /// app (the router's busybox has md5sum, not sha256sum). A newer GitHub
+    /// release is checked by its download digest and compared by version.
+    sha256: Option<&'static str>,
+    md5: Option<&'static str>,
+    /// Version, for binaries compared by version (Xray).
+    version: Option<String>,
 }
 
-const BINARIES: &[Binary] = &[
+/// Xray build carried by this app: the fallback when GitHub cannot be read.
+const PINNED_XRAY_VERSION: &str = "26.10.31";
+
+fn pinned_xray() -> Binary {
     Binary {
         name: "xray",
-        url: "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-arm64-v8a.zip",
-        download_sha256: "1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d",
+        url: format!(
+            "https://github.com/XTLS/Xray-core/releases/download/v{PINNED_XRAY_VERSION}/Xray-linux-arm64-v8a.zip"
+        ),
+        download_sha256: "1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d".into(),
         zip_member: Some("xray"),
-        sha256: "5939649960deaf535bcd5f7ce0467a2b1d63b72a2758a6f42eade714ae8d5328",
-        md5: "1ac186b69bff1fa9937de653fbb2bd19",
-    },
+        sha256: Some("5939649960deaf535bcd5f7ce0467a2b1d63b72a2758a6f42eade714ae8d5328"),
+        md5: Some("1ac186b69bff1fa9937de653fbb2bd19"),
+        version: Some(PINNED_XRAY_VERSION.into()),
+    }
+}
+
+fn hev_tunnel() -> Binary {
     Binary {
         name: "hev-socks5-tunnel",
-        url: "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.19.2/hev-socks5-tunnel-linux-arm64",
-        download_sha256: "3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d",
+        url: "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.19.2/hev-socks5-tunnel-linux-arm64".into(),
+        download_sha256: "3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d".into(),
         zip_member: None,
-        sha256: "3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d",
-        md5: "7720e92733082f4920c511205bb115da",
-    },
-];
+        sha256: Some("3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d"),
+        md5: Some("7720e92733082f4920c511205bb115da"),
+        version: None,
+    }
+}
+
+/// A GitHub release must be this old before routers get it: withdrawn
+/// releases (26.10.29) are usually gone within a day or two.
+const RELEASE_MIN_AGE_DAYS: i64 = 3;
+/// GitHub answers 60 unauthenticated requests an hour per address.
+const RELEASE_CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
+const XRAY_ASSET: &str = "Xray-linux-arm64-v8a.zip";
+
+static XRAY_TARGET: std::sync::Mutex<Option<(std::time::Instant, Binary)>> =
+    std::sync::Mutex::new(None);
+
+/// The Xray build routers should run: the newest GitHub release that is
+/// not a pre-release, at least three days old, and publishes the ARM64
+/// archive with its digest file; else the build pinned in this app.
+async fn xray_target(app: &AppHandle) -> Binary {
+    if let Ok(guard) = XRAY_TARGET.lock() {
+        if let Some((at, binary)) = guard.as_ref() {
+            if at.elapsed() < RELEASE_CHECK_EVERY {
+                return binary.clone();
+            }
+        }
+    }
+    let latest = tokio::task::spawn_blocking(latest_xray_release)
+        .await
+        .unwrap_or_else(|error| Err(format!("release check task: {error}")));
+    let target = match latest {
+        Ok(Some(release))
+            // The same version as the pinned build keeps the pinned build's
+            // stronger check (the binary's own digest).
+            if version_tuple(release.version.as_deref().unwrap_or(""))
+                > version_tuple(PINNED_XRAY_VERSION) =>
+        {
+            log(
+                app,
+                "info",
+                format!(
+                    "xray: latest suitable GitHub release {}",
+                    release.version.as_deref().unwrap_or("")
+                ),
+            );
+            release
+        }
+        Ok(_) => {
+            log(
+                app,
+                "info",
+                format!("xray: no newer suitable GitHub release, using {PINNED_XRAY_VERSION}"),
+            );
+            pinned_xray()
+        }
+        Err(error) => {
+            log(
+                app,
+                "warn",
+                format!(
+                    "xray: GitHub releases not readable ({error}), using {PINNED_XRAY_VERSION}"
+                ),
+            );
+            return pinned_xray();
+        }
+    };
+    if let Ok(mut guard) = XRAY_TARGET.lock() {
+        *guard = Some((std::time::Instant::now(), target.clone()));
+    }
+    target
+}
+
+fn latest_xray_release() -> Result<Option<Binary>, String> {
+    // reqwest is built without a default TLS provider: install it before the
+    // first client, whatever ran first in the app.
+    crate::update_download::install_rustls_provider();
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .user_agent("ToBeVPN-desktop")
+        .build()
+        .map_err(|error| format!("http client: {error}"))?;
+    let releases: serde_json::Value = client
+        .get("https://api.github.com/repos/XTLS/Xray-core/releases?per_page=15")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.json())
+        .map_err(|error| error_chain(&error))?;
+    let now = chrono::Utc::now();
+    for release in releases.as_array().into_iter().flatten() {
+        let Some(candidate) = suitable_release(release, now) else {
+            continue;
+        };
+        let (version, zip_url, digest_url) = candidate;
+        let digest = client
+            .get(&digest_url)
+            .send()
+            .and_then(|response| response.error_for_status())
+            .and_then(|response| response.text())
+            .map_err(|error| error_chain(&error))?;
+        let Some(sha256) = sha256_from_dgst(&digest) else {
+            continue;
+        };
+        return Ok(Some(Binary {
+            name: "xray",
+            url: zip_url,
+            download_sha256: sha256,
+            zip_member: Some("xray"),
+            sha256: None,
+            md5: None,
+            version: Some(version),
+        }));
+    }
+    Ok(None)
+}
+
+/// Version, archive URL and digest-file URL of a release routers may get.
+fn suitable_release(
+    release: &serde_json::Value,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(String, String, String)> {
+    if release["draft"].as_bool() != Some(false) || release["prerelease"].as_bool() != Some(false) {
+        return None;
+    }
+    let published = chrono::DateTime::parse_from_rfc3339(release["published_at"].as_str()?).ok()?;
+    if now.signed_duration_since(published).num_days() < RELEASE_MIN_AGE_DAYS {
+        return None;
+    }
+    let version = release["tag_name"]
+        .as_str()?
+        .trim_start_matches('v')
+        .to_string();
+    if version_tuple(&version).is_empty() {
+        return None;
+    }
+    let assets = release["assets"].as_array()?;
+    let url_of = |name: &str| {
+        assets.iter().find_map(|asset| {
+            (asset["name"].as_str()? == name)
+                .then(|| asset["browser_download_url"].as_str().map(str::to_string))
+                .flatten()
+        })
+    };
+    let zip_url = url_of(XRAY_ASSET)?;
+    let digest_url = url_of(&format!("{XRAY_ASSET}.dgst"))?;
+    // Only GitHub's own download host.
+    if !zip_url.starts_with("https://github.com/XTLS/Xray-core/releases/download/")
+        || !digest_url.starts_with("https://github.com/XTLS/Xray-core/releases/download/")
+    {
+        return None;
+    }
+    Some((version, zip_url, digest_url))
+}
+
+/// The SHA2-256 line of an Xray .dgst file.
+fn sha256_from_dgst(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        let value = value.trim().to_ascii_lowercase();
+        (key.trim().eq_ignore_ascii_case("SHA2-256")
+            && value.len() == 64
+            && value.chars().all(|character| character.is_ascii_hexdigit()))
+        .then_some(value)
+    })
+}
+
+/// "26.10.31" as [26, 10, 31]; empty when not a plain dotted version.
+fn version_tuple(version: &str) -> Vec<u32> {
+    let parts: Option<Vec<u32>> = version
+        .trim()
+        .split('.')
+        .map(|part| part.parse().ok())
+        .collect();
+    parts.unwrap_or_default()
+}
+
+/// Components routers should run, Xray resolved against GitHub.
+async fn router_binaries(app: &AppHandle) -> Vec<Binary> {
+    vec![xray_target(app).await, hev_tunnel()]
+}
+
+/// Shell lines reporting what the router has: MD5 per binary, Xray's version.
+fn component_facts_command(binaries: &[Binary]) -> String {
+    let mut command: String = binaries
+        .iter()
+        .map(|binary| {
+            format!(
+                "echo md5_{0}=$(md5sum /opt/tobevpn/{0} 2>/dev/null | cut -d' ' -f1); ",
+                binary.name
+            )
+        })
+        .collect();
+    command.push_str(
+        // The version is written next to Xray on install and update; "xray
+        // version" is only for routers set up before that.
+        "echo xray_version=$(cat /opt/tobevpn/xray.version 2>/dev/null || /opt/tobevpn/xray version 2>/dev/null | awk 'NR==1{print $2}'); ",
+    );
+    command
+}
+
+/// Whether the router needs this binary: Xray when its version is older
+/// than the target (or unknown), the others when their MD5 differs.
+fn binary_outdated(binary: &Binary, facts: &HashMap<String, String>) -> bool {
+    match &binary.version {
+        Some(target) => {
+            let current = facts.get("xray_version").map(String::as_str).unwrap_or("");
+            let current = version_tuple(current);
+            current.is_empty() || current < version_tuple(target)
+        }
+        None => {
+            facts
+                .get(&format!("md5_{}", binary.name))
+                .map(String::as_str)
+                != binary.md5
+        }
+    }
+}
 
 #[derive(Serialize, Default, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -447,15 +674,8 @@ async fn install(
     let session = open(&app, &host, &user).await?;
 
     progress(&app, "check");
-    let md5_checks: String = BINARIES
-        .iter()
-        .map(|binary| {
-            format!(
-                "echo md5_{0}=$(md5sum /opt/tobevpn/{0} 2>/dev/null | cut -d' ' -f1); ",
-                binary.name
-            )
-        })
-        .collect();
+    let binaries = router_binaries(&app).await;
+    let md5_checks = component_facts_command(&binaries);
     let facts = parse_key_values(
         &session
             .run_ok(
@@ -488,11 +708,11 @@ async fn install(
     if fact("arch") != "aarch64" {
         return Err(format!("unsupported router CPU: {}", fact("arch")));
     }
-    let needed: Vec<&Binary> = BINARIES
+    let needed: Vec<&Binary> = binaries
         .iter()
-        .filter(|binary| fact(&format!("md5_{}", binary.name)) != binary.md5)
+        .filter(|binary| binary_outdated(binary, &facts))
         .collect();
-    for binary in BINARIES {
+    for binary in &binaries {
         let current = !needed.iter().any(|item| item.name == binary.name);
         log(
             &app,
@@ -561,6 +781,15 @@ async fn install(
             "info",
             format!("{}: uploaded {} KB", binary.name, content.len() / 1024),
         );
+        if let (Some(version), "xray") = (&binary.version, binary.name) {
+            session
+                .write_file(
+                    "/opt/tobevpn/xray.version",
+                    format!("{version}\n").as_bytes(),
+                    "644",
+                )
+                .await?;
+        }
     }
 
     progress(&app, "configure");
@@ -669,34 +898,36 @@ pub struct RouterUpdate {
     pub available: bool,
     /// "xray", "hev-socks5-tunnel", "agent".
     pub components: Vec<String>,
+    /// Xray on the router and the version it would get.
+    pub xray_current: Option<String>,
+    pub xray_target: Option<String>,
 }
 
-/// Binaries that differ from the pinned ones (by MD5: the router's busybox
-/// has md5sum, not sha256sum) and whether the agent script differs.
-async fn outdated_components(session: &Session) -> Result<(Vec<&'static Binary>, bool), String> {
-    let md5_checks: String = BINARIES
-        .iter()
-        .map(|binary| {
-            format!(
-                "echo md5_{0}=$(md5sum /opt/tobevpn/{0} 2>/dev/null | cut -d' ' -f1); ",
-                binary.name
-            )
-        })
-        .collect();
-    let facts = parse_key_values(&session.run_ok(&md5_checks, None).await?);
-    let needed = BINARIES
-        .iter()
-        .filter(|binary| {
-            facts
-                .get(&format!("md5_{}", binary.name))
-                .map(String::as_str)
-                != Some(binary.md5)
-        })
+/// Binaries the router should get (Xray by version against the newest
+/// suitable GitHub release, the rest by MD5), the router's Xray version,
+/// and whether the agent script differs.
+async fn outdated_components(
+    app: &AppHandle,
+    session: &Session,
+) -> Result<(Vec<Binary>, Option<String>, bool), String> {
+    let binaries = router_binaries(app).await;
+    let facts = parse_key_values(
+        &session
+            .run_ok(&component_facts_command(&binaries), None)
+            .await?,
+    );
+    let current = facts
+        .get("xray_version")
+        .filter(|version| !version.is_empty())
+        .cloned();
+    let needed = binaries
+        .into_iter()
+        .filter(|binary| binary_outdated(binary, &facts))
         .collect();
     let (agent, _) = session
         .run("cat /opt/tobevpn/tobevpn-router.sh 2>/dev/null", None)
         .await?;
-    Ok((needed, agent != AGENT_SCRIPT))
+    Ok((needed, current, agent != AGENT_SCRIPT))
 }
 
 /// Whether the router runs older components than this app carries. Uses
@@ -708,7 +939,11 @@ pub async fn router_update_check(
     user: String,
 ) -> Result<RouterUpdate, String> {
     let session = open(&app, &host, &user).await?;
-    let (binaries, agent) = outdated_components(&session).await?;
+    let (binaries, xray_current, agent) = outdated_components(&app, &session).await?;
+    let xray_target = binaries
+        .iter()
+        .find(|binary| binary.name == "xray")
+        .and_then(|binary| binary.version.clone());
     let mut components: Vec<String> = binaries
         .iter()
         .map(|binary| binary.name.to_string())
@@ -719,6 +954,8 @@ pub async fn router_update_check(
     Ok(RouterUpdate {
         available: !components.is_empty(),
         components,
+        xray_current,
+        xray_target,
     })
 }
 
@@ -742,7 +979,7 @@ async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus,
     progress(app, "connect");
     let session = open(app, host, user).await?;
     progress(app, "check");
-    let (needed, _) = outdated_components(&session).await?;
+    let (needed, _, _) = outdated_components(app, &session).await?;
     if !needed.is_empty() {
         let free_kb: u64 = session
             .run_ok("df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'", None)
@@ -760,7 +997,7 @@ async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus,
     let mut downloads = Vec::new();
     for binary in &needed {
         progress(app, &format!("download:{}", binary.name));
-        downloads.push((*binary, fetch_binary(app, binary).await?));
+        downloads.push((binary, fetch_binary(app, binary).await?));
     }
 
     progress(app, "configure");
@@ -778,6 +1015,15 @@ async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus,
             "info",
             format!("{}: uploaded {} KB", binary.name, content.len() / 1024),
         );
+        if let (Some(version), "xray") = (&binary.version, binary.name) {
+            session
+                .write_file(
+                    "/opt/tobevpn/xray.version",
+                    format!("{version}\n").as_bytes(),
+                    "644",
+                )
+                .await?;
+        }
     }
     session
         .write_file(
@@ -1331,73 +1577,86 @@ async fn fetch_binary(app: &AppHandle, binary: &Binary) -> Result<Vec<u8>, Strin
         .join("router");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("create {}: {error}", cache.display()))?;
-    let cached = cache.join(format!("{}-{}", binary.name, &binary.sha256[..16]));
-    if let Ok(content) = std::fs::read(&cached) {
-        if sha256_hex(&content) == binary.sha256 {
-            log(
-                app,
-                "info",
-                format!("{}: taken from the app cache", binary.name),
-            );
-            return Ok(content);
-        }
-    }
-    let mut attempt = 0;
-    let downloaded = loop {
-        attempt += 1;
+    // The download is cached and checked by its own digest, so a release
+    // known only by its .dgst can be taken from the cache too.
+    let cached = cache.join(format!(
+        "{}-{}.download",
+        binary.name,
+        &binary.download_sha256[..16]
+    ));
+    let from_cache = std::fs::read(&cached)
+        .ok()
+        .filter(|content| sha256_hex(content) == binary.download_sha256);
+    if from_cache.is_some() {
         log(
             app,
             "info",
-            format!(
-                "{}: download attempt {attempt}/{DOWNLOAD_ATTEMPTS}: {}",
-                binary.name, binary.url
-            ),
+            format!("{}: taken from the app cache", binary.name),
         );
-        let url = binary.url.to_string();
-        let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-            let response = reqwest::blocking::Client::builder()
-                .connect_timeout(Duration::from_secs(20))
-                .timeout(Duration::from_secs(300))
-                .build()
-                .map_err(|error| format!("http client: {error}"))?
-                .get(&url)
-                .send()
-                .and_then(|response| response.error_for_status())
-                .map_err(|error| format!("download {url}: {}", error_chain(&error)))?;
-            response
-                .bytes()
-                .map(|bytes| bytes.to_vec())
-                .map_err(|error| format!("download {url}: {}", error_chain(&error)))
-        })
-        .await
-        .map_err(|error| format!("download task: {error}"))?;
-        match result {
-            Ok(bytes) => {
-                log(
-                    app,
-                    "info",
-                    format!("{}: downloaded {} KB", binary.name, bytes.len() / 1024),
-                );
-                break bytes;
+    }
+    let mut attempt = 0;
+    let downloaded = if let Some(content) = from_cache {
+        content
+    } else {
+        loop {
+            attempt += 1;
+            log(
+                app,
+                "info",
+                format!(
+                    "{}: download attempt {attempt}/{DOWNLOAD_ATTEMPTS}: {}",
+                    binary.name, binary.url
+                ),
+            );
+            let url = binary.url.to_string();
+            let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                crate::update_download::install_rustls_provider();
+                let response = reqwest::blocking::Client::builder()
+                    .connect_timeout(Duration::from_secs(20))
+                    .timeout(Duration::from_secs(300))
+                    .build()
+                    .map_err(|error| format!("http client: {error}"))?
+                    .get(&url)
+                    .send()
+                    .and_then(|response| response.error_for_status())
+                    .map_err(|error| format!("download {url}: {}", error_chain(&error)))?;
+                response
+                    .bytes()
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|error| format!("download {url}: {}", error_chain(&error)))
+            })
+            .await
+            .map_err(|error| format!("download task: {error}"))?;
+            match result {
+                Ok(bytes) => {
+                    log(
+                        app,
+                        "info",
+                        format!("{}: downloaded {} KB", binary.name, bytes.len() / 1024),
+                    );
+                    break bytes;
+                }
+                Err(error) if attempt < DOWNLOAD_ATTEMPTS => {
+                    log(app, "warn", error);
+                    tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) if attempt < DOWNLOAD_ATTEMPTS => {
-                log(app, "warn", error);
-                tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
-            }
-            Err(error) => return Err(error),
         }
     };
     if sha256_hex(&downloaded) != binary.download_sha256 {
         return Err(format!("{}: download checksum mismatch", binary.name));
     }
+    let _ = std::fs::write(&cached, &downloaded);
     let content = match binary.zip_member {
         Some(member) => unzip_member(&downloaded, member)?,
         None => downloaded,
     };
-    if sha256_hex(&content) != binary.sha256 {
-        return Err(format!("{}: checksum mismatch", binary.name));
+    if let Some(expected) = binary.sha256 {
+        if sha256_hex(&content) != expected {
+            return Err(format!("{}: checksum mismatch", binary.name));
+        }
     }
-    let _ = std::fs::write(&cached, &content);
     Ok(content)
 }
 
@@ -1536,6 +1795,64 @@ mod tests {
         );
         assert_eq!(clean_router_name("  Дача`$ у мамы\n "), "Дача у мамы");
         assert_eq!(clean_router_name(&"я".repeat(60)).chars().count(), 40);
+    }
+
+    #[test]
+    fn picks_router_xray_releases() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let release = |tag: &str, published: &str, prerelease: bool| {
+            json!({
+                "tag_name": tag, "draft": false, "prerelease": prerelease, "published_at": published,
+                "assets": [
+                    {"name": "Xray-linux-arm64-v8a.zip",
+                     "browser_download_url": format!("https://github.com/XTLS/Xray-core/releases/download/{tag}/Xray-linux-arm64-v8a.zip")},
+                    {"name": "Xray-linux-arm64-v8a.zip.dgst",
+                     "browser_download_url": format!("https://github.com/XTLS/Xray-core/releases/download/{tag}/Xray-linux-arm64-v8a.zip.dgst")}
+                ]
+            })
+        };
+        // Old enough, final: taken.
+        assert_eq!(
+            suitable_release(&release("v26.11.2", "2026-11-04T10:00:00Z", false), now)
+                .map(|found| found.0),
+            Some("26.11.2".to_string())
+        );
+        // Too fresh, or a pre-release: skipped.
+        assert!(
+            suitable_release(&release("v26.11.7", "2026-11-07T10:00:00Z", false), now).is_none()
+        );
+        assert!(
+            suitable_release(&release("v26.11.2", "2026-11-01T10:00:00Z", true), now).is_none()
+        );
+        assert_eq!(
+            sha256_from_dgst("MD5= 00\nSHA1= 11\nSHA2-256= 1811C8F1DA0C3B6DC707EBAF1C8390E987BA39859A8F0A7AADD8526157F2EC8D\n"),
+            Some("1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d".to_string())
+        );
+        assert_eq!(sha256_from_dgst("SHA2-256= short"), None);
+        assert!(version_tuple("26.10.31") < version_tuple("26.11.2"));
+        assert!(version_tuple("v26").is_empty());
+
+        let mut facts = HashMap::new();
+        facts.insert("xray_version".to_string(), "26.10.31".to_string());
+        let mut target = pinned_xray();
+        assert!(!binary_outdated(&target, &facts));
+        target.version = Some("26.11.2".into());
+        assert!(binary_outdated(&target, &facts));
+        facts.insert("xray_version".to_string(), String::new());
+        assert!(binary_outdated(&pinned_xray(), &facts));
+        facts.insert(
+            "md5_hev-socks5-tunnel".to_string(),
+            "7720e92733082f4920c511205bb115da".to_string(),
+        );
+        assert!(!binary_outdated(&hev_tunnel(), &facts));
+    }
+
+    #[test]
+    #[ignore]
+    fn live_latest_xray_release() {
+        println!("LIVE {:?}", latest_xray_release());
     }
 
     #[test]

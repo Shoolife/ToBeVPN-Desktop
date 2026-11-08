@@ -1054,3 +1054,15 @@
   opacity: 0.5;
   cursor: default;
 }
+
+.router-update__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.router-update__versions {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}

@@ -368,6 +368,9 @@ export interface RouterUpdate {
   available: boolean;
   /** "xray", "hev-socks5-tunnel", "agent". */
   components: string[];
+  /** Xray on the router and the version it would get. */
+  xrayCurrent: string | null;
+  xrayTarget: string | null;
 }
 
 /** Whether the router runs older components than this app carries. */

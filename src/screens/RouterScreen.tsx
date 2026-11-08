@@ -46,6 +46,7 @@ import {
   type RouterInfo,
   type RouterLink,
   type RouterNetwork,
+  type RouterUpdate,
   type RouterStatus,
   type SlotServer,
 } from "../session/router";
@@ -245,7 +246,8 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [logOpen, setLogOpen] = useState(false);
   const [pings, setPings] = useState<Map<string, number>>(new Map());
   const [renaming, setRenaming] = useState(false);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [update, setUpdate] = useState<RouterUpdate | null>(null);
+  const updateAvailable = !!update?.available;
   const [updateOpen, setUpdateOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const generationRef = useRef(0);
@@ -275,7 +277,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     if (currentLink && nextStatus?.installed) {
       void routerUpdateCheck(currentLink)
         .then((update) => {
-          if (generation === generationRef.current) setUpdateAvailable(update.available);
+          if (generation === generationRef.current) setUpdate(update);
         })
         .catch(() => undefined);
     }
@@ -487,7 +489,16 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   <path d="M5 21h14" />
                 </svg>
               </span>
-              <span className="router-update__text">{t("router_update_available")}</span>
+              <span className="router-update__text">
+                {t("router_update_available")}
+                {update?.components.includes("xray") && update.xrayTarget && (
+                  <span className="router-update__versions">
+                    {update.xrayCurrent
+                      ? tf("router_update_xray_versions", update.xrayCurrent, update.xrayTarget)
+                      : tf("router_update_xray_version", update.xrayTarget)}
+                  </span>
+                )}
+              </span>
               <button type="button" className="router-update__button" disabled={busy} onClick={() => setUpdateOpen(true)}>
                 {t("router_update_button")}
               </button>
@@ -499,7 +510,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               onClose={() => setUpdateOpen(false)}
               onUpdated={(next) => {
                 setStatus(next);
-                setUpdateAvailable(false);
+                setUpdate(null);
               }}
             />
           )}
