@@ -28,9 +28,10 @@ const INIT_SCRIPT: &str = "#!/bin/sh /etc/rc.common\n\
 START=99\nSTOP=10\n\
 start() { /opt/tobevpn/tobevpn-router.sh start >/dev/null 2>&1; }\n\
 stop() { /opt/tobevpn/tobevpn-router.sh stop >/dev/null 2>&1; }\n";
-const HEV_CONFIG: &str =
-    "tunnel:\n  name: tobe0\n  mtu: 1500\n  multi-queue: false\n  ipv4: 198.18.0.1\n\
-socks5:\n  port: 10808\n  address: 127.0.0.1\n  udp: udp\nmisc:\n  log-level: warn\n";
+/// Xray SOCKS port of slot 0; slot N listens on SOCKS_PORT + N.
+const SOCKS_PORT: u16 = 10808;
+/// Server slots: 0 is the router's server, 1-3 servers of single devices.
+const MAX_SLOT: u8 = 3;
 /// Re-applies per-device routes when a home device gets an address.
 const DHCP_HOOK: &str = "#!/bin/sh\n\
 # ToBeVPN: per-device routes follow a device's new address.\n\
@@ -349,11 +350,12 @@ pub async fn router_install(
     app: AppHandle,
     host: String,
     user: String,
-    server: ServerConfig,
+    servers: Vec<SlotServer>,
     server_hosts: Vec<String>,
     subscription_url: String,
     autostart: bool,
 ) -> Result<RouterStatus, String> {
+    validate_slots(&servers)?;
     progress(&app, "connect");
     let session = open(&app, &host, &user).await?;
 
@@ -474,16 +476,7 @@ pub async fn router_install(
             "755",
         )
         .await?;
-    session
-        .write_file(
-            "/opt/tobevpn/xray.json",
-            router_xray_config(&server).as_bytes(),
-            "600",
-        )
-        .await?;
-    session
-        .write_file("/opt/tobevpn/hev.yml", HEV_CONFIG.as_bytes(), "600")
-        .await?;
+    write_servers(&session, &servers).await?;
     session
         .write_file(
             "/opt/tobevpn/subscription.conf",
@@ -603,6 +596,23 @@ pub struct RouterDevice {
     /// Name the user gave the device.
     pub name: Option<String>,
     pub online: bool,
+    /// Server slot: 0 is the router's server.
+    pub slot: u8,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterSlot {
+    pub slot: u8,
+    pub server_id: String,
+    pub server_name: String,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterNetwork {
+    pub devices: Vec<RouterDevice>,
+    pub slots: Vec<RouterSlot>,
 }
 
 /// Devices of the home network, with their VPN choice.
@@ -611,12 +621,15 @@ pub async fn router_devices(
     app: AppHandle,
     host: String,
     user: String,
-) -> Result<Vec<RouterDevice>, String> {
+) -> Result<RouterNetwork, String> {
     let session = open(&app, &host, &user).await?;
     let output = session
         .run_ok("/opt/tobevpn/tobevpn-router.sh devices", None)
         .await?;
-    Ok(parse_devices(&output))
+    Ok(RouterNetwork {
+        devices: parse_devices(&output),
+        slots: parse_slots(&output),
+    })
 }
 
 /// Sets one device to "vpn", "direct" or back to "default", with a name.
@@ -627,8 +640,12 @@ pub async fn router_set_device(
     user: String,
     mac: String,
     mode: String,
+    slot: u8,
     name: String,
 ) -> Result<(), String> {
+    if slot > MAX_SLOT {
+        return Err("invalid server slot".into());
+    }
     let mac = mac.trim().to_ascii_lowercase();
     let valid_mac = mac.len() == 17
         && mac.split(':').count() == 6
@@ -647,7 +664,7 @@ pub async fn router_set_device(
     session
         .run_ok(
             &format!(
-                "/opt/tobevpn/tobevpn-router.sh set-device '{mac}' '{mode}' '{}'",
+                "/opt/tobevpn/tobevpn-router.sh set-device '{mac}' '{mode}' '{slot}' '{}'",
                 shell_quote_inner(name.trim())
             ),
             None,
@@ -680,15 +697,39 @@ pub async fn router_set_default_mode(
     Ok(parse_status(&output))
 }
 
+fn parse_slots(text: &str) -> Vec<RouterSlot> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("slot="))
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '|');
+            let slot = fields
+                .next()?
+                .parse::<u8>()
+                .ok()
+                .filter(|slot| *slot <= MAX_SLOT)?;
+            Some(RouterSlot {
+                slot,
+                server_id: fields.next()?.to_string(),
+                server_name: fields.next().unwrap_or_default().to_string(),
+            })
+        })
+        .collect()
+}
+
 fn parse_devices(text: &str) -> Vec<RouterDevice> {
     let mut devices: Vec<RouterDevice> = text
         .lines()
         .filter_map(|line| line.strip_prefix("device="))
         .filter_map(|line| {
             let fields: Vec<&str> = line.split('|').collect();
-            let [mac, ip, hostname, mode, name, online] = fields.as_slice() else {
+            let [mac, ip, hostname, mode, name, online, rest @ ..] = fields.as_slice() else {
                 return None;
             };
+            let slot = rest
+                .first()
+                .and_then(|slot| slot.parse().ok())
+                .filter(|slot| *slot <= MAX_SLOT)
+                .unwrap_or(0);
             let present = |value: &&str| (!value.is_empty()).then(|| value.to_string());
             Some(RouterDevice {
                 mac: mac.to_string(),
@@ -697,6 +738,7 @@ fn parse_devices(text: &str) -> Vec<RouterDevice> {
                 mode: mode.to_string(),
                 name: present(name),
                 online: *online == "1",
+                slot,
             })
         })
         .collect();
@@ -704,15 +746,17 @@ fn parse_devices(text: &str) -> Vec<RouterDevice> {
     devices
 }
 
-/// Switches the router to another server and restarts the tunnel.
+/// Sets the router's server (slot 0) and the servers of single devices
+/// (slots 1-3), then restarts the tunnels.
 #[tauri::command]
-pub async fn router_set_server(
+pub async fn router_set_servers(
     app: AppHandle,
     host: String,
     user: String,
-    server: ServerConfig,
+    servers: Vec<SlotServer>,
     server_hosts: Vec<String>,
 ) -> Result<RouterStatus, String> {
+    validate_slots(&servers)?;
     let session = open(&app, &host, &user).await?;
     session
         .write_file(
@@ -721,13 +765,7 @@ pub async fn router_set_server(
             "644",
         )
         .await?;
-    session
-        .write_file(
-            "/opt/tobevpn/xray.json",
-            router_xray_config(&server).as_bytes(),
-            "600",
-        )
-        .await?;
+    write_servers(&session, &servers).await?;
     session
         .run_ok("/opt/tobevpn/tobevpn-router.sh restart", None)
         .await?;
@@ -737,28 +775,126 @@ pub async fn router_set_server(
     Ok(parse_status(&output))
 }
 
+/// A server in a slot: 0 is the router's server, 1-3 servers of devices.
+#[derive(serde::Deserialize, Debug)]
+pub struct SlotServer {
+    pub slot: u8,
+    pub id: String,
+    pub name: String,
+    pub server: ServerConfig,
+}
+
+fn validate_slots(servers: &[SlotServer]) -> Result<(), String> {
+    let mut seen = [false; MAX_SLOT as usize + 1];
+    for server in servers {
+        let slot = server.slot as usize;
+        if server.slot > MAX_SLOT || seen[slot] {
+            return Err("invalid server slots".into());
+        }
+        seen[slot] = true;
+    }
+    if seen[0] {
+        Ok(())
+    } else {
+        Err("the router server is missing".into())
+    }
+}
+
+/// Xray config, one tunnel config per slot and the slot list on the router.
+async fn write_servers(session: &Session, servers: &[SlotServer]) -> Result<(), String> {
+    session
+        .write_file(
+            "/opt/tobevpn/xray.json",
+            router_xray_config(servers).as_bytes(),
+            "600",
+        )
+        .await?;
+    for slot in 0..=MAX_SLOT {
+        let path = if slot == 0 {
+            "/opt/tobevpn/hev.yml".to_string()
+        } else {
+            format!("/opt/tobevpn/hev{slot}.yml")
+        };
+        if servers.iter().any(|server| server.slot == slot) {
+            session
+                .write_file(&path, hev_config(slot).as_bytes(), "600")
+                .await?;
+        } else {
+            session.run_ok(&format!("rm -f '{path}'"), None).await?;
+        }
+    }
+    let clean = |value: &str| -> String {
+        value
+            .chars()
+            .filter(|character| !character.is_control() && *character != '|')
+            .take(80)
+            .collect()
+    };
+    let slots: String = servers
+        .iter()
+        .map(|server| {
+            format!(
+                "{}\t{}\t{}\n",
+                server.slot,
+                clean(&server.id),
+                clean(&server.name)
+            )
+        })
+        .collect();
+    session
+        .write_file("/opt/tobevpn/slots", slots.as_bytes(), "644")
+        .await
+}
+
+fn hev_config(slot: u8) -> String {
+    format!(
+        "tunnel:\n  name: tobe{slot}\n  mtu: 1500\n  multi-queue: false\n  ipv4: 198.18.{slot}.1\n\
+         socks5:\n  port: {}\n  address: 127.0.0.1\n  udp: udp\nmisc:\n  log-level: warn\n",
+        SOCKS_PORT + u16::from(slot)
+    )
+}
+
 // ------------------------------------------------------------- helpers ---
 
-fn router_xray_config(server: &ServerConfig) -> String {
+/// One SOCKS input per slot, each sent to its own server.
+fn router_xray_config(servers: &[SlotServer]) -> String {
+    let inbounds: Vec<_> = servers
+        .iter()
+        .map(|server| {
+            json!({
+                "tag": format!("socks{}", server.slot),
+                "listen": "127.0.0.1",
+                "port": SOCKS_PORT + u16::from(server.slot),
+                "protocol": "socks",
+                "settings": { "auth": "noauth", "udp": true }
+            })
+        })
+        .collect();
+    let mut outbounds: Vec<_> = servers
+        .iter()
+        .map(|server| build_proxy_outbound(&server.server, &format!("proxy{}", server.slot)))
+        .collect();
+    outbounds.push(json!({ "tag": "direct", "protocol": "freedom" }));
+    outbounds.push(json!({ "tag": "block", "protocol": "blackhole" }));
+    let mut rules = vec![json!({ "type": "field", "ip": PRIVATE_RANGES, "outboundTag": "direct" })];
+    rules.extend(servers.iter().map(|server| {
+        json!({
+            "type": "field",
+            "inboundTag": [format!("socks{}", server.slot)],
+            "outboundTag": format!("proxy{}", server.slot)
+        })
+    }));
+    let base_key = servers
+        .iter()
+        .find(|server| server.slot == 0)
+        .map(|server| server.server.uuid.clone())
+        .unwrap_or_default();
     let config = json!({
         "log": { "loglevel": "warning" },
-        "inbounds": [{
-            "tag": "socks",
-            "listen": "127.0.0.1",
-            "port": 10808,
-            "protocol": "socks",
-            "settings": { "auth": "noauth", "udp": true }
-        }],
-        "outbounds": [
-            build_proxy_outbound(server, "proxy"),
-            { "tag": "direct", "protocol": "freedom" },
-            { "tag": "block", "protocol": "blackhole" }
-        ],
-        "routing": {
-            "domainStrategy": "AsIs",
-            "rules": [{ "type": "field", "ip": PRIVATE_RANGES, "outboundTag": "direct" }]
-        },
-        "xudp": { "baseKey": server.uuid }
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "routing": { "domainStrategy": "AsIs", "rules": rules },
+        "xudp": { "baseKey": base_key }
     });
     serde_json::to_string_pretty(&config).unwrap_or_default()
 }
@@ -985,8 +1121,25 @@ mod tests {
     #[test]
     fn parses_device_lines() {
         let devices = parse_devices(
-            "device=52:e1:c9:b5:1a:c8|192.168.1.107|Pixel-10-Pro|direct|Телефон|1\n\
-             device=aa:bb:cc:dd:ee:ff|||default||0\nbroken line\n",
+            "device=52:e1:c9:b5:1a:c8|192.168.1.107|Pixel-10-Pro|direct|Телефон|1|2\n\
+             device=aa:bb:cc:dd:ee:ff|||default||0\nbroken line\nslot=2|nl2|Нидерланды 2\n",
+        );
+        assert_eq!(devices[0].slot, 2);
+        assert_eq!(devices[1].slot, 0);
+        assert_eq!(
+            parse_slots("slot=0|de2|Германия 2\nslot=9|x|y\nslot=2|nl2|Нидерланды 2\n"),
+            vec![
+                RouterSlot {
+                    slot: 0,
+                    server_id: "de2".into(),
+                    server_name: "Германия 2".into()
+                },
+                RouterSlot {
+                    slot: 2,
+                    server_id: "nl2".into(),
+                    server_name: "Нидерланды 2".into()
+                },
+            ]
         );
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].name.as_deref(), Some("Телефон"));

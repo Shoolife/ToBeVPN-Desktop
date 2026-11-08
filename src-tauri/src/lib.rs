@@ -1176,7 +1176,7 @@ pub fn run() {
             router_agent::router_install,
             router_agent::router_status,
             router_agent::router_control,
-            router_agent::router_set_server,
+            router_agent::router_set_servers,
             router_agent::router_devices,
             router_agent::router_set_device,
             router_agent::router_set_default_mode,

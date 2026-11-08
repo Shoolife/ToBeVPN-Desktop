@@ -102,6 +102,30 @@ export interface RouterDevice {
   /** Name the user gave the device. */
   name: string | null;
   online: boolean;
+  /** Server slot when the mode is "vpn": 0 is the router's server. */
+  slot: number;
+}
+
+/** A server in a slot of the router: 0 is the router's own, 1-3 of single devices. */
+export interface RouterSlot {
+  slot: number;
+  serverId: string;
+  serverName: string;
+}
+
+export interface RouterNetwork {
+  devices: RouterDevice[];
+  slots: RouterSlot[];
+}
+
+/** Extra servers for single devices, besides the router's own. */
+export const ROUTER_EXTRA_SLOTS = 3;
+
+export interface SlotServer {
+  slot: number;
+  id: string;
+  name: string;
+  server: ServerVpnConfig;
 }
 
 /** The router this app manages: address, SSH login and the chosen server. */
@@ -153,7 +177,7 @@ export async function installRouter(options: {
   host: string;
   user: string;
   password: string;
-  server: ServerVpnConfig & { id: string; name: string };
+  server: SlotServer;
   subscriptionUrl: string;
   autostart: boolean;
 }): Promise<RouterStatus> {
@@ -163,7 +187,7 @@ export async function installRouter(options: {
   const status = await invoke<RouterStatus>("router_install", {
     host,
     user,
-    server,
+    servers: [{ ...server, slot: 0 }],
     serverHosts,
     subscriptionUrl,
     autostart,
@@ -188,27 +212,27 @@ export async function routerControl(link: RouterLink, action: RouterAction): Pro
   return status;
 }
 
-export async function setRouterServer(
-  link: RouterLink,
-  server: ServerVpnConfig & { id: string; name: string },
-): Promise<RouterStatus> {
-  const status = await invoke<RouterStatus>("router_set_server", {
+/** Sets the router's server (slot 0) and the servers of single devices; restarts the tunnels. */
+export async function setRouterServers(link: RouterLink, servers: SlotServer[]): Promise<RouterStatus> {
+  const main = servers.find((server) => server.slot === 0);
+  if (!main) throw new Error("the router server is missing");
+  const status = await invoke<RouterStatus>("router_set_servers", {
     host: link.host,
     user: link.user,
-    server,
+    servers,
     serverHosts: accountServerHosts(),
   });
-  saveRouterLink({ ...link, serverId: server.id, serverName: server.name });
+  saveRouterLink({ ...link, serverId: main.id, serverName: main.name });
   return status;
 }
 
-export async function routerDevices(link: RouterLink): Promise<RouterDevice[]> {
-  return invoke<RouterDevice[]>("router_devices", { host: link.host, user: link.user });
+export async function routerDevices(link: RouterLink): Promise<RouterNetwork> {
+  return invoke<RouterNetwork>("router_devices", { host: link.host, user: link.user });
 }
 
 export async function setRouterDevice(
   link: RouterLink,
-  device: { mac: string; mode: RouterDevice["mode"]; name: string },
+  device: { mac: string; mode: RouterDevice["mode"]; slot: number; name: string },
 ): Promise<void> {
   await invoke("router_set_device", { host: link.host, user: link.user, ...device });
 }

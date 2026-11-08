@@ -1,28 +1,34 @@
 #!/bin/sh
 # ToBeVPN on an OpenWrt router: Xray + hev-socks5-tunnel; home devices are
-# sent into the tunnel by source address. Installed and driven by the
+# sent into a tunnel by source address. Installed and driven by the
 # ToBeVPN desktop app over SSH.
 #
 # Everything this script changes at runtime (routes, rules, firewall rules
 # marked "tobevpn", processes) is undone by "stop" or by a reboot. Only the
-# files in /opt/tobevpn and the optional /etc/init.d/tobevpn stay.
+# files in /opt/tobevpn, /etc/hotplug.d/dhcp/90-tobevpn and the optional
+# /etc/init.d/tobevpn stay.
 #
-#   tobevpn-router.sh start|stop|restart|status|uninstall
+# Servers come in slots: slot 0 is the router's server (tunnel tobe0, Xray
+# SOCKS port 10808), slots 1-3 are servers chosen for single devices
+# (tobeN, port 10808+N, config hevN.yml). Xray sends each SOCKS input to
+# its own server, so a device's tunnel decides its server.
 #
 # Files: default_mode ("vpn" or "direct" for devices without a choice),
-# devices (MAC<tab>vpn|direct<tab>name, one per line), servers (ToBeVPN
-# server hosts, always reached directly so a device running its own
-# ToBeVPN is not tunnelled twice).
+# devices (MAC<tab>vpn|direct|default<tab>name<tab>slot, one per line),
+# slots (slot<tab>server id<tab>server name), servers (ToBeVPN server hosts,
+# always reached directly so a device running its own ToBeVPN is not
+# tunnelled twice).
 #
-#   tobevpn-router.sh devices | set-device MAC vpn|direct [NAME] |
-#                     set-default vpn|direct | apply
+#   tobevpn-router.sh start|stop|restart|status|uninstall|apply|devices
+#   tobevpn-router.sh set-device MAC vpn|direct|default SLOT [NAME]
+#   tobevpn-router.sh set-default vpn|direct
 
 DIR=/opt/tobevpn
 RUN=/tmp/tobevpn
-TUN=tobe0
 TABLE=100
+SLOT_TABLE_BASE=110
 PRIO=101
-DIRECT_PRIO=100
+DEVICE_PRIO=100
 BYPASS_PRIO=99
 DNS_CHAIN=TOBEVPN_DNS
 TUNNEL_DNS=1.1.1.1
@@ -31,6 +37,21 @@ TAG=tobevpn
 
 lan_subnet() {
     ip -4 route show dev "$LAN_DEV" scope link 2>/dev/null | awk '{print $1; exit}'
+}
+
+lan_address() {
+    ip -4 addr show "$LAN_DEV" 2>/dev/null | awk '/inet /{split($2, a, "/"); print a[1]; exit}'
+}
+
+# Extra server slots that have a tunnel config (1-3).
+extra_slots() {
+    for config in "$DIR"/hev[1-3].yml; do
+        [ -f "$config" ] && basename "$config" .yml | sed 's/^hev//'
+    done
+}
+
+tunnel_of() {
+    echo "tobe$1"
 }
 
 # Keep the router registered as a device of the account and read its quota.
@@ -84,10 +105,6 @@ default_mode() {
     [ "$mode" = direct ] && echo direct || echo vpn
 }
 
-lan_address() {
-    ip -4 addr show "$LAN_DEV" 2>/dev/null | awk '/inet /{split($2, a, "/"); print a[1]; exit}'
-}
-
 # Current IPv4 address of a MAC: DHCP lease first, then the ARP table.
 mac_address_ip() {
     awk -v mac="$1" 'tolower($2) == mac {print $3; exit}' /tmp/dhcp.leases 2>/dev/null |
@@ -95,10 +112,17 @@ mac_address_ip() {
             'tolower($4) == mac && $6 == dev && $3 != "0x0" {print $1; exit}' /proc/net/arp
 }
 
-# Addresses of saved devices whose mode is $1.
-device_ips() {
-    awk -F '\t' -v mode="$1" '$2 == mode {print tolower($1)}' "$DIR/devices" 2>/dev/null |
-        while read -r mac; do mac_address_ip "$mac"; done
+# Saved devices as "MAC effective-mode slot", the slot falling back to 0
+# when its tunnel no longer exists.
+device_choices() {
+    default=$(default_mode)
+    slots=" 0 $(extra_slots | tr '\n' ' ')"
+    awk -F '\t' -v default="$default" -v slots="$slots" '
+        $1 != "" {
+            mode = ($2 == "vpn" || $2 == "direct") ? $2 : default
+            slot = ($4 ~ /^[1-3]$/ && index(slots, " " $4 " ")) ? $4 : 0
+            print tolower($1), mode, slot
+        }' "$DIR/devices" 2>/dev/null
 }
 
 dns_rule() {
@@ -114,41 +138,54 @@ remove_dns_redirect() {
     iptables -t nat -X "$DNS_CHAIN" 2>/dev/null
 }
 
+clear_device_rules() {
+    while ip rule del lookup "$TABLE" prio "$PRIO" 2>/dev/null; do :; done
+    while ip rule del prio "$DEVICE_PRIO" 2>/dev/null; do :; done
+}
+
 apply_routes() {
     subnet=$(lan_subnet)
     router_ip=$(lan_address)
-    ip route replace default dev "$TUN" table "$TABLE"
+    ip route replace default dev "$(tunnel_of 0)" table "$TABLE"
     [ -n "$subnet" ] && ip route replace "$subnet" dev "$LAN_DEV" table "$TABLE"
-    while ip rule del lookup "$TABLE" prio "$PRIO" 2>/dev/null; do :; done
-    while ip rule del lookup main prio "$DIRECT_PRIO" 2>/dev/null; do :; done
+    for slot in $(extra_slots); do
+        table=$((SLOT_TABLE_BASE + slot))
+        ip route replace default dev "$(tunnel_of "$slot")" table "$table" 2>/dev/null
+        [ -n "$subnet" ] && ip route replace "$subnet" dev "$LAN_DEV" table "$table"
+    done
+    clear_device_rules
     iptables -t nat -N "$DNS_CHAIN" 2>/dev/null || iptables -t nat -F "$DNS_CHAIN"
-    if [ "$(default_mode)" = vpn ]; then
-        # The whole home network, except devices set to "direct".
-        for ip in $(device_ips direct); do
-            ip rule add from "$ip" lookup main prio "$DIRECT_PRIO"
+    device_choices | while read -r mac mode slot; do
+        ip=$(mac_address_ip "$mac")
+        [ -n "$ip" ] || continue
+        if [ "$mode" = direct ]; then
+            # Only matters when the rest of the home goes through the VPN.
+            ip rule add from "$ip" lookup main prio "$DEVICE_PRIO"
             iptables -t nat -A "$DNS_CHAIN" -s "$ip" -j RETURN
-        done
-        if [ -n "$subnet" ]; then
-            ip rule add from "$subnet" lookup "$TABLE" prio "$PRIO"
-            [ -n "$router_ip" ] && dns_rule "$subnet" "$router_ip"
-        fi
-    else
-        for ip in $(device_ips vpn); do
+        elif [ "$slot" != 0 ]; then
+            ip rule add from "$ip" lookup "$((SLOT_TABLE_BASE + slot))" prio "$DEVICE_PRIO"
+            [ -n "$router_ip" ] && dns_rule "$ip" "$router_ip"
+        elif [ "$(default_mode)" = direct ]; then
             ip rule add from "$ip" lookup "$TABLE" prio "$PRIO"
             [ -n "$router_ip" ] && dns_rule "$ip" "$router_ip"
-        done
+        fi
+    done
+    if [ "$(default_mode)" = vpn ] && [ -n "$subnet" ]; then
+        # The whole home network, except the devices handled above.
+        ip rule add from "$subnet" lookup "$TABLE" prio "$PRIO"
+        [ -n "$router_ip" ] && dns_rule "$subnet" "$router_ip"
     fi
-    # DNS of devices that go through the VPN is resolved inside the tunnel.
+    # DNS of devices that go through the VPN is resolved inside their tunnel.
     iptables -t nat -C PREROUTING -j "$DNS_CHAIN" -m comment --comment "$TAG" 2>/dev/null ||
         iptables -t nat -I PREROUTING 1 -j "$DNS_CHAIN" -m comment --comment "$TAG"
     apply_server_bypass
-    firewall_rule filter FORWARD 1 -i "$LAN_DEV" -o "$TUN" -j ACCEPT
-    firewall_rule filter FORWARD 1 -i "$TUN" -o "$LAN_DEV" -j ACCEPT
-    firewall_rule mangle FORWARD 1 -o "$TUN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    firewall_rule filter FORWARD 1 -i "$LAN_DEV" -o "tobe+" -j ACCEPT
+    firewall_rule filter FORWARD 1 -i "tobe+" -o "$LAN_DEV" -j ACCEPT
+    firewall_rule mangle FORWARD 1 -o "tobe+" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 }
 
-# One line per home device: device=MAC|IP|HOSTNAME|MODE|NAME|ONLINE.
-# MODE is the saved choice or "default".
+# One line per home device: device=MAC|IP|HOSTNAME|MODE|NAME|ONLINE|SLOT,
+# MODE being the saved choice or "default"; then slot=N|SERVER_ID|NAME.
 list_devices() {
     {
         awk '{print tolower($2) "\t" $3 "\t" $4}' /tmp/dhcp.leases 2>/dev/null
@@ -157,7 +194,7 @@ list_devices() {
     } | awk -F '\t' -v saved="$DIR/devices" -v arp=/proc/net/arp -v dev="$LAN_DEV" '
         BEGIN {
             while ((getline line < saved) > 0) {
-                split(line, f, "\t"); m = tolower(f[1]); mode[m] = f[2]; name[m] = f[3]
+                split(line, f, "\t"); m = tolower(f[1]); mode[m] = f[2]; name[m] = f[3]; slot[m] = f[4]
             }
             while ((getline line < arp) > 0) {
                 n = split(line, f, " "); if (f[6] == dev && f[3] == "0x2") online[tolower(f[4])] = 1
@@ -170,39 +207,53 @@ list_devices() {
         END {
             for (m in ip) {
                 h = host[m]; if (h == "*") h = ""
-                print "device=" m "|" ip[m] "|" h "|" (m in mode ? mode[m] : "default") "|" name[m] "|" (m in online ? 1 : 0)
+                s = (slot[m] ~ /^[1-3]$/) ? slot[m] : 0
+                print "device=" m "|" ip[m] "|" h "|" (m in mode && mode[m] != "" ? mode[m] : "default") "|" name[m] "|" (m in online ? 1 : 0) "|" s
             }
         }'
+    awk -F '\t' '$1 ~ /^[0-3]$/ {print "slot=" $1 "|" $2 "|" $3}' "$DIR/slots" 2>/dev/null
 }
 
 set_device() {
     mac=$(echo "$1" | tr 'A-F' 'a-f')
+    mode=$2
+    slot=$3
     echo "$mac" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "error=bad mac"; return 2; }
-    case "$2" in vpn | direct | default) ;; *) echo "error=bad mode"; return 2 ;; esac
-    shift 2
-    name=$(echo "$*" | tr -d '\t\r\n|' | cut -c1-40)
+    case "$mode" in vpn | direct | default) ;; *) echo "error=bad mode"; return 2 ;; esac
+    case "$slot" in 0 | 1 | 2 | 3) ;; *) echo "error=bad slot"; return 2 ;; esac
+    name=$(printf '%s' "$4" | tr -d '\t\r\n|' | cut -c1-40)
     touch "$DIR/devices"
     grep -v -i "^$mac	" "$DIR/devices" >"$DIR/devices.tmp" 2>/dev/null
-    if [ "$mode_arg" != default ] || [ -n "$name" ]; then
-        printf '%s\t%s\t%s\n' "$mac" "$mode_arg" "$name" >>"$DIR/devices.tmp"
+    if [ "$mode" != default ] || [ "$slot" != 0 ] || [ -n "$name" ]; then
+        printf '%s\t%s\t%s\t%s\n' "$mac" "$mode" "$name" "$slot" >>"$DIR/devices.tmp"
     fi
     mv "$DIR/devices.tmp" "$DIR/devices"
     pidof xray >/dev/null && apply_routes
     echo "saved=1"
 }
 
+hev_count() {
+    echo $((1 + $(extra_slots | wc -l)))
+}
 
 start_core() {
     if ! pidof xray >/dev/null; then
         GOMEMLIMIT=40MiB GOGC=50 "$DIR/xray" run -c "$DIR/xray.json" >"$RUN/xray.log" 2>&1 &
     fi
-    if ! pidof hev-socks5-tunnel >/dev/null; then
+    if [ "$(pidof hev-socks5-tunnel | wc -w)" -lt "$(hev_count)" ]; then
+        # Restart every tunnel: hev does not tell which config a pid runs.
+        pids=$(pidof hev-socks5-tunnel)
+        # shellcheck disable=SC2086 # several pids
+        [ -n "$pids" ] && kill $pids && sleep 1
         "$DIR/hev-socks5-tunnel" "$DIR/hev.yml" >"$RUN/hev.log" 2>&1 &
+        for slot in $(extra_slots); do
+            "$DIR/hev-socks5-tunnel" "$DIR/hev$slot.yml" >"$RUN/hev$slot.log" 2>&1 &
+        done
     fi
 }
 
 core_alive() {
-    pidof xray >/dev/null && pidof hev-socks5-tunnel >/dev/null
+    pidof xray >/dev/null && [ "$(pidof hev-socks5-tunnel | wc -w)" -ge "$(hev_count)" ]
 }
 
 # Background watchdog: restarts a crashed core once; if that fails, removes
@@ -222,11 +273,26 @@ watch() {
                 rm -f "$RUN/watch.pid"
                 exit 1
             fi
+            bring_up_tunnels
         fi
         [ $((ticks % 720)) -eq 0 ] && apply_server_bypass
         # Devices that reconnected with another address; DHCP events also
         # trigger this through /etc/hotplug.d/dhcp/90-tobevpn.
         [ $((ticks % 10)) -eq 0 ] && apply_routes
+    done
+}
+
+bring_up_tunnels() {
+    for slot in 0 $(extra_slots); do
+        tun=$(tunnel_of "$slot")
+        i=0
+        while [ $i -lt 15 ] && ! ip link show "$tun" >/dev/null 2>&1; do
+            sleep 1
+            i=$((i + 1))
+        done
+        ip link show "$tun" >/dev/null 2>&1 || { echo "error=tunnel $tun did not come up"; return 1; }
+        ip link set "$tun" up
+        echo 0 >"/proc/sys/net/ipv4/conf/$tun/rp_filter"
     done
 }
 
@@ -236,14 +302,7 @@ start() {
     [ -c /dev/net/tun ] || modprobe tun 2>/dev/null || insmod tun 2>/dev/null
     refresh_subscription
     start_core
-    i=0
-    while [ $i -lt 15 ] && ! ip link show "$TUN" >/dev/null 2>&1; do
-        sleep 1
-        i=$((i + 1))
-    done
-    ip link show "$TUN" >/dev/null 2>&1 || { echo "error=tunnel did not come up"; return 1; }
-    ip link set "$TUN" up
-    echo 0 >"/proc/sys/net/ipv4/conf/$TUN/rp_filter"
+    bring_up_tunnels || return 1
     apply_routes
     if ! { [ -f "$RUN/watch.pid" ] && kill -0 "$(cat "$RUN/watch.pid")" 2>/dev/null; }; then
         "$0" watch >/dev/null 2>&1 &
@@ -252,11 +311,13 @@ start() {
 }
 
 stop_routing() {
-    while ip rule del lookup "$TABLE" prio "$PRIO" 2>/dev/null; do :; done
+    clear_device_rules
     while ip rule del lookup main prio "$PRIO" 2>/dev/null; do :; done
     while ip rule del lookup main prio "$BYPASS_PRIO" 2>/dev/null; do :; done
-    while ip rule del lookup main prio "$DIRECT_PRIO" 2>/dev/null; do :; done
     ip route flush table "$TABLE" 2>/dev/null
+    for slot in 1 2 3; do
+        ip route flush table "$((SLOT_TABLE_BASE + slot))" 2>/dev/null
+    done
     remove_dns_redirect
     remove_firewall_rules
 }
@@ -289,16 +350,22 @@ stop() {
 
 status() {
     xray_pid=$(pidof xray)
-    hev_pid=$(pidof hev-socks5-tunnel)
     echo "installed=$([ -x "$DIR/xray" ] && echo 1 || echo 0)"
-    echo "running=$([ -n "$xray_pid" ] && [ -n "$hev_pid" ] && echo 1 || echo 0)"
+    echo "running=$(core_alive && echo 1 || echo 0)"
     [ -f "$RUN/state" ] && cat "$RUN/state"
     echo "bypass_rules=$(ip rule | grep -c "^$BYPASS_PRIO:")"
     echo "autostart=$([ -x /etc/rc.d/S99tobevpn ] && echo 1 || echo 0)"
     [ -n "$xray_pid" ] && echo "xray_rss_kb=$(awk '/VmRSS/{print $2}' "/proc/$xray_pid/status")"
     echo "mem_available_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo)"
-    echo "tun_rx_bytes=$(cat "/sys/class/net/$TUN/statistics/rx_bytes" 2>/dev/null || echo 0)"
-    echo "tun_tx_bytes=$(cat "/sys/class/net/$TUN/statistics/tx_bytes" 2>/dev/null || echo 0)"
+    rx=0
+    tx=0
+    for slot in 0 $(extra_slots); do
+        stats=/sys/class/net/$(tunnel_of "$slot")/statistics
+        rx=$((rx + $(cat "$stats/rx_bytes" 2>/dev/null || echo 0)))
+        tx=$((tx + $(cat "$stats/tx_bytes" 2>/dev/null || echo 0)))
+    done
+    echo "tun_rx_bytes=$rx"
+    echo "tun_tx_bytes=$tx"
     echo "default_mode=$(default_mode)"
     echo "client_ip=${SSH_CLIENT%% *}"
     grep -i '^subscription-userinfo:' "$RUN/subscription.headers" 2>/dev/null |
@@ -322,7 +389,7 @@ restart) stop >/dev/null; start ;;
 status) status ;;
 watch) watch ;;
 devices) list_devices ;;
-set-device) mode_arg=$3; set_device "$2" "$3" "$(shift 3; echo "$*")" ;;
+set-device) set_device "$2" "$3" "$4" "$5" ;;
 set-default)
     case "$2" in vpn | direct) echo "$2" >"$DIR/default_mode" ;; *) echo "error=bad mode"; exit 2 ;; esac
     pidof xray >/dev/null && apply_routes
@@ -330,5 +397,5 @@ set-default)
     ;;
 apply) pidof xray >/dev/null && apply_routes; echo "applied=1" ;;
 uninstall) uninstall ;;
-*) echo "usage: $0 start|stop|restart|status|uninstall" >&2; exit 2 ;;
+*) echo "usage: $0 start|stop|restart|status|uninstall|apply|devices|set-device|set-default" >&2; exit 2 ;;
 esac
