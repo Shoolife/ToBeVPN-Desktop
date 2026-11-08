@@ -1414,6 +1414,35 @@ pub async fn router_set_device(
         .map(|_| ())
 }
 
+/// Drops a home device from Wi-Fi for a moment, so that it reconnects and
+/// forgets the DNS answers it cached before its VPN changed. False for a
+/// wired device or a router whose Wi-Fi cannot be told to.
+#[tauri::command]
+pub async fn router_kick(
+    app: AppHandle,
+    host: String,
+    user: String,
+    mac: String,
+) -> Result<bool, String> {
+    let mac = mac.trim().to_ascii_lowercase();
+    let valid = mac.len() == 17
+        && mac.split(':').count() == 6
+        && mac
+            .split(':')
+            .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()));
+    if !valid {
+        return Err("invalid MAC address".into());
+    }
+    let session = open(&app, &host, &user).await?;
+    let (output, _) = session
+        .run(
+            &format!("/opt/tobevpn/tobevpn-router.sh kick '{mac}'"),
+            None,
+        )
+        .await?;
+    Ok(parse_key_values(&output).get("kicked").map(String::as_str) == Some("1"))
+}
+
 /// Name of the router, kept on the router so every app paired with it sees
 /// it. An empty name returns to the model.
 #[tauri::command]

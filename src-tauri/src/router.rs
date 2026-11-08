@@ -86,6 +86,32 @@ fn page_title(page: &str) -> Option<String> {
     Some(model.to_string())
 }
 
+/// Drops this computer's cached DNS answers, after the router's VPN for it
+/// changed: no reconnect needed, unlike other devices. Best effort.
+#[tauri::command]
+pub async fn flush_dns_cache() -> bool {
+    tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "linux")]
+        let status = std::process::Command::new("resolvectl")
+            .arg("flush-caches")
+            .status();
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("ipconfig")
+                .arg("/flushdns")
+                .creation_flags(0x0800_0000)
+                .status()
+        };
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let status: std::io::Result<std::process::ExitStatus> =
+            Err(std::io::Error::other("unsupported"));
+        status.map(|status| status.success()).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 // ------------------------------------------------------- device names ---
 
 /// What a home device says about itself over UPnP (SSDP): smart TVs, set-top

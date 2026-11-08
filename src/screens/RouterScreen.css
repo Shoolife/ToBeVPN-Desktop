@@ -1149,3 +1149,13 @@
   width: auto;
   min-width: 0;
 }
+
+.router-notice {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}

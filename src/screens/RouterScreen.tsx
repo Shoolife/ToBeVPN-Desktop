@@ -31,6 +31,8 @@ import {
   refreshRouterTraffic,
   routerTrafficBetween,
   routerDeviceLabel,
+  reconnectRouterDevice,
+  flushThisComputerDns,
   unlinkRouterFromAccount,
   routerUpdateCheck,
   updateRouter,
@@ -823,6 +825,7 @@ function HomeNetwork({
   onError: (message: string | null) => void;
 }) {
   const [savingMac, setSavingMac] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [pickingMac, setPickingMac] = useState<string | null>(null);
   const [lanNames, setLanNames] = useState<Record<string, string>>(cachedLanNames);
   const migratingRef = useRef(false);
@@ -879,6 +882,7 @@ function HomeNetwork({
     if (!network) return;
     setSavingMac(device.mac);
     onError(null);
+    setNotice(null);
     try {
       let mode: RouterDevice["mode"] = "direct";
       let slot = 0;
@@ -904,6 +908,21 @@ function HomeNetwork({
         ...current,
         devices: current.devices.map((item) => (item.mac === device.mac ? { ...item, mode, slot } : item)),
       });
+      // The device still holds DNS answers from before: reconnecting it to
+      // Wi-Fi makes it ask again, so blocked sites open at once.
+      // This computer is not dropped from Wi-Fi (the app would lose the
+      // router for a moment): its DNS cache is cleared here instead.
+      if (device.ip && device.ip === status.clientIp) {
+        await flushThisComputerDns();
+      } else if (device.online) {
+        const label = routerDeviceLabel(device, lanNames);
+        const reconnected = await reconnectRouterDevice(link, device.mac).catch(() => false);
+        setNotice(
+          reconnected
+            ? tf("router_device_reconnected", label)
+            : tf("router_device_reconnect_hint", label),
+        );
+      }
     } catch (error) {
       const message = String(error);
       onError(
@@ -925,6 +944,7 @@ function HomeNetwork({
   return (
     <div className="router-panel">
       <p className="router-panel__hint">{t("router_devices_hint")}</p>
+      {notice && <p className="router-notice">{notice}</p>}
       {devices === null || !network ? (
         <Spinner size={20} />
       ) : devices.length === 0 ? (

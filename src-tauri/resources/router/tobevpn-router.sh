@@ -508,6 +508,29 @@ set_device() {
     echo "saved=1"
 }
 
+# Drops a Wi-Fi client for a moment. It reconnects by itself within
+# seconds and, joining the network anew, forgets the DNS answers it cached:
+# after a change of its VPN, blocked sites open at once instead of after
+# their stale answers expire. Wired clients cannot be reconnected (kicked=0).
+kick_client() {
+    upper=$(echo "$1" | tr 'a-f' 'A-F')
+    lower=$(echo "$1" | tr 'A-F' 'a-f')
+    echo "$lower" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "error=bad mac"; return 2; }
+    # SNR / EasyWRT (MediaTek driver with its own ubus service).
+    if ubus call cpe-tools.wireless sta_list 2>/dev/null | grep -qi "\"$upper\""; then
+        ubus call cpe-tools.wireless sta_kick "{\"addr\":\"$upper\"}" >/dev/null 2>&1 && { echo "kicked=1"; return 0; }
+    fi
+    # OpenWrt with hostapd.
+    for object in $(ubus list 'hostapd.*' 2>/dev/null); do
+        if ubus call "$object" get_clients 2>/dev/null | grep -qi "\"$lower\""; then
+            ubus call "$object" del_client \
+                "{\"addr\":\"$lower\",\"reason\":5,\"deauth\":true,\"ban_time\":0}" >/dev/null 2>&1 &&
+                { echo "kicked=1"; return 0; }
+        fi
+    done
+    echo "kicked=0"
+}
+
 hev_count() {
     echo $((1 + $(extra_slots | wc -l)))
 }
@@ -704,6 +727,7 @@ set-name)
     if [ -n "$name" ]; then printf '%s\n' "$name" >"$DIR/name"; else rm -f "$DIR/name"; fi
     echo "saved=1"
     ;;
+kick) kick_client "$2" ;;
 traffic)
     # Counted by the watchdog every minute; read only, so the two never race.
     cat "$RUN/traffic" 2>/dev/null || cat "$DIR/traffic" 2>/dev/null

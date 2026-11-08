@@ -472,6 +472,19 @@ export async function setRouterDevice(
   await invoke("router_set_device", { host: link.host, user: link.user, ...device });
 }
 
+/**
+ * Reconnects a home device to Wi-Fi for a moment, so it drops DNS answers
+ * cached before its VPN changed. False when it is wired or cannot be.
+ */
+export async function reconnectRouterDevice(link: RouterLink, mac: string): Promise<boolean> {
+  return invoke<boolean>("router_kick", { host: link.host, user: link.user, mac });
+}
+
+/** Drops this computer's own cached DNS answers. */
+export async function flushThisComputerDns(): Promise<boolean> {
+  return invoke<boolean>("flush_dns_cache").catch(() => false);
+}
+
 export async function setRouterDefaultMode(
   link: RouterLink,
   mode: RouterDeviceMode,
