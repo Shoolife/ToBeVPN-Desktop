@@ -579,6 +579,13 @@
   white-space: nowrap;
 }
 
+/* The list's wrapper sizes to its rows and only shrinks to fit the sheet:
+   with the default flex: 1 WebKitGTK gives it no height in a sheet whose
+   height comes from its content, and only the first row shows. */
+.router-sheet > .scroll-edge-affordance {
+  flex: 0 1 auto;
+}
+
 .router-sheet__list {
   display: flex;
   flex-direction: column;
