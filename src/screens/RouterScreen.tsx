@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { t, tf, type StringKey } from "../i18n";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
@@ -137,7 +137,8 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [password, setPassword] = useState("");
   const [autostart, setAutostart] = useState(true);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
-  const servers = useMemo(routableServers, []);
+  // Read again on every load: the server list may arrive after the screen opens.
+  const [servers, setServers] = useState<VpnServer[]>(routableServers);
   const [serverId, setServerId] = useState<string>(() => link?.serverId ?? servers[0]?.id ?? "");
   const [network, setNetwork] = useState<RouterNetwork | null>(null);
   const generationRef = useRef(0);
@@ -162,6 +163,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
     }
     if (generation !== generationRef.current) return;
+    const nextServers = routableServers();
+    setServers(nextServers);
+    setServerId((id) => id || currentLink?.serverId || nextServers[0]?.id || "");
     setInfo(nextInfo);
     setLink(currentLink);
     setStatus(nextStatus);

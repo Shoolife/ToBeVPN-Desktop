@@ -32,6 +32,9 @@ DEVICE_PRIO=100
 BYPASS_PRIO=99
 DNS_CHAIN=TOBEVPN_DNS
 TUNNEL_DNS=1.1.1.1
+TUNNEL_DNS2=1.0.0.1
+DNS_PRIO=98
+DNSMASQ_CONF=/tmp/dnsmasq.d/tobevpn.conf
 LAN_DEV=br-lan
 TAG=tobevpn
 
@@ -138,6 +141,27 @@ remove_dns_redirect() {
     iptables -t nat -X "$DNS_CHAIN" 2>/dev/null
 }
 
+# With the whole home on the VPN, the router's own DNS (dnsmasq, with its
+# cache) asks 1.1.1.1 through the tunnel; a query then costs a tunnel round
+# trip only once. The file is in /tmp: a reboot drops it with the routing.
+dns_upstream() {
+    while ip rule del prio "$DNS_PRIO" 2>/dev/null; do :; done
+    if [ "$1" = tunnel ]; then
+        for server in "$TUNNEL_DNS" "$TUNNEL_DNS2"; do
+            ip rule add to "$server" iif lo lookup "$TABLE" prio "$DNS_PRIO"
+        done
+        want=$(printf 'no-resolv\nserver=%s\nserver=%s' "$TUNNEL_DNS" "$TUNNEL_DNS2")
+        if [ "$(cat "$DNSMASQ_CONF" 2>/dev/null)" != "$want" ]; then
+            mkdir -p "${DNSMASQ_CONF%/*}"
+            printf '%s\n' "$want" >"$DNSMASQ_CONF"
+            /etc/init.d/dnsmasq restart >/dev/null 2>&1
+        fi
+    elif [ -f "$DNSMASQ_CONF" ]; then
+        rm -f "$DNSMASQ_CONF"
+        /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    fi
+}
+
 clear_device_rules() {
     while ip rule del lookup "$TABLE" prio "$PRIO" 2>/dev/null; do :; done
     while ip rule del prio "$DEVICE_PRIO" 2>/dev/null; do :; done
@@ -155,6 +179,15 @@ apply_routes() {
     done
     clear_device_rules
     iptables -t nat -N "$DNS_CHAIN" 2>/dev/null || iptables -t nat -F "$DNS_CHAIN"
+    # The router's DNS goes through the tunnel when the home does; otherwise
+    # only queries of VPN devices are sent through their tunnel.
+    if [ "$(default_mode)" = vpn ]; then
+        dns_upstream tunnel
+        dns_router_ip=
+    else
+        dns_upstream isp
+        dns_router_ip=$router_ip
+    fi
     device_choices | while read -r mac mode slot; do
         ip=$(mac_address_ip "$mac")
         [ -n "$ip" ] || continue
@@ -164,18 +197,17 @@ apply_routes() {
             iptables -t nat -A "$DNS_CHAIN" -s "$ip" -j RETURN
         elif [ "$slot" != 0 ]; then
             ip rule add from "$ip" lookup "$((SLOT_TABLE_BASE + slot))" prio "$DEVICE_PRIO"
-            [ -n "$router_ip" ] && dns_rule "$ip" "$router_ip"
+            [ -n "$dns_router_ip" ] && dns_rule "$ip" "$dns_router_ip"
         elif [ "$(default_mode)" = direct ]; then
             ip rule add from "$ip" lookup "$TABLE" prio "$PRIO"
-            [ -n "$router_ip" ] && dns_rule "$ip" "$router_ip"
+            [ -n "$dns_router_ip" ] && dns_rule "$ip" "$dns_router_ip"
         fi
     done
     if [ "$(default_mode)" = vpn ] && [ -n "$subnet" ]; then
         # The whole home network, except the devices handled above.
         ip rule add from "$subnet" lookup "$TABLE" prio "$PRIO"
-        [ -n "$router_ip" ] && dns_rule "$subnet" "$router_ip"
     fi
-    # DNS of devices that go through the VPN is resolved inside their tunnel.
+    # DNS of VPN devices when the home is direct: resolved inside their tunnel.
     iptables -t nat -C PREROUTING -j "$DNS_CHAIN" -m comment --comment "$TAG" 2>/dev/null ||
         iptables -t nat -I PREROUTING 1 -j "$DNS_CHAIN" -m comment --comment "$TAG"
     apply_server_bypass
@@ -319,6 +351,7 @@ stop_routing() {
         ip route flush table "$((SLOT_TABLE_BASE + slot))" 2>/dev/null
     done
     remove_dns_redirect
+    dns_upstream isp
     remove_firewall_rules
 }
 
