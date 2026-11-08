@@ -257,6 +257,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
             )}
           </div>
           {!installed && <p className="router-status">{statusText}</p>}
+          {installed && status?.failed && !status.running && <p className="router-error">{t("router_failed")}</p>}
           {error && <p className="router-error">{error}</p>}
 
           {installed && status ? (

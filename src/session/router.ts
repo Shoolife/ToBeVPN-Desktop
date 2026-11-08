@@ -9,6 +9,7 @@ import { SUBSCRIPTION_BASE_URL } from "../api/config";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { getSession } from "./store";
 import type { ServerVpnConfig } from "./vpn";
+import { getCachedVpnServers } from "./auth";
 
 export interface RouterInfo {
   /** Default gateway, e.g. "192.168.1.1"; null without a network. */
@@ -84,6 +85,9 @@ export interface RouterStatus {
   direct: string[];
   subscriptionUsedBytes: number | null;
   subscriptionTotalBytes: number | null;
+  /** The router's watchdog removed the VPN after the core failed. */
+  failed: boolean;
+  serverBypassRules: number;
 }
 
 /** The router this app manages: address, SSH login and the chosen server. */
@@ -140,11 +144,13 @@ export async function installRouter(options: {
   autostart: boolean;
 }): Promise<RouterStatus> {
   const { host, user, password, server, subscriptionUrl, autostart } = options;
+  const serverHosts = accountServerHosts();
   await invoke("router_pair", { host, user, password });
   const status = await invoke<RouterStatus>("router_install", {
     host,
     user,
     server,
+    serverHosts,
     subscriptionUrl,
     autostart,
   });
@@ -176,9 +182,18 @@ export async function setRouterServer(
     host: link.host,
     user: link.user,
     server,
+    serverHosts: accountServerHosts(),
   });
   saveRouterLink({ ...link, serverId: server.id, serverName: server.name });
   return status;
+}
+
+/**
+ * Hosts of every server of the account. The router always reaches them
+ * directly, so a device running its own ToBeVPN is not tunnelled twice.
+ */
+function accountServerHosts(): string[] {
+  return [...new Set(getCachedVpnServers().map((server) => server.address).filter(Boolean))];
 }
 
 /** Subscription address of the account, which the router fetches itself. */

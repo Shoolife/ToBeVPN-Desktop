@@ -90,6 +90,10 @@ pub struct RouterStatus {
     pub direct: Vec<String>,
     pub subscription_used_bytes: Option<u64>,
     pub subscription_total_bytes: Option<u64>,
+    /// The watchdog removed the routing after the core failed to restart.
+    pub failed: bool,
+    /// Routes that keep ToBeVPN servers outside the tunnel.
+    pub server_bypass_rules: u64,
 }
 
 // ---------------------------------------------------------------- SSH ---
@@ -342,6 +346,7 @@ pub async fn router_install(
     host: String,
     user: String,
     server: ServerConfig,
+    server_hosts: Vec<String>,
     subscription_url: String,
     autostart: bool,
 ) -> Result<RouterStatus, String> {
@@ -482,16 +487,19 @@ pub async fn router_install(
             "600",
         )
         .await?;
-    // Every home device goes through the VPN except this computer, which
-    // runs its own tunnel. Kept when reinstalling over an existing choice.
-    let client = facts.get("client").cloned().unwrap_or_default();
+    session
+        .write_file(
+            "/opt/tobevpn/servers",
+            server_list(&server_hosts).as_bytes(),
+            "644",
+        )
+        .await?;
+    // Every home device goes through the VPN; one with its own ToBeVPN on
+    // reaches the servers directly (see "servers"). A choice made earlier
+    // is kept when reinstalling.
     session
         .run_ok(
-            &format!(
-                "[ -s /opt/tobevpn/clients ] || echo all > /opt/tobevpn/clients; \
-                 [ -e /opt/tobevpn/direct ] || echo '{}' | grep -E '^[0-9.]+$' > /opt/tobevpn/direct; true",
-                shell_quote_inner(&client)
-            ),
+            "[ -s /opt/tobevpn/clients ] || echo all > /opt/tobevpn/clients; touch /opt/tobevpn/direct",
             None,
         )
         .await?;
@@ -577,8 +585,16 @@ pub async fn router_set_server(
     host: String,
     user: String,
     server: ServerConfig,
+    server_hosts: Vec<String>,
 ) -> Result<RouterStatus, String> {
     let session = open(&app, &host, &user).await?;
+    session
+        .write_file(
+            "/opt/tobevpn/servers",
+            server_list(&server_hosts).as_bytes(),
+            "644",
+        )
+        .await?;
     session
         .write_file(
             "/opt/tobevpn/xray.json",
@@ -619,6 +635,25 @@ fn router_xray_config(server: &ServerConfig) -> String {
         "xudp": { "baseKey": server.uuid }
     });
     serde_json::to_string_pretty(&config).unwrap_or_default()
+}
+
+/// ToBeVPN server hosts, one per line; anything but a plain host name or
+/// address is dropped, as the router agent passes them to resolveip.
+fn server_list(hosts: &[String]) -> String {
+    let mut list: Vec<&str> = hosts
+        .iter()
+        .map(|host| host.trim())
+        .filter(|host| {
+            !host.is_empty()
+                && host.len() <= 253
+                && host
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b".:-".contains(&byte))
+        })
+        .collect();
+    list.sort_unstable();
+    list.dedup();
+    list.iter().map(|host| format!("{host}\n")).collect()
 }
 
 /// Escapes a value for use inside single quotes in a shell script.
@@ -666,6 +701,8 @@ fn parse_status(text: &str) -> RouterStatus {
         direct: list("direct"),
         subscription_used_bytes: used,
         subscription_total_bytes: total,
+        failed: values.contains_key("failed"),
+        server_bypass_rules: number("bypass_rules").unwrap_or(0),
     }
 }
 
@@ -805,6 +842,21 @@ mod tests {
         assert_eq!(status.direct, vec!["192.168.1.183"]);
         assert_eq!(status.subscription_used_bytes, Some(68544880231));
         assert_eq!(status.subscription_total_bytes, Some(268435456000));
+    }
+
+    #[test]
+    fn server_list_keeps_plain_hosts_only() {
+        let hosts = vec![
+            "germany2.tobevpn.help".to_string(),
+            " 149.33.40.130 ".to_string(),
+            "germany2.tobevpn.help".to_string(),
+            "bad host; rm -rf /".to_string(),
+            String::new(),
+        ];
+        assert_eq!(
+            server_list(&hosts),
+            "149.33.40.130\ngermany2.tobevpn.help\n"
+        );
     }
 
     #[test]
