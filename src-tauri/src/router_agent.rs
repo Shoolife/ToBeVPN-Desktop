@@ -31,6 +31,10 @@ stop() { /opt/tobevpn/tobevpn-router.sh stop >/dev/null 2>&1; }\n";
 const HEV_CONFIG: &str =
     "tunnel:\n  name: tobe0\n  mtu: 1500\n  multi-queue: false\n  ipv4: 198.18.0.1\n\
 socks5:\n  port: 10808\n  address: 127.0.0.1\n  udp: udp\nmisc:\n  log-level: warn\n";
+/// Re-applies per-device routes when a home device gets an address.
+const DHCP_HOOK: &str = "#!/bin/sh\n\
+# ToBeVPN: per-device routes follow a device's new address.\n\
+[ -f /tmp/tobevpn/watch.pid ] && /opt/tobevpn/tobevpn-router.sh apply >/dev/null 2>&1\n";
 /// Marks our key in the router's authorized_keys, so uninstall removes it.
 const KEY_COMMENT: &str = "tobevpn-desktop-router";
 const SSH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -84,10 +88,10 @@ pub struct RouterStatus {
     pub memory_available_kb: Option<u64>,
     pub tunnel_rx_bytes: u64,
     pub tunnel_tx_bytes: u64,
-    /// "all" or the addresses sent through the tunnel.
-    pub clients: Vec<String>,
-    /// Addresses kept outside the tunnel when `clients` is "all".
-    pub direct: Vec<String>,
+    /// "vpn" or "direct": the mode of devices without their own choice.
+    pub default_mode: String,
+    /// This computer's address in the home network, as the router sees it.
+    pub client_ip: Option<String>,
     pub subscription_used_bytes: Option<u64>,
     pub subscription_total_bytes: Option<u64>,
     /// The watchdog removed the routing after the core failed to restart.
@@ -499,8 +503,17 @@ pub async fn router_install(
     // is kept when reinstalling.
     session
         .run_ok(
-            "[ -s /opt/tobevpn/clients ] || echo all > /opt/tobevpn/clients; touch /opt/tobevpn/direct",
+            "[ -s /opt/tobevpn/default_mode ] || echo vpn > /opt/tobevpn/default_mode; \
+             touch /opt/tobevpn/devices; rm -f /opt/tobevpn/clients /opt/tobevpn/direct; \
+             mkdir -p /etc/hotplug.d/dhcp",
             None,
+        )
+        .await?;
+    session
+        .write_file(
+            "/etc/hotplug.d/dhcp/90-tobevpn",
+            DHCP_HOOK.as_bytes(),
+            "755",
         )
         .await?;
     session
@@ -576,6 +589,119 @@ pub async fn router_control(
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
         .await?;
     Ok(parse_status(&output))
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterDevice {
+    pub mac: String,
+    pub ip: Option<String>,
+    /// Name the device reported over DHCP.
+    pub hostname: Option<String>,
+    /// "vpn", "direct" or "default" (follows the router's default mode).
+    pub mode: String,
+    /// Name the user gave the device.
+    pub name: Option<String>,
+    pub online: bool,
+}
+
+/// Devices of the home network, with their VPN choice.
+#[tauri::command]
+pub async fn router_devices(
+    app: AppHandle,
+    host: String,
+    user: String,
+) -> Result<Vec<RouterDevice>, String> {
+    let session = open(&app, &host, &user).await?;
+    let output = session
+        .run_ok("/opt/tobevpn/tobevpn-router.sh devices", None)
+        .await?;
+    Ok(parse_devices(&output))
+}
+
+/// Sets one device to "vpn", "direct" or back to "default", with a name.
+#[tauri::command]
+pub async fn router_set_device(
+    app: AppHandle,
+    host: String,
+    user: String,
+    mac: String,
+    mode: String,
+    name: String,
+) -> Result<(), String> {
+    let mac = mac.trim().to_ascii_lowercase();
+    let valid_mac = mac.len() == 17
+        && mac.split(':').count() == 6
+        && mac
+            .split(':')
+            .all(|part| part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if !valid_mac || !matches!(mode.as_str(), "vpn" | "direct" | "default") {
+        return Err("invalid device".into());
+    }
+    let name: String = name
+        .chars()
+        .filter(|character| !character.is_control() && *character != '|')
+        .take(40)
+        .collect();
+    let session = open(&app, &host, &user).await?;
+    session
+        .run_ok(
+            &format!(
+                "/opt/tobevpn/tobevpn-router.sh set-device '{mac}' '{mode}' '{}'",
+                shell_quote_inner(name.trim())
+            ),
+            None,
+        )
+        .await
+        .map(|_| ())
+}
+
+/// Mode for devices without their own choice: "vpn" or "direct".
+#[tauri::command]
+pub async fn router_set_default_mode(
+    app: AppHandle,
+    host: String,
+    user: String,
+    mode: String,
+) -> Result<RouterStatus, String> {
+    if !matches!(mode.as_str(), "vpn" | "direct") {
+        return Err("invalid mode".into());
+    }
+    let session = open(&app, &host, &user).await?;
+    session
+        .run_ok(
+            &format!("/opt/tobevpn/tobevpn-router.sh set-default {mode}"),
+            None,
+        )
+        .await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh status", None)
+        .await?;
+    Ok(parse_status(&output))
+}
+
+fn parse_devices(text: &str) -> Vec<RouterDevice> {
+    let mut devices: Vec<RouterDevice> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("device="))
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('|').collect();
+            let [mac, ip, hostname, mode, name, online] = fields.as_slice() else {
+                return None;
+            };
+            let present = |value: &&str| (!value.is_empty()).then(|| value.to_string());
+            Some(RouterDevice {
+                mac: mac.to_string(),
+                ip: present(ip),
+                hostname: present(hostname),
+                mode: mode.to_string(),
+                name: present(name),
+                online: *online == "1",
+            })
+        })
+        .collect();
+    devices.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| a.ip.cmp(&b.ip)));
+    devices
 }
 
 /// Switches the router to another server and restarts the tunnel.
@@ -672,12 +798,6 @@ fn parse_status(text: &str) -> RouterStatus {
     let values = parse_key_values(text);
     let flag = |key: &str| values.get(key).map(String::as_str) == Some("1");
     let number = |key: &str| values.get(key).and_then(|value| value.parse::<u64>().ok());
-    let list = |key: &str| {
-        values
-            .get(key)
-            .map(|value| value.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default()
-    };
     let (used, total) = values
         .get("subscription_userinfo")
         .map(|info| {
@@ -697,8 +817,11 @@ fn parse_status(text: &str) -> RouterStatus {
         memory_available_kb: number("mem_available_kb"),
         tunnel_rx_bytes: number("tun_rx_bytes").unwrap_or(0),
         tunnel_tx_bytes: number("tun_tx_bytes").unwrap_or(0),
-        clients: list("clients"),
-        direct: list("direct"),
+        default_mode: values
+            .get("default_mode")
+            .cloned()
+            .unwrap_or_else(|| "vpn".into()),
+        client_ip: values.get("client_ip").filter(|ip| !ip.is_empty()).cloned(),
         subscription_used_bytes: used,
         subscription_total_bytes: total,
         failed: values.contains_key("failed"),
@@ -833,13 +956,13 @@ mod tests {
     fn parses_agent_status() {
         let status = parse_status(
             "installed=1\nrunning=1\nautostart=0\nxray_rss_kb=33600\nmem_available_kb=47116\n\
-             tun_rx_bytes=105470974\ntun_tx_bytes=420978\nclients=all \ndirect=192.168.1.183 \n\
+             tun_rx_bytes=105470974\ntun_tx_bytes=420978\ndefault_mode=vpn\nclient_ip=192.168.1.183\n\
              subscription_userinfo=upload=0; download=68544880231; total=268435456000; expire=1813168827\n",
         );
         assert!(status.installed && status.running && !status.autostart);
         assert_eq!(status.xray_memory_kb, Some(33600));
-        assert_eq!(status.clients, vec!["all"]);
-        assert_eq!(status.direct, vec!["192.168.1.183"]);
+        assert_eq!(status.default_mode, "vpn");
+        assert_eq!(status.client_ip.as_deref(), Some("192.168.1.183"));
         assert_eq!(status.subscription_used_bytes, Some(68544880231));
         assert_eq!(status.subscription_total_bytes, Some(268435456000));
     }
@@ -857,6 +980,20 @@ mod tests {
             server_list(&hosts),
             "149.33.40.130\ngermany2.tobevpn.help\n"
         );
+    }
+
+    #[test]
+    fn parses_device_lines() {
+        let devices = parse_devices(
+            "device=52:e1:c9:b5:1a:c8|192.168.1.107|Pixel-10-Pro|direct|Телефон|1\n\
+             device=aa:bb:cc:dd:ee:ff|||default||0\nbroken line\n",
+        );
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].name.as_deref(), Some("Телефон"));
+        assert_eq!(devices[0].mode, "direct");
+        assert!(devices[0].online);
+        assert_eq!(devices[1].ip, None);
+        assert!(!devices[1].online);
     }
 
     #[test]

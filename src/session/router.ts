@@ -79,15 +79,29 @@ export interface RouterStatus {
   memoryAvailableKb: number | null;
   tunnelRxBytes: number;
   tunnelTxBytes: number;
-  /** ["all"] or the addresses sent through the tunnel. */
-  clients: string[];
-  /** Addresses kept outside the tunnel when clients is ["all"]. */
-  direct: string[];
+  /** Mode of devices without their own choice. */
+  defaultMode: RouterDeviceMode;
+  /** This computer's address in the home network, as the router sees it. */
+  clientIp: string | null;
   subscriptionUsedBytes: number | null;
   subscriptionTotalBytes: number | null;
   /** The router's watchdog removed the VPN after the core failed. */
   failed: boolean;
   serverBypassRules: number;
+}
+
+export type RouterDeviceMode = "vpn" | "direct";
+
+export interface RouterDevice {
+  mac: string;
+  ip: string | null;
+  /** Name the device reported over DHCP. */
+  hostname: string | null;
+  /** Own choice, or "default" to follow the router's default mode. */
+  mode: RouterDeviceMode | "default";
+  /** Name the user gave the device. */
+  name: string | null;
+  online: boolean;
 }
 
 /** The router this app manages: address, SSH login and the chosen server. */
@@ -186,6 +200,29 @@ export async function setRouterServer(
   });
   saveRouterLink({ ...link, serverId: server.id, serverName: server.name });
   return status;
+}
+
+export async function routerDevices(link: RouterLink): Promise<RouterDevice[]> {
+  return invoke<RouterDevice[]>("router_devices", { host: link.host, user: link.user });
+}
+
+export async function setRouterDevice(
+  link: RouterLink,
+  device: { mac: string; mode: RouterDevice["mode"]; name: string },
+): Promise<void> {
+  await invoke("router_set_device", { host: link.host, user: link.user, ...device });
+}
+
+export async function setRouterDefaultMode(
+  link: RouterLink,
+  mode: RouterDeviceMode,
+): Promise<RouterStatus> {
+  return invoke<RouterStatus>("router_set_default_mode", { host: link.host, user: link.user, mode });
+}
+
+/** Name to show for a home device. */
+export function routerDeviceLabel(device: RouterDevice): string {
+  return device.name || device.hostname || device.mac.toUpperCase();
 }
 
 /**

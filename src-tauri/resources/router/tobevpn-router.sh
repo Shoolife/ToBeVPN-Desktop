@@ -9,16 +9,23 @@
 #
 #   tobevpn-router.sh start|stop|restart|status|uninstall
 #
-# Files: clients ("all" or one address per line), direct (addresses kept
-# outside the tunnel), servers (ToBeVPN server hosts, always reached
-# directly so a device running its own ToBeVPN is not tunnelled twice).
+# Files: default_mode ("vpn" or "direct" for devices without a choice),
+# devices (MAC<tab>vpn|direct<tab>name, one per line), servers (ToBeVPN
+# server hosts, always reached directly so a device running its own
+# ToBeVPN is not tunnelled twice).
+#
+#   tobevpn-router.sh devices | set-device MAC vpn|direct [NAME] |
+#                     set-default vpn|direct | apply
 
 DIR=/opt/tobevpn
 RUN=/tmp/tobevpn
 TUN=tobe0
 TABLE=100
 PRIO=101
+DIRECT_PRIO=100
 BYPASS_PRIO=99
+DNS_CHAIN=TOBEVPN_DNS
+TUNNEL_DNS=1.1.1.1
 LAN_DEV=br-lan
 TAG=tobevpn
 
@@ -72,28 +79,118 @@ apply_server_bypass() {
     done
 }
 
+default_mode() {
+    mode=$(cat "$DIR/default_mode" 2>/dev/null)
+    [ "$mode" = direct ] && echo direct || echo vpn
+}
+
+lan_address() {
+    ip -4 addr show "$LAN_DEV" 2>/dev/null | awk '/inet /{split($2, a, "/"); print a[1]; exit}'
+}
+
+# Current IPv4 address of a MAC: DHCP lease first, then the ARP table.
+mac_address_ip() {
+    awk -v mac="$1" 'tolower($2) == mac {print $3; exit}' /tmp/dhcp.leases 2>/dev/null |
+        grep . || awk -v mac="$1" -v dev="$LAN_DEV" \
+            'tolower($4) == mac && $6 == dev && $3 != "0x0" {print $1; exit}' /proc/net/arp
+}
+
+# Addresses of saved devices whose mode is $1.
+device_ips() {
+    awk -F '\t' -v mode="$1" '$2 == mode {print tolower($1)}' "$DIR/devices" 2>/dev/null |
+        while read -r mac; do mac_address_ip "$mac"; done
+}
+
+dns_rule() {
+    for proto in udp tcp; do
+        iptables -t nat -A "$DNS_CHAIN" -s "$1" -d "$2" -p "$proto" --dport 53 \
+            -j DNAT --to-destination "$TUNNEL_DNS:53"
+    done
+}
+
+remove_dns_redirect() {
+    while iptables -t nat -D PREROUTING -j "$DNS_CHAIN" -m comment --comment "$TAG" 2>/dev/null; do :; done
+    iptables -t nat -F "$DNS_CHAIN" 2>/dev/null
+    iptables -t nat -X "$DNS_CHAIN" 2>/dev/null
+}
+
 apply_routes() {
     subnet=$(lan_subnet)
+    router_ip=$(lan_address)
     ip route replace default dev "$TUN" table "$TABLE"
     [ -n "$subnet" ] && ip route replace "$subnet" dev "$LAN_DEV" table "$TABLE"
     while ip rule del lookup "$TABLE" prio "$PRIO" 2>/dev/null; do :; done
-    # clients: "all" (every home device) or one IPv4 address per line.
-    # direct: addresses that stay outside the tunnel when "all" is used.
-    if grep -qx all "$DIR/clients" 2>/dev/null; then
-        for ip in $(cat "$DIR/direct" 2>/dev/null); do
-            ip rule add from "$ip" lookup main prio "$PRIO"
+    while ip rule del lookup main prio "$DIRECT_PRIO" 2>/dev/null; do :; done
+    iptables -t nat -N "$DNS_CHAIN" 2>/dev/null || iptables -t nat -F "$DNS_CHAIN"
+    if [ "$(default_mode)" = vpn ]; then
+        # The whole home network, except devices set to "direct".
+        for ip in $(device_ips direct); do
+            ip rule add from "$ip" lookup main prio "$DIRECT_PRIO"
+            iptables -t nat -A "$DNS_CHAIN" -s "$ip" -j RETURN
         done
-        [ -n "$subnet" ] && ip rule add from "$subnet" lookup "$TABLE" prio "$PRIO"
+        if [ -n "$subnet" ]; then
+            ip rule add from "$subnet" lookup "$TABLE" prio "$PRIO"
+            [ -n "$router_ip" ] && dns_rule "$subnet" "$router_ip"
+        fi
     else
-        for ip in $(grep -E '^[0-9.]+$' "$DIR/clients" 2>/dev/null); do
+        for ip in $(device_ips vpn); do
             ip rule add from "$ip" lookup "$TABLE" prio "$PRIO"
+            [ -n "$router_ip" ] && dns_rule "$ip" "$router_ip"
         done
     fi
+    # DNS of devices that go through the VPN is resolved inside the tunnel.
+    iptables -t nat -C PREROUTING -j "$DNS_CHAIN" -m comment --comment "$TAG" 2>/dev/null ||
+        iptables -t nat -I PREROUTING 1 -j "$DNS_CHAIN" -m comment --comment "$TAG"
     apply_server_bypass
     firewall_rule filter FORWARD 1 -i "$LAN_DEV" -o "$TUN" -j ACCEPT
     firewall_rule filter FORWARD 1 -i "$TUN" -o "$LAN_DEV" -j ACCEPT
     firewall_rule mangle FORWARD 1 -o "$TUN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 }
+
+# One line per home device: device=MAC|IP|HOSTNAME|MODE|NAME|ONLINE.
+# MODE is the saved choice or "default".
+list_devices() {
+    {
+        awk '{print tolower($2) "\t" $3 "\t" $4}' /tmp/dhcp.leases 2>/dev/null
+        awk -v dev="$LAN_DEV" 'NR > 1 && $6 == dev && $3 != "0x0" {print tolower($4) "\t" $1 "\t*"}' /proc/net/arp
+        awk -F '\t' '{print tolower($1) "\t\t*"}' "$DIR/devices" 2>/dev/null
+    } | awk -F '\t' -v saved="$DIR/devices" -v arp=/proc/net/arp -v dev="$LAN_DEV" '
+        BEGIN {
+            while ((getline line < saved) > 0) {
+                split(line, f, "\t"); m = tolower(f[1]); mode[m] = f[2]; name[m] = f[3]
+            }
+            while ((getline line < arp) > 0) {
+                n = split(line, f, " "); if (f[6] == dev && f[3] == "0x2") online[tolower(f[4])] = 1
+            }
+        }
+        $1 ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/ {
+            if (!($1 in ip) || $2 != "") ip[$1] = $2
+            if (!($1 in host) || $3 != "*") host[$1] = $3
+        }
+        END {
+            for (m in ip) {
+                h = host[m]; if (h == "*") h = ""
+                print "device=" m "|" ip[m] "|" h "|" (m in mode ? mode[m] : "default") "|" name[m] "|" (m in online ? 1 : 0)
+            }
+        }'
+}
+
+set_device() {
+    mac=$(echo "$1" | tr 'A-F' 'a-f')
+    echo "$mac" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "error=bad mac"; return 2; }
+    case "$2" in vpn | direct | default) ;; *) echo "error=bad mode"; return 2 ;; esac
+    shift 2
+    name=$(echo "$*" | tr -d '\t\r\n|' | cut -c1-40)
+    touch "$DIR/devices"
+    grep -v -i "^$mac	" "$DIR/devices" >"$DIR/devices.tmp" 2>/dev/null
+    if [ "$mode_arg" != default ] || [ -n "$name" ]; then
+        printf '%s\t%s\t%s\n' "$mac" "$mode_arg" "$name" >>"$DIR/devices.tmp"
+    fi
+    mv "$DIR/devices.tmp" "$DIR/devices"
+    pidof xray >/dev/null && apply_routes
+    echo "saved=1"
+}
+
 
 start_core() {
     if ! pidof xray >/dev/null; then
@@ -127,6 +224,9 @@ watch() {
             fi
         fi
         [ $((ticks % 720)) -eq 0 ] && apply_server_bypass
+        # Devices that reconnected with another address; DHCP events also
+        # trigger this through /etc/hotplug.d/dhcp/90-tobevpn.
+        [ $((ticks % 10)) -eq 0 ] && apply_routes
     done
 }
 
@@ -155,7 +255,9 @@ stop_routing() {
     while ip rule del lookup "$TABLE" prio "$PRIO" 2>/dev/null; do :; done
     while ip rule del lookup main prio "$PRIO" 2>/dev/null; do :; done
     while ip rule del lookup main prio "$BYPASS_PRIO" 2>/dev/null; do :; done
+    while ip rule del lookup main prio "$DIRECT_PRIO" 2>/dev/null; do :; done
     ip route flush table "$TABLE" 2>/dev/null
+    remove_dns_redirect
     remove_firewall_rules
 }
 
@@ -173,8 +275,8 @@ stop() {
     done
     # Wait for both to exit, so an immediate start does not see them alive.
     i=0
-    while [ $i -lt 6 ] && pidof xray hev-socks5-tunnel >/dev/null; do
-        sleep 0.5
+    while [ $i -lt 3 ] && pidof xray hev-socks5-tunnel >/dev/null; do
+        sleep 1
         i=$((i + 1))
     done
     for name in hev-socks5-tunnel xray; do
@@ -197,8 +299,8 @@ status() {
     echo "mem_available_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo)"
     echo "tun_rx_bytes=$(cat "/sys/class/net/$TUN/statistics/rx_bytes" 2>/dev/null || echo 0)"
     echo "tun_tx_bytes=$(cat "/sys/class/net/$TUN/statistics/tx_bytes" 2>/dev/null || echo 0)"
-    echo "clients=$(tr '\n' ' ' <"$DIR/clients" 2>/dev/null)"
-    echo "direct=$(tr '\n' ' ' <"$DIR/direct" 2>/dev/null)"
+    echo "default_mode=$(default_mode)"
+    echo "client_ip=${SSH_CLIENT%% *}"
     grep -i '^subscription-userinfo:' "$RUN/subscription.headers" 2>/dev/null |
         sed 's/^[^:]*: */subscription_userinfo=/' | tr -d '\r'
 }
@@ -206,7 +308,7 @@ status() {
 uninstall() {
     stop >/dev/null
     [ -x /etc/init.d/tobevpn ] && /etc/init.d/tobevpn disable 2>/dev/null
-    rm -f /etc/init.d/tobevpn
+    rm -f /etc/init.d/tobevpn /etc/hotplug.d/dhcp/90-tobevpn
     rm -rf "$RUN"
     sed -i '/tobevpn-desktop-router/d' /etc/dropbear/authorized_keys 2>/dev/null
     rm -rf "$DIR"
@@ -219,6 +321,14 @@ stop) stop ;;
 restart) stop >/dev/null; start ;;
 status) status ;;
 watch) watch ;;
+devices) list_devices ;;
+set-device) mode_arg=$3; set_device "$2" "$3" "$(shift 3; echo "$*")" ;;
+set-default)
+    case "$2" in vpn | direct) echo "$2" >"$DIR/default_mode" ;; *) echo "error=bad mode"; exit 2 ;; esac
+    pidof xray >/dev/null && apply_routes
+    echo "saved=1"
+    ;;
+apply) pidof xray >/dev/null && apply_routes; echo "applied=1" ;;
 uninstall) uninstall ;;
 *) echo "usage: $0 start|stop|restart|status|uninstall" >&2; exit 2 ;;
 esac

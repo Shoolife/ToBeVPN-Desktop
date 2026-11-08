@@ -16,7 +16,13 @@ import {
   routerFirmwareLabel,
   routerStatus,
   setRouterServer,
+  routerDeviceLabel,
+  routerDevices,
+  setRouterDefaultMode,
+  setRouterDevice,
   type RouterAction,
+  type RouterDevice,
+  type RouterDeviceMode,
   type RouterInfo,
   type RouterLink,
   type RouterStatus,
@@ -211,13 +217,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       : info.firmware
         ? t("router_status_openwrt_unverified")
         : t("router_status_unknown");
-  const throughVpn = !status
-    ? ""
-    : status.clients.includes("all")
-      ? status.direct.length > 0
-        ? t("router_clients_all_but_this")
-        : t("router_clients_all")
-      : tf("router_clients_some", status.clients.length);
 
   return (
     <div className="devices-root">
@@ -281,10 +280,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   </select>
                 </label>
                 <div className="router-row">
-                  <span>{t("router_through_vpn")}</span>
-                  <span className="router-row__value">{throughVpn}</span>
-                </div>
-                <div className="router-row">
                   <span>{t("router_tunnel_traffic")}</span>
                   <span className="router-row__value">
                     {formatBytes(status.tunnelRxBytes + status.tunnelTxBytes)}
@@ -327,9 +322,15 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               </div>
 
               <div className="devices-section-title">{t("router_home_network_section")}</div>
-              <div className="router-panel">
-                <p className="router-panel__text">{t("router_home_network_description")}</p>
-              </div>
+              {link && (
+                <HomeNetwork
+                  link={link}
+                  status={status}
+                  disabled={busy}
+                  onStatus={setStatus}
+                  onError={setError}
+                />
+              )}
 
               <div className="router-uninstall">
                 {confirmUninstall ? (
@@ -408,6 +409,156 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               </div>
             </>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Devices of the home network, each through the router's VPN or direct.
+ * Devices keep their choice by MAC, so a new address after reconnecting
+ * does not change it.
+ */
+function HomeNetwork({
+  link,
+  status,
+  disabled,
+  onStatus,
+  onError,
+}: {
+  link: RouterLink;
+  status: RouterStatus;
+  disabled: boolean;
+  onStatus: (status: RouterStatus) => void;
+  onError: (message: string | null) => void;
+}) {
+  const [devices, setDevices] = useState<RouterDevice[] | null>(null);
+  const [savingMac, setSavingMac] = useState<string | null>(null);
+  const [editingMac, setEditingMac] = useState<string | null>(null);
+  const [nameDraft, setNameDraft] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    routerDevices(link)
+      .then((list) => {
+        if (alive) setDevices(list);
+      })
+      .catch((error) => {
+        if (!alive) return;
+        onError(routerErrorText(error));
+        setDevices([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [link.host]);
+
+  const save = async (device: RouterDevice, mode: RouterDevice["mode"], name: string | null) => {
+    setSavingMac(device.mac);
+    onError(null);
+    try {
+      await setRouterDevice(link, { mac: device.mac, mode, name: name ?? "" });
+      setDevices((list) =>
+        (list ?? []).map((item) => (item.mac === device.mac ? { ...item, mode, name } : item)),
+      );
+    } catch (error) {
+      onError(routerErrorText(error));
+    } finally {
+      setSavingMac(null);
+      setEditingMac(null);
+    }
+  };
+
+  const changeDefault = async (mode: RouterDeviceMode) => {
+    onError(null);
+    try {
+      onStatus(await setRouterDefaultMode(link, mode));
+    } catch (error) {
+      onError(routerErrorText(error));
+    }
+  };
+
+  const modeLabel = (mode: RouterDeviceMode) =>
+    mode === "vpn" ? t("router_mode_vpn") : t("router_mode_direct");
+
+  return (
+    <div className="router-panel">
+      <label className="router-row">
+        <span>{t("router_default_mode")}</span>
+        <select
+          className="router-select"
+          value={status.defaultMode}
+          disabled={disabled}
+          onChange={(event) => void changeDefault(event.target.value as RouterDeviceMode)}
+        >
+          <option value="vpn">{t("router_mode_vpn")}</option>
+          <option value="direct">{t("router_mode_direct")}</option>
+        </select>
+      </label>
+      <p className="router-panel__hint">{t("router_home_network_description")}</p>
+      {devices === null ? (
+        <Spinner size={20} />
+      ) : devices.length === 0 ? (
+        <p className="router-panel__hint">{t("router_no_devices")}</p>
+      ) : (
+        <div className="router-devices">
+          {devices.map((device) => {
+            const isThis = !!device.ip && device.ip === status.clientIp;
+            const busy = disabled || savingMac === device.mac;
+            return (
+              <div key={device.mac} className={`router-device ${device.online ? "" : "router-device--offline"}`}>
+                <div className="router-device__info">
+                  {editingMac === device.mac ? (
+                    <form
+                      className="router-device__rename"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void save(device, device.mode, nameDraft.trim() || null);
+                      }}
+                    >
+                      <input
+                        value={nameDraft}
+                        maxLength={40}
+                        autoFocus
+                        disabled={busy}
+                        onChange={(event) => setNameDraft(event.target.value)}
+                        placeholder={device.hostname ?? ""}
+                      />
+                      <button type="submit" className="router-link" disabled={busy}>{t("router_rename_save")}</button>
+                    </form>
+                  ) : (
+                    <button
+                      type="button"
+                      className="router-device__name"
+                      disabled={busy}
+                      title={t("router_rename")}
+                      onClick={() => {
+                        setEditingMac(device.mac);
+                        setNameDraft(device.name ?? "");
+                      }}
+                    >
+                      {routerDeviceLabel(device)}
+                      {isThis && <span className="router-device__tag">{t("router_this_computer")}</span>}
+                    </button>
+                  )}
+                  <span className="router-device__meta">
+                    {[device.ip, device.online ? null : t("router_device_offline")].filter(Boolean).join(" · ")}
+                  </span>
+                </div>
+                <select
+                  className="router-select router-select--compact"
+                  value={device.mode}
+                  disabled={busy}
+                  onChange={(event) => void save(device, event.target.value as RouterDevice["mode"], device.name)}
+                >
+                  <option value="default">{tf("router_mode_default", modeLabel(status.defaultMode))}</option>
+                  <option value="vpn">{t("router_mode_vpn")}</option>
+                  <option value="direct">{t("router_mode_direct")}</option>
+                </select>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
