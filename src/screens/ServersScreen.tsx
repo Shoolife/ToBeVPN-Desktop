@@ -668,6 +668,7 @@ export default function ServersScreen({
         <span className="servers-topbar__title">{t("server_select")}</span>
         <TopbarRefreshButton
           label={t("refresh")}
+          hint={{ id: "servers", text: "refresh_hint_servers" }}
           loading={loading}
           onClick={() => load({ force: true })}
           disabled={loading}
