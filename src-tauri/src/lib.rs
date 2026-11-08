@@ -4,6 +4,7 @@ mod diagnostics;
 pub mod linux_update;
 mod notifications;
 mod router;
+mod router_agent;
 mod server_probe;
 mod settings_transfer;
 mod speed_test;
@@ -1171,6 +1172,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             notifications::show_system_notification,
             router::detect_router,
+            router_agent::router_pair,
+            router_agent::router_install,
+            router_agent::router_status,
+            router_agent::router_control,
+            router_agent::router_set_server,
             server_probe::probe_server_profiles,
             server_probe::cancel_server_probe,
             server_probe::probe_core_delay,

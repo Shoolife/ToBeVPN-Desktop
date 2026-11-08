@@ -5,7 +5,10 @@
 // cannot run SSH or install software on another device.
 import { invoke } from "@tauri-apps/api/core";
 import type { LinkedDeviceDto } from "../api/types";
+import { SUBSCRIPTION_BASE_URL } from "../api/config";
 import { isBrowserPreviewRuntime } from "./browserPreview";
+import { getSession } from "./store";
+import type { ServerVpnConfig } from "./vpn";
 
 export interface RouterInfo {
   /** Default gateway, e.g. "192.168.1.1"; null without a network. */
@@ -63,4 +66,128 @@ export function isRouterDevice(device: LinkedDeviceDto): boolean {
   const platform = (device.platform ?? "").toLowerCase();
   const type = (device.device_type ?? "").toLowerCase();
   return type === "router" || userAgent.includes("/router/") || platform === "openwrt";
+}
+
+// ---------------------------------------------------------------- agent ---
+
+export interface RouterStatus {
+  installed: boolean;
+  running: boolean;
+  autostart: boolean;
+  xrayMemoryKb: number | null;
+  memoryAvailableKb: number | null;
+  tunnelRxBytes: number;
+  tunnelTxBytes: number;
+  /** ["all"] or the addresses sent through the tunnel. */
+  clients: string[];
+  /** Addresses kept outside the tunnel when clients is ["all"]. */
+  direct: string[];
+  subscriptionUsedBytes: number | null;
+  subscriptionTotalBytes: number | null;
+}
+
+/** The router this app manages: address, SSH login and the chosen server. */
+export interface RouterLink {
+  host: string;
+  user: string;
+  serverId: string | null;
+  serverName: string | null;
+}
+
+const LINK_KEY = "tobevpn_router_v1";
+
+export function getRouterLink(): RouterLink | null {
+  try {
+    const raw = localStorage.getItem(LINK_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<RouterLink>;
+    if (typeof parsed.host !== "string" || typeof parsed.user !== "string") return null;
+    return {
+      host: parsed.host,
+      user: parsed.user,
+      serverId: typeof parsed.serverId === "string" ? parsed.serverId : null,
+      serverName: typeof parsed.serverName === "string" ? parsed.serverName : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveRouterLink(link: RouterLink | null): void {
+  try {
+    if (link) localStorage.setItem(LINK_KEY, JSON.stringify(link));
+    else localStorage.removeItem(LINK_KEY);
+  } catch {
+    // Without storage the router is paired again next time.
+  }
+}
+
+/** SSH login of the router's administrator by firmware family. */
+export function defaultRouterUser(info: RouterInfo | null): string {
+  return info?.firmware === "easywrt" ? "Admin" : "root";
+}
+
+/**
+ * Pairs with the router (the password is used once and not stored) and
+ * installs or updates ToBeVPN on it with the given server.
+ */
+export async function installRouter(options: {
+  host: string;
+  user: string;
+  password: string;
+  server: ServerVpnConfig & { id: string; name: string };
+  subscriptionUrl: string;
+  autostart: boolean;
+}): Promise<RouterStatus> {
+  const { host, user, password, server, subscriptionUrl, autostart } = options;
+  await invoke("router_pair", { host, user, password });
+  const status = await invoke<RouterStatus>("router_install", {
+    host,
+    user,
+    server,
+    subscriptionUrl,
+    autostart,
+  });
+  saveRouterLink({ host, user, serverId: server.id, serverName: server.name });
+  return status;
+}
+
+export async function routerStatus(link: RouterLink): Promise<RouterStatus> {
+  return invoke<RouterStatus>("router_status", { host: link.host, user: link.user });
+}
+
+export type RouterAction = "start" | "stop" | "restart" | "autostart-on" | "autostart-off" | "uninstall";
+
+export async function routerControl(link: RouterLink, action: RouterAction): Promise<RouterStatus> {
+  const status = await invoke<RouterStatus>("router_control", {
+    host: link.host,
+    user: link.user,
+    action,
+  });
+  if (action === "uninstall") saveRouterLink(null);
+  return status;
+}
+
+export async function setRouterServer(
+  link: RouterLink,
+  server: ServerVpnConfig & { id: string; name: string },
+): Promise<RouterStatus> {
+  const status = await invoke<RouterStatus>("router_set_server", {
+    host: link.host,
+    user: link.user,
+    server,
+  });
+  saveRouterLink({ ...link, serverId: server.id, serverName: server.name });
+  return status;
+}
+
+/** Subscription address of the account, which the router fetches itself. */
+export function accountSubscriptionUrl(): string | null {
+  const key = getSession().shortUuid;
+  if (!SUBSCRIPTION_BASE_URL || !key) return null;
+  try {
+    return new URL(encodeURIComponent(key), SUBSCRIPTION_BASE_URL).toString();
+  } catch {
+    return null;
+  }
 }

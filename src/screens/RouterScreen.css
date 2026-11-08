@@ -68,3 +68,128 @@
   flex-shrink: 0;
   color: var(--text-muted);
 }
+
+.router-error {
+  margin: 8px 4px 0;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.router-state {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-2, var(--input-bg));
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.router-state--on {
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.router-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.router-row__value {
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.router-row--toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.router-row--toggle .settings-switch {
+  pointer-events: none;
+}
+
+.router-select,
+.router-field input {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--input-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.router-select {
+  max-width: 60%;
+}
+
+.router-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.router-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.router-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.router-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.router-uninstall {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 4px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.router-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.router-link--danger {
+  color: var(--danger);
+}
+
+.router-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
