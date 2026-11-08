@@ -99,8 +99,12 @@ pub struct RouterStatus {
     pub client_ip: Option<String>,
     pub subscription_used_bytes: Option<u64>,
     pub subscription_total_bytes: Option<u64>,
-    /// The watchdog removed the routing after the core failed to restart.
+    /// The core does not start: the home is direct, the router retries
+    /// every minute.
     pub failed: bool,
+    /// Slots whose server does not answer: their devices go direct (slot
+    /// 0) or through the router's server (slots 1-3) until it answers.
+    pub down_slots: Vec<u8>,
     /// Routes that keep ToBeVPN servers outside the tunnel.
     pub server_bypass_rules: u64,
 }
@@ -1072,6 +1076,16 @@ fn parse_status(text: &str) -> RouterStatus {
         subscription_used_bytes: used,
         subscription_total_bytes: total,
         failed: values.contains_key("failed"),
+        down_slots: values
+            .get("down_slots")
+            .map(|slots| {
+                slots
+                    .split_whitespace()
+                    .filter_map(|slot| slot.parse().ok())
+                    .filter(|slot| *slot <= MAX_SLOT)
+                    .collect()
+            })
+            .unwrap_or_default(),
         server_bypass_rules: number("bypass_rules").unwrap_or(0),
     }
 }
@@ -1265,6 +1279,7 @@ mod tests {
         let status = parse_status(
             "installed=1\nrunning=1\nautostart=0\nxray_rss_kb=33600\nmem_available_kb=47116\n\
              tun_rx_bytes=105470974\ntun_tx_bytes=420978\ndefault_mode=vpn\nclient_ip=192.168.1.183\n\
+             down_slots=0 2\n\
              subscription_userinfo=upload=0; download=68544880231; total=268435456000; expire=1813168827\n",
         );
         assert!(status.installed && status.running && !status.autostart);
@@ -1273,6 +1288,8 @@ mod tests {
         assert_eq!(status.client_ip.as_deref(), Some("192.168.1.183"));
         assert_eq!(status.subscription_used_bytes, Some(68544880231));
         assert_eq!(status.subscription_total_bytes, Some(268435456000));
+        assert_eq!(status.down_slots, vec![0, 2]);
+        assert!(parse_status("down_slots=\n").down_slots.is_empty());
     }
 
     #[test]

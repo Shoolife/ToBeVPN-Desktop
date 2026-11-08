@@ -4,6 +4,7 @@ import { t, tf, type StringKey } from "../i18n";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
 import { getCachedVpnServers, isAvailableVpnServer, type VpnServer } from "../session/auth";
+import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
 import {
   accountSubscriptionUrl,
@@ -87,6 +88,12 @@ interface InstallLogLine {
 /** Full install log: every step, check, download attempt and error. */
 function InstallLog({ lines, open, onToggle }: { lines: InstallLogLine[]; open: boolean; onToggle: () => void }) {
   const [copied, setCopied] = useState(false);
+  const linesRef = useRef<HTMLDivElement>(null);
+  // Follow new lines, so the latest step or error is in view.
+  useEffect(() => {
+    const element = linesRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [lines.length, open]);
   const errors = lines.filter((line) => line.level === "error").length;
   const lineText = (line: InstallLogLine) =>
     line.level === "step" && INSTALL_STEPS[line.text] ? `— ${t(INSTALL_STEPS[line.text])}` : line.text;
@@ -111,7 +118,7 @@ function InstallLog({ lines, open, onToggle }: { lines: InstallLogLine[]; open: 
         )}
       </div>
       {open && (
-        <div className="router-log__lines" role="log">
+        <div ref={linesRef} className="router-log__lines" role="log">
           {lines.map((line, index) => (
             <div key={index} className={`router-log__line router-log__line--${line.level}`}>
               <span className="router-log__time">{line.time}</span> {lineText(line)}
@@ -126,6 +133,13 @@ function InstallLog({ lines, open, onToggle }: { lines: InstallLogLine[]; open: 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} ${t("unit_gb")}`;
   return `${Math.round(bytes / 1024 ** 2)} ${t("unit_mb")}`;
+}
+
+/** Server name with its ping; the router reaches servers the way this computer does. */
+function serverLabel(server: VpnServer, pings: Map<string, number>): string {
+  const ping = pings.get(server.id);
+  if (ping === undefined) return server.name;
+  return ping >= 0 ? `${server.name} · ${tf("router_ping_ms", ping)}` : `${server.name} · ${t("router_ping_none")}`;
 }
 
 function routableServers(): VpnServer[] {
@@ -188,6 +202,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [network, setNetwork] = useState<RouterNetwork | null>(null);
   const [logLines, setLogLines] = useState<InstallLogLine[]>([]);
   const [logOpen, setLogOpen] = useState(false);
+  const [pings, setPings] = useState<Map<string, number>>(new Map());
   const generationRef = useRef(0);
 
   const load = async (refresh: boolean) => {
@@ -212,6 +227,11 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     if (generation !== generationRef.current) return;
     const nextServers = routableServers();
     setServers(nextServers);
+    void measureVpnServerPings(nextServers, { force: refresh })
+      .then((measured) => {
+        if (generation === generationRef.current) setPings(measured);
+      })
+      .catch(() => undefined);
     setServerId((id) => id || currentLink?.serverId || nextServers[0]?.id || "");
     setInfo(nextInfo);
     setLink(currentLink);
@@ -352,6 +372,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
           </div>
           {!installed && <p className="router-status">{statusText}</p>}
           {installed && status?.failed && !status.running && <p className="router-error">{t("router_failed")}</p>}
+          {installed && status?.running && status.downSlots.includes(0) && (
+            <p className="router-error">{t("router_server_down")}</p>
+          )}
           {error && <p className="router-error">{error}</p>}
 
           {installed && status ? (
@@ -370,7 +393,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       <option value={link.serverId ?? ""}>{link.serverName}</option>
                     )}
                     {servers.map((server) => (
-                      <option key={server.id} value={server.id}>{server.name}</option>
+                      <option key={server.id} value={server.id}>{serverLabel(server, pings)}</option>
                     ))}
                   </select>
                 </label>
@@ -422,6 +445,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   link={link}
                   status={status}
                   servers={servers}
+                  pings={pings}
                   network={network}
                   disabled={busy}
                   onBusy={setBusy}
@@ -475,7 +499,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       <span>{t("router_server")}</span>
                       <select className="router-select" value={serverId} disabled={busy} onChange={(event) => setServerId(event.target.value)}>
                         {servers.map((server) => (
-                          <option key={server.id} value={server.id}>{server.name}</option>
+                          <option key={server.id} value={server.id}>{serverLabel(server, pings)}</option>
                         ))}
                       </select>
                     </label>
@@ -537,6 +561,7 @@ function HomeNetwork({
   link,
   status,
   servers,
+  pings,
   network,
   disabled,
   onBusy,
@@ -547,6 +572,7 @@ function HomeNetwork({
   link: RouterLink;
   status: RouterStatus;
   servers: VpnServer[];
+  pings: Map<string, number>;
   network: RouterNetwork | null;
   disabled: boolean;
   onBusy: (busy: boolean) => void;
@@ -576,7 +602,6 @@ function HomeNetwork({
 
   const mainSlot = network?.slots.find((slot) => slot.slot === 0);
   const mainId = mainSlot?.serverId ?? link.serverId ?? "";
-  const mainName = mainSlot?.serverName ?? link.serverName ?? "";
 
   const updateDevice = (current: RouterNetwork, device: RouterDevice, patch: Partial<RouterDevice>) => ({
     ...current,
@@ -640,7 +665,7 @@ function HomeNetwork({
   };
 
   const modeLabel = (mode: RouterDeviceMode) =>
-    mode === "vpn" ? t("router_mode_vpn") : t("router_mode_direct");
+    mode === "vpn" ? t("router_mode_short_vpn") : t("router_mode_short_direct");
   const devices = network?.devices ?? null;
 
   return (
@@ -703,12 +728,20 @@ function HomeNetwork({
                         setNameDraft(device.name ?? "");
                       }}
                     >
-                      {routerDeviceLabel(device)}
+                      <span className="router-device__label">{routerDeviceLabel(device)}</span>
                       {isThis && <span className="router-device__tag">{t("router_this_computer")}</span>}
                     </button>
                   )}
                   <span className="router-device__meta">
-                    {[device.ip, device.online ? null : t("router_device_offline")].filter(Boolean).join(" · ")}
+                    {[
+                      device.ip,
+                      device.online ? null : t("router_device_offline"),
+                      device.mode === "vpn" && device.slot > 0 && status.downSlots.includes(device.slot)
+                        ? t("router_device_server_down")
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                   </span>
                 </div>
                 <select
@@ -718,7 +751,7 @@ function HomeNetwork({
                   onChange={(event) => void save(device, event.target.value, device.name)}
                 >
                   <option value="default">{tf("router_mode_default", modeLabel(status.defaultMode))}</option>
-                  <option value="vpn">{mainName ? tf("router_mode_vpn_server", mainName) : t("router_mode_vpn")}</option>
+                  <option value="vpn">{t("router_mode_router_vpn")}</option>
                   <option value="direct">{t("router_mode_direct")}</option>
                   <optgroup label={t("router_own_server")}>
                     {ownServer && !servers.some((server) => server.id === ownServer.serverId) && (
@@ -727,7 +760,7 @@ function HomeNetwork({
                     {servers
                       .filter((server) => server.id !== mainId)
                       .map((server) => (
-                        <option key={server.id} value={`server:${server.id}`}>{server.name}</option>
+                        <option key={server.id} value={`server:${server.id}`}>{serverLabel(server, pings)}</option>
                       ))}
                   </optgroup>
                 </select>

@@ -37,6 +37,11 @@ DNS_PRIO=98
 DNSMASQ_CONF=/tmp/dnsmasq.d/tobevpn.conf
 LAN_DEV=br-lan
 TAG=tobevpn
+SOCKS_PORT=10808
+# Checked through each server every 30 s; after FAIL_LIMIT failures in a row
+# its devices go direct (slot 0: the whole home) until a check passes again.
+HEALTH_URL=http://www.gstatic.com/generate_204
+FAIL_LIMIT=2
 
 lan_subnet() {
     ip -4 route show dev "$LAN_DEV" scope link 2>/dev/null | awk '{print $1; exit}'
@@ -119,7 +124,7 @@ mac_address_ip() {
 # when its tunnel no longer exists.
 device_choices() {
     default=$(default_mode)
-    slots=" 0 $(extra_slots | tr '\n' ' ')"
+    slots=" 0 $(for slot in $(extra_slots); do slot_down "$slot" || echo "$slot"; done | tr '\n' ' ')"
     awk -F '\t' -v default="$default" -v slots="$slots" '
         $1 != "" {
             mode = ($2 == "vpn" || $2 == "direct") ? $2 : default
@@ -141,16 +146,42 @@ remove_dns_redirect() {
     iptables -t nat -X "$DNS_CHAIN" 2>/dev/null
 }
 
+# Resolvers of the internet provider, used for the names of the servers.
+isp_dns() {
+    awk '/^nameserver/ {print $2}' /tmp/resolv.conf.auto 2>/dev/null | grep -E '^[0-9.]+$'
+}
+
+# Names that must never be resolved through the tunnel: Xray needs them to
+# build the tunnel, the subscription is fetched outside it.
+direct_domains() {
+    {
+        cat "$DIR/servers" 2>/dev/null
+        sed -n "s|^SUB_URL='https\{0,1\}://\([^/:']*\).*|\1|p" "$DIR/subscription.conf" 2>/dev/null
+        grep -o '"address": *"[^"]*"' "$DIR/xray.json" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/'
+    } | grep -E '^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' | sort -u
+}
+
 # With the whole home on the VPN, the router's own DNS (dnsmasq, with its
 # cache) asks 1.1.1.1 through the tunnel; a query then costs a tunnel round
 # trip only once. The file is in /tmp: a reboot drops it with the routing.
 dns_upstream() {
     while ip rule del prio "$DNS_PRIO" 2>/dev/null; do :; done
+    isp=$(isp_dns)
+    # Without the provider's resolvers the server names could only be
+    # resolved through the tunnel they build: keep the provider's DNS.
+    [ -n "$isp" ] || set -- isp
     if [ "$1" = tunnel ]; then
         for server in "$TUNNEL_DNS" "$TUNNEL_DNS2"; do
             ip rule add to "$server" iif lo lookup "$TABLE" prio "$DNS_PRIO"
         done
-        want=$(printf 'no-resolv\nserver=%s\nserver=%s' "$TUNNEL_DNS" "$TUNNEL_DNS2")
+        want=$(
+            printf 'no-resolv\nserver=%s\nserver=%s' "$TUNNEL_DNS" "$TUNNEL_DNS2"
+            for domain in $(direct_domains); do
+                for resolver in $isp; do
+                    printf '\nserver=/%s/%s' "$domain" "$resolver"
+                done
+            done
+        )
         if [ "$(cat "$DNSMASQ_CONF" 2>/dev/null)" != "$want" ]; then
             mkdir -p "${DNSMASQ_CONF%/*}"
             printf '%s\n' "$want" >"$DNSMASQ_CONF"
@@ -160,6 +191,47 @@ dns_upstream() {
         rm -f "$DNSMASQ_CONF"
         /etc/init.d/dnsmasq restart >/dev/null 2>&1
     fi
+}
+
+slot_down() {
+    grep -qx "$1" "$RUN/down" 2>/dev/null
+}
+
+# One request through the slot's server, bypassing the routing and the DNS.
+probe_slot() {
+    code=$(curl -s -m "${2:-10}" -o /dev/null -w '%{http_code}' \
+        --socks5-hostname "127.0.0.1:$((SOCKS_PORT + $1))" "$HEALTH_URL" 2>/dev/null)
+    [ "$code" = 204 ]
+}
+
+event() {
+    echo "$(date +%s) $*" >>"$RUN/events"
+    tail -n 30 "$RUN/events" >"$RUN/events.tmp" && mv "$RUN/events.tmp" "$RUN/events"
+}
+
+# Checks every slot; returns 0 when a slot went down or came back.
+check_health() {
+    changed=1
+    for slot in 0 $(extra_slots); do
+        fails=$(cat "$RUN/fails_$slot" 2>/dev/null || echo 0)
+        if probe_slot "$slot"; then
+            echo 0 >"$RUN/fails_$slot"
+            if slot_down "$slot"; then
+                sed -i "/^$slot\$/d" "$RUN/down"
+                event "slot $slot back"
+                changed=0
+            fi
+        else
+            fails=$((fails + 1))
+            echo "$fails" >"$RUN/fails_$slot"
+            if [ "$fails" -ge "$FAIL_LIMIT" ] && ! slot_down "$slot"; then
+                echo "$slot" >>"$RUN/down"
+                event "slot $slot down"
+                changed=0
+            fi
+        fi
+    done
+    return $changed
 }
 
 clear_device_rules() {
@@ -181,7 +253,9 @@ apply_routes() {
     iptables -t nat -N "$DNS_CHAIN" 2>/dev/null || iptables -t nat -F "$DNS_CHAIN"
     # The router's DNS goes through the tunnel when the home does; otherwise
     # only queries of VPN devices are sent through their tunnel.
-    if [ "$(default_mode)" = vpn ]; then
+    main_down=0
+    slot_down 0 && main_down=1
+    if [ "$(default_mode)" = vpn ] && [ $main_down = 0 ]; then
         dns_upstream tunnel
         dns_router_ip=
     else
@@ -198,12 +272,15 @@ apply_routes() {
         elif [ "$slot" != 0 ]; then
             ip rule add from "$ip" lookup "$((SLOT_TABLE_BASE + slot))" prio "$DEVICE_PRIO"
             [ -n "$dns_router_ip" ] && dns_rule "$ip" "$dns_router_ip"
+        elif [ $main_down = 1 ]; then
+            # The router's server does not answer: direct until it does.
+            ip rule add from "$ip" lookup main prio "$DEVICE_PRIO"
         elif [ "$(default_mode)" = direct ]; then
             ip rule add from "$ip" lookup "$TABLE" prio "$PRIO"
             [ -n "$dns_router_ip" ] && dns_rule "$ip" "$dns_router_ip"
         fi
     done
-    if [ "$(default_mode)" = vpn ] && [ -n "$subnet" ]; then
+    if [ "$(default_mode)" = vpn ] && [ $main_down = 0 ] && [ -n "$subnet" ]; then
         # The whole home network, except the devices handled above.
         ip rule add from "$subnet" lookup "$TABLE" prio "$PRIO"
     fi
@@ -288,29 +365,41 @@ core_alive() {
     pidof xray >/dev/null && [ "$(pidof hev-socks5-tunnel | wc -w)" -ge "$(hev_count)" ]
 }
 
-# Background watchdog: restarts a crashed core once; if that fails, removes
-# the routing so the home stays online without the VPN instead of offline.
-# Also refreshes the server addresses every 6 hours.
+# Background watchdog. A crashed core is restarted; while it cannot start,
+# the routing is removed so the home stays online without the VPN, and a
+# new start is tried every minute. A server that stops answering sends its
+# devices direct until it answers again (check_health).
 watch() {
     echo $$ >"$RUN/watch.pid"
     ticks=0
-    while sleep 30; do
+    # Processes every 10 s; servers every 30 s; addresses of devices every
+    # 5 minutes; server addresses every 6 hours.
+    while sleep 10; do
         ticks=$((ticks + 1))
         if ! core_alive; then
+            # In the failed state only once a minute.
+            [ -f "$RUN/state" ] && [ $((ticks % 6)) -ne 0 ] && continue
             start_core
             sleep 5
             if ! core_alive; then
-                echo "failed=$(date +%s)" >"$RUN/state"
-                stop_routing
-                rm -f "$RUN/watch.pid"
-                exit 1
+                if [ ! -f "$RUN/state" ]; then
+                    echo "failed=$(date +%s)" >"$RUN/state"
+                    stop_routing
+                    event "core failed, home direct"
+                fi
+                continue
             fi
-            bring_up_tunnels
+            if [ -f "$RUN/state" ]; then
+                rm -f "$RUN/state"
+                event "core back"
+            fi
+            bring_up_tunnels && apply_routes
         fi
-        [ $((ticks % 720)) -eq 0 ] && apply_server_bypass
+        [ $((ticks % 3)) -eq 0 ] && check_health && apply_routes
+        [ $((ticks % 2160)) -eq 0 ] && apply_server_bypass
         # Devices that reconnected with another address; DHCP events also
         # trigger this through /etc/hotplug.d/dhcp/90-tobevpn.
-        [ $((ticks % 10)) -eq 0 ] && apply_routes
+        [ $((ticks % 30)) -eq 0 ] && apply_routes
     done
 }
 
@@ -335,6 +424,14 @@ start() {
     refresh_subscription
     start_core
     bring_up_tunnels || return 1
+    # A server that does not answer must not take the home offline.
+    rm -f "$RUN/down" "$RUN"/fails_*
+    for slot in 0 $(extra_slots); do
+        probe_slot "$slot" 8 || { sleep 2; probe_slot "$slot" 8; } || {
+            echo "$slot" >>"$RUN/down"
+            event "slot $slot down at start"
+        }
+    done
     apply_routes
     if ! { [ -f "$RUN/watch.pid" ] && kill -0 "$(cat "$RUN/watch.pid")" 2>/dev/null; }; then
         "$0" watch >/dev/null 2>&1 &
@@ -361,6 +458,7 @@ stop() {
         rm -f "$RUN/watch.pid"
     fi
     stop_routing
+    rm -f "$RUN/down" "$RUN"/fails_*
     # busybox killall matches the 15-character kernel name; pidof does not.
     for name in hev-socks5-tunnel xray; do
         pids=$(pidof "$name")
@@ -386,6 +484,7 @@ status() {
     echo "installed=$([ -x "$DIR/xray" ] && echo 1 || echo 0)"
     echo "running=$(core_alive && echo 1 || echo 0)"
     [ -f "$RUN/state" ] && cat "$RUN/state"
+    echo "down_slots=$(cat "$RUN/down" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
     echo "bypass_rules=$(ip rule | grep -c "^$BYPASS_PRIO:")"
     echo "autostart=$([ -x /etc/rc.d/S99tobevpn ] && echo 1 || echo 0)"
     [ -n "$xray_pid" ] && echo "xray_rss_kb=$(awk '/VmRSS/{print $2}' "/proc/$xray_pid/status")"

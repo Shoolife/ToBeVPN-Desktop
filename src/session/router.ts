@@ -85,8 +85,10 @@ export interface RouterStatus {
   clientIp: string | null;
   subscriptionUsedBytes: number | null;
   subscriptionTotalBytes: number | null;
-  /** The router's watchdog removed the VPN after the core failed. */
+  /** The core does not start: the home is direct, the router retries every minute. */
   failed: boolean;
+  /** Slots whose server does not answer; 0 means the whole home is direct for now. */
+  downSlots: number[];
   serverBypassRules: number;
 }
 

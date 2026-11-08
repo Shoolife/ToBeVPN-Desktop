@@ -133,7 +133,9 @@
 }
 
 .router-select {
-  max-width: 60%;
+  min-width: 0;
+  max-width: 62%;
+  text-overflow: ellipsis;
 }
 
 .router-form {
@@ -202,9 +204,10 @@
 
 .router-device {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px 10px;
   padding: 8px 0;
   border-top: 1px solid var(--border);
 }
@@ -215,6 +218,7 @@
 
 .router-device__info {
   display: flex;
+  flex: 1 1 180px;
   min-width: 0;
   flex-direction: column;
   gap: 2px;
@@ -232,8 +236,13 @@
   font: inherit;
   font-size: 14px;
   font-weight: 600;
+  max-width: 100%;
   text-align: left;
   cursor: pointer;
+}
+
+.router-device__label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -272,8 +281,9 @@
 }
 
 .router-select--compact {
-  flex-shrink: 0;
-  max-width: 45%;
+  flex: 1 0 210px;
+  width: auto;
+  max-width: 300px;
   padding: 6px 8px;
   font-size: 13px;
 }
