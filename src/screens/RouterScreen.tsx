@@ -27,7 +27,8 @@ import {
   refreshRouterTraffic,
   routerTrafficBetween,
   routerDeviceLabel,
-  ROUTER_EXTRA_SLOTS,
+  ROUTER_MAX_SERVERS,
+  routerServerLimit,
   routerDevices,
   setRouterDefaultMode,
   setRouterDevice,
@@ -149,8 +150,6 @@ function slotServer(slot: number, server: VpnServer): SlotServer {
   return { slot, id: server.id, name: server.name, server: serverProfileConfig(server) };
 }
 
-/** Servers the router can hold at once: one per tunnel. */
-const MAX_SLOTS = ROUTER_EXTRA_SLOTS + 1;
 
 /** Slots that devices other than `exceptMac` go through. */
 function usedSlots(network: RouterNetwork, exceptMac?: string): Set<number> {
@@ -172,6 +171,7 @@ function planSlots(
   network: RouterNetwork,
   exceptMac: string,
   serverId: string,
+  limit: number,
 ): { list: SlotServer[] | null; slot: number } | "full" | null {
   const present = network.slots.find((item) => item.serverId === serverId);
   if (present) return { list: null, slot: present.slot };
@@ -184,11 +184,21 @@ function planSlots(
     const kept = servers.find((candidate) => candidate.id === item.serverId);
     if (kept) list.push(slotServer(item.slot, kept));
   }
+  if (list.length >= limit) return "full";
   const taken = new Set(list.map((item) => item.slot));
-  const free = Array.from({ length: MAX_SLOTS }, (_, slot) => slot).find((slot) => !taken.has(slot));
+  const free = Array.from({ length: ROUTER_MAX_SERVERS }, (_, slot) => slot).find((slot) => !taken.has(slot));
   if (free === undefined) return "full";
   list.push(slotServer(free, server));
   return { list: list.sort((x, y) => x.slot - y.slot), slot: free };
+}
+
+/** Whether a server not yet on the router still fits for this device. */
+function canAddServer(servers: VpnServer[], network: RouterNetwork, exceptMac: string, limit: number): boolean {
+  const used = usedSlots(network, exceptMac);
+  const kept = network.slots.filter(
+    (item) => used.has(item.slot) && servers.some((server) => server.id === item.serverId),
+  );
+  return kept.length < limit;
 }
 
 /** Server for a fresh install: the fastest answer, else the first one. */
@@ -702,7 +712,7 @@ function HomeNetwork({
       let slot = 0;
       let current = network;
       if (choice.startsWith("server:")) {
-        const plan = planSlots(servers, network, device.mac, choice.slice(7));
+        const plan = planSlots(servers, network, device.mac, choice.slice(7), limit);
         if (plan === "full") throw new Error("slots-full");
         if (!plan) throw new Error("server-missing");
         if (plan.list) {
@@ -724,18 +734,25 @@ function HomeNetwork({
       });
     } catch (error) {
       const message = String(error);
-      onError(message.includes("slots-full") ? tf("router_slots_full", MAX_SLOTS) : routerErrorText(error));
+      onError(
+        message.includes("slots-full")
+          ? tf("router_slots_full", limit, Math.round((status.memoryAvailableKb ?? 0) / 1024))
+          : routerErrorText(error),
+      );
     } finally {
       setSavingMac(null);
     }
   };
 
   const devices = network?.devices ?? null;
+  // Servers already on the router keep their tunnels; how many more fit
+  // depends on the router's free memory.
+  const limit = routerServerLimit(status, network?.slots.length ?? 1);
   const picking = devices?.find((device) => device.mac === pickingMac) ?? null;
 
   return (
     <div className="router-panel">
-      <p className="router-panel__hint">{tf("router_devices_hint", MAX_SLOTS)}</p>
+      <p className="router-panel__hint">{t("router_devices_hint")}</p>
       {devices === null || !network ? (
         <Spinner size={20} />
       ) : devices.length === 0 ? (
@@ -787,6 +804,8 @@ function HomeNetwork({
           servers={servers}
           pings={pings}
           onRouter={new Set(network.slots.map((item) => item.serverId))}
+          canAdd={canAddServer(servers, network, picking.mac, limit)}
+          limit={limit}
           selected={deviceChoice(picking, network).replace(/^server:/, "")}
           onClose={() => setPickingMac(null)}
           onSelect={(choice) => {
@@ -913,6 +932,8 @@ function ServerSheet({
   servers,
   pings,
   onRouter,
+  canAdd,
+  limit,
   selected,
   onSelect,
   onClose,
@@ -922,6 +943,9 @@ function ServerSheet({
   pings: Map<string, number>;
   /** Servers already on the router: choosing one does not restart the tunnels. */
   onRouter: Set<string>;
+  /** False when the router holds as many servers as its memory allows. */
+  canAdd: boolean;
+  limit: number;
   /** "direct" or a server id. */
   selected: string;
   onSelect: (choice: string) => void;
@@ -1051,6 +1075,7 @@ function ServerSheet({
           <span className="router-sheet__title">{t("router_pick_server_title")}</span>
           <span className="router-sheet__device">{deviceName}</span>
         </div>
+        {!canAdd && <p className="router-sheet__notice">{tf("router_sheet_full", limit)}</p>}
         <ScrollEdgeAffordance className="router-sheet__list" overlayFade>
           <button
             type="button"
@@ -1071,17 +1096,20 @@ function ServerSheet({
           </button>
           {servers.map((server) => {
             const ping = pings.get(server.id);
+            const blocked = !canAdd && !onRouter.has(server.id) && selected !== server.id;
             return (
               <button
                 key={server.id}
                 type="button"
                 className={`router-sheet__row ${selected === server.id ? "router-sheet__row--selected" : ""}`}
+                disabled={blocked}
                 onClick={() => pick(server.id)}
               >
                 <span className="router-sheet__flag">{countryFlagForUi(server.country, server.name)}</span>
                 <span className="router-sheet__text">
                   <span className="router-sheet__name">{serverDisplayName(server.name, server.country)}</span>
                   {onRouter.has(server.id) && <span className="router-sheet__sub">{t("router_server_on_router")}</span>}
+                  {blocked && <span className="router-sheet__sub">{t("router_server_no_room")}</span>}
                 </span>
                 {ping !== undefined && (
                   <span className="router-sheet__ping" style={{ color: ping >= 0 ? pingColor(ping) : "var(--text-muted)" }}>

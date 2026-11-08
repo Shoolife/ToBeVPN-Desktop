@@ -30,8 +30,9 @@ start() { /opt/tobevpn/tobevpn-router.sh start >/dev/null 2>&1; }\n\
 stop() { /opt/tobevpn/tobevpn-router.sh stop >/dev/null 2>&1; }\n";
 /// Xray SOCKS port of slot 0; slot N listens on SOCKS_PORT + N.
 const SOCKS_PORT: u16 = 10808;
-/// Server slots: 0 is the router's server, 1-3 servers of single devices.
-const MAX_SLOT: u8 = 3;
+/// Server slots 0-7, one tunnel each; how many are used is decided by the
+/// app from the router's free memory.
+const MAX_SLOT: u8 = 7;
 /// Re-applies per-device routes when a home device gets an address.
 const DHCP_HOOK: &str = "#!/bin/sh\n\
 # ToBeVPN: per-device routes follow a device's new address.\n\
@@ -102,8 +103,8 @@ pub struct RouterStatus {
     /// The core does not start: the home is direct, the router retries
     /// every minute.
     pub failed: bool,
-    /// Slots whose server does not answer: their devices go direct (slot
-    /// 0) or through the router's server (slots 1-3) until it answers.
+    /// Slots whose server does not answer: their devices go direct until
+    /// it answers again.
     pub down_slots: Vec<u8>,
     /// Routes that keep ToBeVPN servers outside the tunnel.
     pub server_bypass_rules: u64,
@@ -934,7 +935,7 @@ fn parse_devices(text: &str) -> Vec<RouterDevice> {
 }
 
 /// Sets the router's server (slot 0) and the servers of single devices
-/// (slots 1-3), then restarts the tunnels.
+/// (slots 1-7), then restarts the tunnels.
 #[tauri::command]
 pub async fn router_set_servers(
     app: AppHandle,
@@ -962,7 +963,7 @@ pub async fn router_set_servers(
     Ok(parse_status(&output))
 }
 
-/// A server in a slot: 0 is the router's server, 1-3 servers of devices.
+/// A server in a slot (0-7); devices are sent to their server's slot.
 #[derive(serde::Deserialize, Debug)]
 pub struct SlotServer {
     pub slot: u8,

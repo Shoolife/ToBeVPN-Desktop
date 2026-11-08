@@ -124,8 +124,27 @@ export interface RouterNetwork {
   slots: RouterSlot[];
 }
 
-/** Extra servers for single devices, besides the router's own. */
-export const ROUTER_EXTRA_SLOTS = 3;
+/** Tunnels the router agent has: at most this many different servers. */
+export const ROUTER_MAX_SERVERS = 8;
+/**
+ * Free memory counted for a further server. A tunnel process and its Xray
+ * connections take about 1-2 MB; the margin keeps the router clear of
+ * running out of memory under load.
+ */
+const SERVER_MEMORY_KB = 6 * 1024;
+/** Free memory always left to the router itself and to Xray's peaks. */
+const ROUTER_RESERVE_KB = 28 * 1024;
+
+/**
+ * How many different servers this router can hold at once: those already on
+ * it plus what its free memory still fits, so a stronger router holds more.
+ */
+export function routerServerLimit(status: RouterStatus, onRouter: number): number {
+  const free = status.memoryAvailableKb;
+  if (free === null) return Math.min(ROUTER_MAX_SERVERS, Math.max(onRouter, 4));
+  const more = Math.max(0, Math.floor((free - ROUTER_RESERVE_KB) / SERVER_MEMORY_KB));
+  return Math.min(ROUTER_MAX_SERVERS, Math.max(1, onRouter + more));
+}
 
 export interface SlotServer {
   slot: number;

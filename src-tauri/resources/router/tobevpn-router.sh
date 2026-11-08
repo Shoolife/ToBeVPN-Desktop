@@ -9,7 +9,7 @@
 # /etc/init.d/tobevpn stay.
 #
 # Servers come in slots: slot 0 is the router's server (tunnel tobe0, Xray
-# SOCKS port 10808), slots 1-3 are servers chosen for single devices
+# SOCKS port 10808), slots 1-7 are further servers chosen for devices
 # (tobeN, port 10808+N, config hevN.yml). Xray sends each SOCKS input to
 # its own server, so a device's tunnel decides its server.
 #
@@ -51,9 +51,10 @@ lan_address() {
     ip -4 addr show "$LAN_DEV" 2>/dev/null | awk '/inet /{split($2, a, "/"); print a[1]; exit}'
 }
 
-# Extra server slots that have a tunnel config (1-3).
+# Extra server slots that have a tunnel config (1-7). How many fit is
+# decided by the app from the free memory of the router.
 extra_slots() {
-    for config in "$DIR"/hev[1-3].yml; do
+    for config in "$DIR"/hev[1-7].yml; do
         [ -f "$config" ] && basename "$config" .yml | sed 's/^hev//'
     done
 }
@@ -130,7 +131,7 @@ device_choices() {
     awk -F '\t' -v default="$default" -v slots="$slots" -v down="$down" '
         $1 != "" {
             mode = ($2 == "vpn" || $2 == "direct") ? $2 : default
-            slot = ($4 ~ /^[1-3]$/ && index(slots, " " $4 " ")) ? $4 : 0
+            slot = ($4 ~ /^[1-7]$/ && index(slots, " " $4 " ")) ? $4 : 0
             if (mode == "vpn" && index(down, " " slot " ")) mode = "direct"
             print tolower($1), mode, slot
         }' "$DIR/devices" 2>/dev/null
@@ -204,7 +205,7 @@ TRAFFIC_KEEP=900
 account_traffic() {
     [ -f "$RUN/traffic" ] || cp "$DIR/traffic" "$RUN/traffic" 2>/dev/null || : >"$RUN/traffic"
     delta=0
-    for slot in 0 1 2 3; do
+    for slot in 0 1 2 3 4 5 6 7; do
         stats=/sys/class/net/$(tunnel_of "$slot")/statistics
         [ -r "$stats/rx_bytes" ] || { rm -f "$RUN/counter_$slot"; continue; }
         now=$(($(cat "$stats/rx_bytes") + $(cat "$stats/tx_bytes")))
@@ -353,11 +354,11 @@ list_devices() {
         END {
             for (m in ip) {
                 h = host[m]; if (h == "*") h = ""
-                s = (slot[m] ~ /^[1-3]$/) ? slot[m] : 0
+                s = (slot[m] ~ /^[1-7]$/) ? slot[m] : 0
                 print "device=" m "|" ip[m] "|" h "|" (m in mode && mode[m] != "" ? mode[m] : "default") "|" name[m] "|" (m in online ? 1 : 0) "|" s
             }
         }'
-    awk -F '\t' '$1 ~ /^[0-3]$/ {print "slot=" $1 "|" $2 "|" $3}' "$DIR/slots" 2>/dev/null
+    awk -F '\t' '$1 ~ /^[0-7]$/ {print "slot=" $1 "|" $2 "|" $3}' "$DIR/slots" 2>/dev/null
 }
 
 set_device() {
@@ -366,7 +367,7 @@ set_device() {
     slot=$3
     echo "$mac" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "error=bad mac"; return 2; }
     case "$mode" in vpn | direct | default) ;; *) echo "error=bad mode"; return 2 ;; esac
-    case "$slot" in 0 | 1 | 2 | 3) ;; *) echo "error=bad slot"; return 2 ;; esac
+    case "$slot" in [0-7]) ;; *) echo "error=bad slot"; return 2 ;; esac
     name=$(printf '%s' "$4" | tr -d '\t\r\n|' | cut -c1-40)
     touch "$DIR/devices"
     grep -v -i "^$mac	" "$DIR/devices" >"$DIR/devices.tmp" 2>/dev/null
@@ -482,7 +483,7 @@ stop_routing() {
     while ip rule del lookup main prio "$PRIO" 2>/dev/null; do :; done
     while ip rule del lookup main prio "$BYPASS_PRIO" 2>/dev/null; do :; done
     ip route flush table "$TABLE" 2>/dev/null
-    for slot in 1 2 3; do
+    for slot in 1 2 3 4 5 6 7; do
         ip route flush table "$((SLOT_TABLE_BASE + slot))" 2>/dev/null
     done
     remove_dns_redirect
