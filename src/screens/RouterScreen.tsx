@@ -809,7 +809,8 @@ function pingColor(ping: number): string {
 
 function formatTrafficBytes(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${formatDecimal(bytes / 1024 ** 3, 1)} ${t("unit_gb")}`;
-  return `${Math.round(bytes / 1024 ** 2)} ${t("unit_mb")}`;
+  if (bytes >= 1024 ** 2 || bytes === 0) return `${Math.round(bytes / 1024 ** 2)} ${t("unit_mb")}`;
+  return `${formatDecimal(bytes / 1024 ** 2, 1)} ${t("unit_mb")}`;
 }
 
 /** VPN traffic of the home network through the router: today, month, by hour. */
@@ -822,6 +823,8 @@ function RouterTraffic() {
   const monthTotal = routerTrafficBetween(traffic.hours, month[0][0], month[month.length - 1][1]);
   const peak = Math.max(...hours, 1);
   const currentHour = new Date().getHours();
+  const [hovered, setHovered] = useState<number | null>(null);
+  const hourLabel = (hour: number) => `${String(hour).padStart(2, "0")}:00`;
   return (
     <div className="router-panel router-traffic">
       <div className="router-traffic__totals">
@@ -834,15 +837,34 @@ function RouterTraffic() {
           <span className="router-traffic__label">{t("router_traffic_month")}</span>
         </div>
       </div>
-      <div className="router-traffic__chart" aria-hidden="true">
+      <div className="router-traffic__chart" onMouseLeave={() => setHovered(null)}>
         {hours.map((bytes, index) => (
-          <span key={index} className="router-traffic__slot">
+          <span
+            key={index}
+            className={`router-traffic__slot ${hovered === index ? "router-traffic__slot--hovered" : ""}`}
+            onMouseEnter={() => setHovered(index)}
+            aria-label={`${hourLabel(index)}–${hourLabel(index + 1)}: ${formatTrafficBytes(bytes)}`}
+          >
             <span
               className={`router-traffic__bar ${index > currentHour ? "router-traffic__bar--future" : ""}`}
               style={{ height: bytes > 0 ? `${Math.max((bytes / peak) * 100, 6)}%` : "2px" }}
             />
           </span>
         ))}
+        {hovered !== null && hovered <= currentHour && (
+          <span
+            className="router-traffic__tip"
+            style={{
+              left: `${((hovered + 0.5) / hours.length) * 100}%`,
+              // Kept inside the panel at both ends of the day.
+              transform: `translateX(${hovered < 3 ? "-15%" : hovered > hours.length - 4 ? "-85%" : "-50%"})`,
+            }}
+            role="tooltip"
+          >
+            <span className="router-traffic__tip-value">{formatTrafficBytes(hours[hovered])}</span>
+            <span className="router-traffic__tip-time">{`${hourLabel(hovered)}–${hourLabel(hovered + 1)}`}</span>
+          </span>
+        )}
       </div>
       <div className="router-traffic__axis" aria-hidden="true">
         <span>0:00</span>

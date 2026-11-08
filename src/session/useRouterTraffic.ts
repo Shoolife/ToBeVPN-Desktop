@@ -29,7 +29,10 @@ export function useRouterTraffic(maxAgeMs = REFRESH_MS): { linked: boolean; hour
     window.addEventListener(ROUTER_CHANGED_EVENT, update);
     window.addEventListener(ROUTER_TRAFFIC_EVENT, update);
     void refreshRouterTraffic(maxAgeMs);
-    const timer = window.setInterval(() => void refreshRouterTraffic(maxAgeMs), REFRESH_MS);
+    // Read again as often as the screen wants it fresh (the router counts
+    // every minute, so never more often than that).
+    const every = Math.max(60_000, maxAgeMs);
+    const timer = window.setInterval(() => void refreshRouterTraffic(every - 5_000), every);
     return () => {
       window.removeEventListener(ROUTER_CHANGED_EVENT, update);
       window.removeEventListener(ROUTER_TRAFFIC_EVENT, update);
