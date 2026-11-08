@@ -256,6 +256,19 @@ export interface RouterTrafficHour {
 
 const TRAFFIC_KEY = "tobevpn_router_traffic_v1";
 export const ROUTER_TRAFFIC_EVENT = "tobevpn:router-traffic";
+/** Fired when a read of the router's traffic starts and ends. */
+export const ROUTER_TRAFFIC_LOADING_EVENT = "tobevpn:router-traffic-loading";
+
+let trafficLoading = false;
+
+export function isRouterTrafficLoading(): boolean {
+  return trafficLoading;
+}
+
+function setTrafficLoading(loading: boolean): void {
+  trafficLoading = loading;
+  window.dispatchEvent(new Event(ROUTER_TRAFFIC_LOADING_EVENT));
+}
 
 interface TrafficCache {
   hwid: string | null;
@@ -293,6 +306,7 @@ export function refreshRouterTraffic(maxAgeMs = 5 * 60_000): Promise<void> {
     // Read it again below.
   }
   if (trafficInFlight) return trafficInFlight;
+  setTrafficLoading(true);
   trafficInFlight = invoke<RouterTrafficHour[]>("router_traffic", { host: link.host, user: link.user })
     .then((hours) => {
       const cache: TrafficCache = { hwid: link.hwid ?? null, fetchedAt: Date.now(), hours };
@@ -306,6 +320,7 @@ export function refreshRouterTraffic(maxAgeMs = 5 * 60_000): Promise<void> {
     .catch(() => undefined)
     .finally(() => {
       trafficInFlight = null;
+      setTrafficLoading(false);
     });
   return trafficInFlight;
 }

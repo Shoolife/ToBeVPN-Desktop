@@ -857,11 +857,15 @@ function RouterTraffic() {
     <div className="router-panel router-traffic">
       <div className="router-traffic__totals">
         <div className="router-traffic__total">
-          <span className="router-traffic__value">{formatTrafficBytes(today)}</span>
+          <span className="router-traffic__value">
+            {traffic.loading ? <TrafficSpinner /> : formatTrafficBytes(today)}
+          </span>
           <span className="router-traffic__label">{t("router_traffic_today")}</span>
         </div>
         <div className="router-traffic__total router-traffic__total--secondary">
-          <span className="router-traffic__value">{formatTrafficBytes(monthTotal)}</span>
+          <span className="router-traffic__value">
+            {traffic.loading ? <TrafficSpinner /> : formatTrafficBytes(monthTotal)}
+          </span>
           <span className="router-traffic__label">{t("router_traffic_month")}</span>
         </div>
       </div>
@@ -903,6 +907,11 @@ function RouterTraffic() {
       </div>
     </div>
   );
+}
+
+/** The spinner of a server's ping being measured, while traffic is read. */
+function TrafficSpinner() {
+  return <span className="router-traffic__spinner" role="status" aria-label={t("router_traffic_loading")} />;
 }
 
 /** The device's server as a button: flag and name, or "No VPN". */

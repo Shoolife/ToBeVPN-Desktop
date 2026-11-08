@@ -795,3 +795,28 @@
   font-size: 13px;
   line-height: 1.4;
 }
+
+/* Reading the traffic from the router: the spinner of the server list's
+   ping, in place of the numbers. */
+.router-traffic__value {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+}
+
+.router-traffic__total--secondary .router-traffic__value {
+  min-height: 30px;
+}
+
+.router-traffic__spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+  border-top-color: var(--text-muted);
+  border-radius: 50%;
+  animation: router-traffic-spin 0.8s linear infinite;
+}
+
+@keyframes router-traffic-spin {
+  to { transform: rotate(360deg); }
+}
