@@ -966,3 +966,43 @@
 @keyframes router-done-pop {
   from { transform: scale(0.6); opacity: 0; }
 }
+
+/* Router password with a show/hide eye inside the field */
+.router-password {
+  position: relative;
+  display: flex;
+}
+
+.router-password input {
+  flex: 1;
+  min-width: 0;
+  padding-right: 42px;
+}
+
+.router-password__toggle {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.router-password__toggle:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2, var(--input-bg));
+}
+
+.router-password__toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
