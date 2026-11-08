@@ -611,12 +611,12 @@ async fn install(
             "644",
         )
         .await?;
-    // Every home device goes through the VPN; one with its own ToBeVPN on
-    // reaches the servers directly (see "servers"). A choice made earlier
-    // is kept when reinstalling.
+    // New devices stay direct until the owner picks a server for them; a
+    // device with its own ToBeVPN on reaches the servers directly (see
+    // "servers"). Choices made earlier are kept when reinstalling.
     session
         .run_ok(
-            "[ -s /opt/tobevpn/default_mode ] || echo vpn > /opt/tobevpn/default_mode; \
+            "[ -s /opt/tobevpn/default_mode ] || echo direct > /opt/tobevpn/default_mode; \
              touch /opt/tobevpn/devices; rm -f /opt/tobevpn/clients /opt/tobevpn/direct; \
              mkdir -p /etc/hotplug.d/dhcp",
             None,

@@ -415,3 +415,7 @@
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+.router-device__meta--warn {
+  color: var(--warning, #d9a400);
+}

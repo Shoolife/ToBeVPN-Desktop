@@ -120,15 +120,18 @@ mac_address_ip() {
             'tolower($4) == mac && $6 == dev && $3 != "0x0" {print $1; exit}' /proc/net/arp
 }
 
-# Saved devices as "MAC effective-mode slot", the slot falling back to 0
-# when its tunnel no longer exists.
+# Saved devices as "MAC effective-mode slot". A slot without a tunnel falls
+# back to slot 0; a device whose server does not answer goes direct until it
+# does, rather than through a server nobody chose for it.
 device_choices() {
     default=$(default_mode)
-    slots=" 0 $(for slot in $(extra_slots); do slot_down "$slot" || echo "$slot"; done | tr '\n' ' ')"
-    awk -F '\t' -v default="$default" -v slots="$slots" '
+    slots=" 0 $(extra_slots | tr '\n' ' ')"
+    down=" $(cat "$RUN/down" 2>/dev/null | tr '\n' ' ')"
+    awk -F '\t' -v default="$default" -v slots="$slots" -v down="$down" '
         $1 != "" {
             mode = ($2 == "vpn" || $2 == "direct") ? $2 : default
             slot = ($4 ~ /^[1-3]$/ && index(slots, " " $4 " ")) ? $4 : 0
+            if (mode == "vpn" && index(down, " " slot " ")) mode = "direct"
             print tolower($1), mode, slot
         }' "$DIR/devices" 2>/dev/null
 }

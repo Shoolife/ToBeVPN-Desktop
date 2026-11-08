@@ -27,7 +27,6 @@ import {
   setRouterDevice,
   type RouterAction,
   type RouterDevice,
-  type RouterDeviceMode,
   type RouterInfo,
   type RouterLink,
   type RouterNetwork,
@@ -148,36 +147,53 @@ function slotServer(slot: number, server: VpnServer): SlotServer {
   return { slot, id: server.id, name: server.name, server: serverProfileConfig(server) };
 }
 
-/** Extra slots some device still uses, by slot number. */
-function usedExtraSlots(network: RouterNetwork, exceptMac?: string): Set<number> {
+/** Servers the router can hold at once: one per tunnel. */
+const MAX_SLOTS = ROUTER_EXTRA_SLOTS + 1;
+
+/** Slots that devices other than `exceptMac` go through. */
+function usedSlots(network: RouterNetwork, exceptMac?: string): Set<number> {
   return new Set(
     network.devices
-      .filter((device) => device.mac !== exceptMac && device.mode === "vpn" && device.slot > 0)
+      .filter((device) => device.mac !== exceptMac && device.mode === "vpn")
       .map((device) => device.slot),
   );
 }
 
 /**
- * Server list for the router: the router's server in slot 0 and the extra
- * slots still in use. A slot whose server left the account is dropped; its
- * devices then use the router's server.
+ * Where a device's server goes. A server already on the router keeps its
+ * slot (`list` null: nothing to rewrite); otherwise it takes a free slot and
+ * `list` is the router's new server list: the slots still in use plus this
+ * one. Slot 0 always has a server, since the router's first tunnel needs one.
  */
-function slotServers(
+function planSlots(
   servers: VpnServer[],
-  mainId: string,
   network: RouterNetwork,
-  exceptMac?: string,
-): SlotServer[] | null {
-  const main = servers.find((server) => server.id === mainId);
-  if (!main) return null;
-  const used = usedExtraSlots(network, exceptMac);
-  const result = [slotServer(0, main)];
-  for (const slot of network.slots) {
-    if (slot.slot === 0 || !used.has(slot.slot)) continue;
-    const server = servers.find((candidate) => candidate.id === slot.serverId);
-    if (server) result.push(slotServer(slot.slot, server));
+  exceptMac: string,
+  serverId: string,
+): { list: SlotServer[] | null; slot: number } | "full" | null {
+  const present = network.slots.find((item) => item.serverId === serverId);
+  if (present) return { list: null, slot: present.slot };
+  const server = servers.find((candidate) => candidate.id === serverId);
+  if (!server) return null;
+  const used = usedSlots(network, exceptMac);
+  const list: SlotServer[] = [];
+  for (const item of network.slots) {
+    if (!used.has(item.slot)) continue;
+    const kept = servers.find((candidate) => candidate.id === item.serverId);
+    if (kept) list.push(slotServer(item.slot, kept));
   }
-  return result;
+  const taken = new Set(list.map((item) => item.slot));
+  const free = Array.from({ length: MAX_SLOTS }, (_, slot) => slot).find((slot) => !taken.has(slot));
+  if (free === undefined) return "full";
+  list.push(slotServer(free, server));
+  return { list: list.sort((x, y) => x.slot - y.slot), slot: free };
+}
+
+/** Server for a fresh install: the fastest answer, else the first one. */
+function installServer(servers: VpnServer[], pings: Map<string, number>): VpnServer | null {
+  const answered = servers.filter((server) => (pings.get(server.id) ?? -1) >= 0);
+  answered.sort((x, y) => (pings.get(x.id) ?? 0) - (pings.get(y.id) ?? 0));
+  return answered[0] ?? servers[0] ?? null;
 }
 
 export default function RouterScreen({ onBack }: { onBack: () => void }) {
@@ -196,7 +212,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   // Read again on every load: the server list may arrive after the screen opens.
   const [servers, setServers] = useState<VpnServer[]>(routableServers);
-  const [serverId, setServerId] = useState<string>(() => link?.serverId ?? servers[0]?.id ?? "");
   const [network, setNetwork] = useState<RouterNetwork | null>(null);
   const [logLines, setLogLines] = useState<InstallLogLine[]>([]);
   const [logOpen, setLogOpen] = useState(false);
@@ -233,7 +248,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
         if (generation === generationRef.current) setPings(measured);
       })
       .catch(() => undefined);
-    setServerId((id) => id || currentLink?.serverId || nextServers[0]?.id || "");
     setInfo(nextInfo);
     setLink(currentLink);
     setStatus(nextStatus);
@@ -257,7 +271,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     };
   }, []);
 
-  const selectedServer = servers.find((server) => server.id === serverId) ?? null;
+  const selectedServer = installServer(servers, pings);
 
   const handleInstall = async () => {
     const subscriptionUrl = accountSubscriptionUrl();
@@ -302,23 +316,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       }
     } catch (actionError) {
       setError(routerErrorText(actionError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const changeServer = async (id: string) => {
-    setServerId(id);
-    const list = network && slotServers(servers, id, network);
-    if (!link || !list) return;
-    setBusy(true);
-    setError(null);
-    try {
-      setStatus(await setRouterServers(link, list));
-      setNetwork((current) => current && { ...current, slots: list.map(toRouterSlot) });
-      setLink(getRouterLink());
-    } catch (serverError) {
-      setError(routerErrorText(serverError));
     } finally {
       setBusy(false);
     }
@@ -437,31 +434,31 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
           </div>
           {!installed && <p className="router-status">{statusText}</p>}
           {installed && status?.failed && !status.running && <p className="router-error">{t("router_failed")}</p>}
-          {installed && status?.running && status.downSlots.includes(0) && (
+          {installed && status?.running && status.downSlots.length > 0 && (
             <p className="router-error">{t("router_server_down")}</p>
           )}
           {error && <p className="router-error">{error}</p>}
 
           {installed && status ? (
             <>
-              <div className="devices-section-title">{t("router_vpn_section")}</div>
+              <div className="devices-section-title">{t("router_home_network_section")}</div>
+              {link && (
+                <HomeNetwork
+                  link={link}
+                  status={status}
+                  servers={servers}
+                  pings={pings}
+                  network={network}
+                  disabled={busy}
+                  onBusy={setBusy}
+                  onNetwork={setNetwork}
+                  onStatus={setStatus}
+                  onError={setError}
+                />
+              )}
+
+              <div className="devices-section-title">{t("router_controls_section")}</div>
               <div className="router-panel">
-                <label className="router-row">
-                  <span>{t("router_server")}</span>
-                  <select
-                    className="router-select"
-                    value={link?.serverId ?? serverId}
-                    disabled={busy}
-                    onChange={(event) => void changeServer(event.target.value)}
-                  >
-                    {!servers.some((server) => server.id === link?.serverId) && link?.serverName && (
-                      <option value={link.serverId ?? ""}>{link.serverName}</option>
-                    )}
-                    {servers.map((server) => (
-                      <option key={server.id} value={server.id}>{serverLabel(server, pings)}</option>
-                    ))}
-                  </select>
-                </label>
                 <button
                   type="button"
                   className="router-row router-row--toggle"
@@ -485,22 +482,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   {busy && <Spinner size={18} />}
                 </div>
               </div>
-
-              <div className="devices-section-title">{t("router_home_network_section")}</div>
-              {link && (
-                <HomeNetwork
-                  link={link}
-                  status={status}
-                  servers={servers}
-                  pings={pings}
-                  network={network}
-                  disabled={busy}
-                  onBusy={setBusy}
-                  onNetwork={setNetwork}
-                  onStatus={setStatus}
-                  onError={setError}
-                />
-              )}
 
               <div className="router-uninstall">
                 {confirmUninstall ? (
@@ -542,14 +523,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="off" disabled={busy} />
                     </label>
                     <p className="router-panel__hint">{t("router_password_hint")}</p>
-                    <label className="router-field">
-                      <span>{t("router_server")}</span>
-                      <select className="router-select" value={serverId} disabled={busy} onChange={(event) => setServerId(event.target.value)}>
-                        {servers.map((server) => (
-                          <option key={server.id} value={server.id}>{serverLabel(server, pings)}</option>
-                        ))}
-                      </select>
-                    </label>
                     <label className="router-check">
                       <input type="checkbox" checked={autostart} disabled={busy} onChange={(event) => setAutostart(event.target.checked)} />
                       <span>{t("router_autostart")}</span>
@@ -610,34 +583,40 @@ function RouterSkeleton({ installed }: { installed: boolean }) {
         </span>
         <span className="devices-skeleton__action" />
       </div>
-      <div className="devices-section-title">{t("router_vpn_section")}</div>
-      {panel(installed ? 4 : 2)}
-      {installed && (
+      {installed ? (
         <>
           <div className="devices-section-title">{t("router_home_network_section")}</div>
           {panel(3)}
+          <div className="devices-section-title">{t("router_controls_section")}</div>
+          {panel(2)}
+        </>
+      ) : (
+        <>
+          <div className="devices-section-title">{t("router_vpn_section")}</div>
+          {panel(2)}
         </>
       )}
     </>
   );
 }
 
-/**
- * Devices of the home network, each through the router's VPN or direct.
- * Devices keep their choice by MAC, so a new address after reconnecting
- * does not change it.
- */
 function toRouterSlot(server: SlotServer) {
   return { slot: server.slot, serverId: server.id, serverName: server.name };
 }
 
-/** Value of a device's select: a mode, or "server:<id>" for its own server. */
+/** Value of a device's select: "direct", or "server:<id>" for its server. */
 function deviceChoice(device: RouterDevice, network: RouterNetwork): string {
-  if (device.mode !== "vpn" || device.slot === 0) return device.mode;
-  const slot = network.slots.find((item) => item.slot === device.slot);
-  return slot ? `server:${slot.serverId}` : "vpn";
+  if (device.mode !== "vpn") return "direct";
+  const slot =
+    network.slots.find((item) => item.slot === device.slot) ?? network.slots.find((item) => item.slot === 0);
+  return slot ? `server:${slot.serverId}` : "direct";
 }
 
+/**
+ * Devices of the home network, each without VPN or through a server chosen
+ * for it. Devices keep their choice by MAC, so a new address after
+ * reconnecting does not change it; new devices start without VPN.
+ */
 function HomeNetwork({
   link,
   status,
@@ -662,6 +641,7 @@ function HomeNetwork({
   onError: (message: string | null) => void;
 }) {
   const [savingMac, setSavingMac] = useState<string | null>(null);
+  const migratingRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -679,88 +659,74 @@ function HomeNetwork({
     };
   }, [link.host]);
 
-  const mainSlot = network?.slots.find((slot) => slot.slot === 0);
-  const mainId = mainSlot?.serverId ?? link.serverId ?? "";
+  // Earlier versions sent every device without a choice through the router's
+  // server. Each such device now gets that server as its own choice, and new
+  // devices start without VPN; nothing changes for the devices already there.
+  useEffect(() => {
+    if (!network || status.defaultMode !== "vpn" || migratingRef.current) return;
+    migratingRef.current = true;
+    void (async () => {
+      try {
+        const kept = network.devices.filter((device) => device.mode === "default");
+        for (const device of kept) {
+          await setRouterDevice(link, { mac: device.mac, mode: "vpn", slot: 0, name: device.name ?? "" });
+        }
+        onStatus(await setRouterDefaultMode(link, "direct"));
+        onNetwork({
+          ...network,
+          devices: network.devices.map((device) =>
+            device.mode === "default" ? { ...device, mode: "vpn", slot: 0 } : device,
+          ),
+        });
+      } catch (error) {
+        onError(routerErrorText(error));
+      }
+    })();
+  }, [network, status.defaultMode]);
 
-  const updateDevice = (current: RouterNetwork, device: RouterDevice, patch: Partial<RouterDevice>) => ({
-    ...current,
-    devices: current.devices.map((item) => (item.mac === device.mac ? { ...item, ...patch } : item)),
-  });
-
-  /** Mode and slot for a choice; a server not yet in a slot gets a free one. */
-  const save = async (device: RouterDevice, choice: string, name: string | null) => {
+  /** Mode and slot for a choice; a server not yet on the router gets a free slot. */
+  const save = async (device: RouterDevice, choice: string) => {
     if (!network) return;
     setSavingMac(device.mac);
     onError(null);
     try {
-      let mode: RouterDevice["mode"] = "vpn";
+      let mode: RouterDevice["mode"] = "direct";
       let slot = 0;
       let current = network;
-      if (choice === "default" || choice === "direct") {
-        mode = choice;
-      } else if (choice.startsWith("server:") && choice.slice(7) !== mainId) {
-        const serverId = choice.slice(7);
-        const used = usedExtraSlots(network, device.mac);
-        const existing = network.slots.find(
-          (item) => item.slot > 0 && item.serverId === serverId && used.has(item.slot),
-        );
-        if (existing) {
-          slot = existing.slot;
-        } else {
-          const free = [1, 2, 3].slice(0, ROUTER_EXTRA_SLOTS).find((candidate) => !used.has(candidate));
-          const server = servers.find((candidate) => candidate.id === serverId);
-          if (free === undefined) throw new Error("slots-full");
-          const list = server && slotServers(servers, mainId, network, device.mac);
-          if (!list || !server) throw new Error("server-missing");
-          list.push(slotServer(free, server));
+      if (choice.startsWith("server:")) {
+        const plan = planSlots(servers, network, device.mac, choice.slice(7));
+        if (plan === "full") throw new Error("slots-full");
+        if (!plan) throw new Error("server-missing");
+        if (plan.list) {
           onBusy(true);
           try {
-            onStatus(await setRouterServers(link, list));
+            onStatus(await setRouterServers(link, plan.list));
           } finally {
             onBusy(false);
           }
-          current = { ...network, slots: list.map(toRouterSlot) };
-          slot = free;
+          current = { ...network, slots: plan.list.map(toRouterSlot) };
         }
+        mode = "vpn";
+        slot = plan.slot;
       }
-      await setRouterDevice(link, { mac: device.mac, mode, slot, name: name ?? "" });
-      onNetwork(updateDevice(current, device, { mode, slot, name }));
+      await setRouterDevice(link, { mac: device.mac, mode, slot, name: device.name ?? "" });
+      onNetwork({
+        ...current,
+        devices: current.devices.map((item) => (item.mac === device.mac ? { ...item, mode, slot } : item)),
+      });
     } catch (error) {
       const message = String(error);
-      onError(message.includes("slots-full") ? tf("router_slots_full", ROUTER_EXTRA_SLOTS) : routerErrorText(error));
+      onError(message.includes("slots-full") ? tf("router_slots_full", MAX_SLOTS) : routerErrorText(error));
     } finally {
       setSavingMac(null);
     }
   };
 
-  const changeDefault = async (mode: RouterDeviceMode) => {
-    onError(null);
-    try {
-      onStatus(await setRouterDefaultMode(link, mode));
-    } catch (error) {
-      onError(routerErrorText(error));
-    }
-  };
-
-  const modeLabel = (mode: RouterDeviceMode) =>
-    mode === "vpn" ? t("router_mode_short_vpn") : t("router_mode_short_direct");
   const devices = network?.devices ?? null;
 
   return (
     <div className="router-panel">
-      <label className="router-row">
-        <span>{t("router_default_mode")}</span>
-        <select
-          className="router-select"
-          value={status.defaultMode}
-          disabled={disabled}
-          onChange={(event) => void changeDefault(event.target.value as RouterDeviceMode)}
-        >
-          <option value="vpn">{t("router_mode_vpn")}</option>
-          <option value="direct">{t("router_mode_direct")}</option>
-        </select>
-      </label>
-      <p className="router-panel__hint">{tf("router_home_network_description_slots", ROUTER_EXTRA_SLOTS)}</p>
+      <p className="router-panel__hint">{tf("router_devices_hint", MAX_SLOTS)}</p>
       {devices === null || !network ? (
         <Spinner size={20} />
       ) : devices.length === 0 ? (
@@ -771,9 +737,9 @@ function HomeNetwork({
             const isThis = !!device.ip && device.ip === status.clientIp;
             const busy = disabled || savingMac === device.mac;
             const choice = deviceChoice(device, network);
-            const ownServer = choice.startsWith("server:")
-              ? network.slots.find((item) => item.slot === device.slot)
-              : null;
+            const chosenId = choice.startsWith("server:") ? choice.slice(7) : null;
+            const chosenSlot = chosenId ? network.slots.find((item) => item.serverId === chosenId) : null;
+            const serverDown = device.mode === "vpn" && status.downSlots.includes(chosenSlot?.slot ?? device.slot);
             return (
               <div
                 key={device.mac}
@@ -785,13 +751,11 @@ function HomeNetwork({
                     <span className="router-device__label">{routerDeviceLabel(device)}</span>
                     {isThis && <span className="visually-hidden">{` · ${t("router_this_computer")}`}</span>}
                   </div>
-                  <span className="router-device__meta">
+                  <span className={`router-device__meta ${serverDown ? "router-device__meta--warn" : ""}`}>
                     {[
                       device.ip,
                       device.online ? null : t("router_device_offline"),
-                      device.mode === "vpn" && device.slot > 0 && status.downSlots.includes(device.slot)
-                        ? t("router_device_server_down")
-                        : null,
+                      serverDown ? t("router_device_server_down") : null,
                     ]
                       .filter(Boolean)
                       .join(" · ")}
@@ -801,21 +765,15 @@ function HomeNetwork({
                   className="router-select router-select--compact"
                   value={choice}
                   disabled={busy}
-                  onChange={(event) => void save(device, event.target.value, device.name)}
+                  onChange={(event) => void save(device, event.target.value)}
                 >
-                  <option value="default">{tf("router_mode_default", modeLabel(status.defaultMode))}</option>
-                  <option value="vpn">{t("router_mode_router_vpn")}</option>
-                  <option value="direct">{t("router_mode_direct")}</option>
-                  <optgroup label={t("router_own_server")}>
-                    {ownServer && !servers.some((server) => server.id === ownServer.serverId) && (
-                      <option value={choice}>{ownServer.serverName}</option>
-                    )}
-                    {servers
-                      .filter((server) => server.id !== mainId)
-                      .map((server) => (
-                        <option key={server.id} value={`server:${server.id}`}>{serverLabel(server, pings)}</option>
-                      ))}
-                  </optgroup>
+                  <option value="direct">{t("router_no_vpn")}</option>
+                  {chosenSlot && !servers.some((server) => server.id === chosenSlot.serverId) && (
+                    <option value={choice}>{chosenSlot.serverName}</option>
+                  )}
+                  {servers.map((server) => (
+                    <option key={server.id} value={`server:${server.id}`}>{serverLabel(server, pings)}</option>
+                  ))}
                 </select>
               </div>
             );
