@@ -669,24 +669,61 @@
 
 
 
-/* Router controls: the main action and the uninstall link centred. */
-.router-actions--center {
-  position: relative;
-  justify-content: center;
+
+/* Under the router panel: start/stop and remove, side by side. */
+.router-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 4px;
 }
 
-.router-actions--center .spinner,
-.router-actions--center > :not(.router-panel__action) {
-  position: absolute;
-  right: 0;
+.router-bottom__buttons {
+  display: flex;
+  gap: 10px;
+  width: 100%;
 }
 
-.router-panel__action--wide {
-  align-self: center;
-  min-width: 240px;
-}
-
-.router-uninstall {
-  justify-content: center;
+.router-bottom__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
   text-align: center;
+}
+
+.router-button {
+  flex: 1;
+  min-width: 0;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+}
+
+.router-button:hover:not(:disabled) {
+  background: var(--surface-2, var(--input-bg));
+}
+
+.router-button--danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+}
+
+.router-button--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.router-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

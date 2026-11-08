@@ -475,35 +475,37 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     <span className="settings-switch__thumb" />
                   </span>
                 </button>
-                <div className="router-actions router-actions--center">
-                  <button
-                    type="button"
-                    className="router-panel__action router-panel__action--wide"
-                    disabled={busy}
-                    onClick={() => void runAction(status.running ? "stop" : "start")}
-                  >
-                    {status.running ? t("router_stop") : t("router_start")}
-                  </button>
-                  {busy && <Spinner size={18} />}
-                </div>
               </div>
 
-              <div className="router-uninstall">
+              <div className="router-bottom">
                 {confirmUninstall ? (
-                  <>
+                  <div className="router-bottom__confirm">
                     <span>{t("router_uninstall_confirm")}</span>
-                    <button type="button" className="router-link router-link--danger" disabled={busy} onClick={() => void runAction("uninstall")}>
-                      {t("router_uninstall_yes")}
-                    </button>
-                    <button type="button" className="router-link" disabled={busy} onClick={() => setConfirmUninstall(false)}>
-                      {t("cancel")}
-                    </button>
-                  </>
+                    <div className="router-bottom__buttons">
+                      <button type="button" className="router-button router-button--danger" disabled={busy} onClick={() => void runAction("uninstall")}>
+                        {t("router_uninstall_yes")}
+                      </button>
+                      <button type="button" className="router-button" disabled={busy} onClick={() => setConfirmUninstall(false)}>
+                        {t("cancel")}
+                      </button>
+                    </div>
+                  </div>
                 ) : (
-                  <button type="button" className="router-link router-link--danger" disabled={busy} onClick={() => setConfirmUninstall(true)}>
-                    {t("router_uninstall")}
-                  </button>
+                  <div className="router-bottom__buttons">
+                    <button
+                      type="button"
+                      className="router-button"
+                      disabled={busy}
+                      onClick={() => void runAction(status.running ? "stop" : "start")}
+                    >
+                      {status.running ? t("router_stop") : t("router_start")}
+                    </button>
+                    <button type="button" className="router-button router-button--danger" disabled={busy} onClick={() => setConfirmUninstall(true)}>
+                      {t("router_uninstall_short")}
+                    </button>
+                  </div>
                 )}
+                {busy && <Spinner size={18} />}
               </div>
             </>
           ) : (
@@ -593,7 +595,7 @@ function RouterSkeleton({ installed }: { installed: boolean }) {
           <div className="devices-section-title">{t("router_home_network_section")}</div>
           {panel(3)}
           <div className="devices-section-title">{t("router_controls_section")}</div>
-          {panel(2)}
+          {panel(1)}
         </>
       ) : (
         <>
