@@ -300,6 +300,7 @@
 .router-log__lines {
   max-height: 260px;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 10px;
