@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { t, tf, type StringKey } from "../i18n";
+import { formatDecimal, t, tf, type StringKey } from "../i18n";
+import { countryFlagForUi, serverDisplayName } from "../components/serverDisplay";
+import { periodRanges } from "../session/stats";
+import { useRouterTraffic } from "../session/useRouterTraffic";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
@@ -20,6 +23,7 @@ import {
   setRouterServers,
   setRouterName,
   refreshRouterTraffic,
+  routerTrafficBetween,
   routerDeviceLabel,
   ROUTER_EXTRA_SLOTS,
   routerDevices,
@@ -130,13 +134,6 @@ function InstallLog({ lines, open, onToggle }: { lines: InstallLogLine[]; open: 
       )}
     </div>
   );
-}
-
-/** Server name with its ping; the router reaches servers the way this computer does. */
-function serverLabel(server: VpnServer, pings: Map<string, number>): string {
-  const ping = pings.get(server.id);
-  if (ping === undefined) return server.name;
-  return ping >= 0 ? `${server.name} · ${tf("router_ping_ms", ping)}` : `${server.name} · ${t("router_ping_none")}`;
 }
 
 function routableServers(): VpnServer[] {
@@ -441,6 +438,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
 
           {installed && status ? (
             <>
+              <div className="devices-section-title">{t("router_traffic_title")}</div>
+              <RouterTraffic />
+
               <div className="devices-section-title">{t("router_home_network_section")}</div>
               {link && (
                 <HomeNetwork
@@ -641,6 +641,7 @@ function HomeNetwork({
   onError: (message: string | null) => void;
 }) {
   const [savingMac, setSavingMac] = useState<string | null>(null);
+  const [pickingMac, setPickingMac] = useState<string | null>(null);
   const migratingRef = useRef(false);
 
   useEffect(() => {
@@ -723,6 +724,7 @@ function HomeNetwork({
   };
 
   const devices = network?.devices ?? null;
+  const picking = devices?.find((device) => device.mac === pickingMac) ?? null;
 
   return (
     <div className="router-panel">
@@ -761,25 +763,214 @@ function HomeNetwork({
                       .join(" · ")}
                   </span>
                 </div>
-                <select
-                  className="router-select router-select--compact"
-                  value={choice}
+                <ServerChip
+                  server={servers.find((server) => server.id === chosenId) ?? null}
+                  serverName={chosenSlot?.serverName ?? null}
                   disabled={busy}
-                  onChange={(event) => void save(device, event.target.value)}
-                >
-                  <option value="direct">{t("router_no_vpn")}</option>
-                  {chosenSlot && !servers.some((server) => server.id === chosenSlot.serverId) && (
-                    <option value={choice}>{chosenSlot.serverName}</option>
-                  )}
-                  {servers.map((server) => (
-                    <option key={server.id} value={`server:${server.id}`}>{serverLabel(server, pings)}</option>
-                  ))}
-                </select>
+                  onClick={() => setPickingMac(device.mac)}
+                />
               </div>
             );
           })}
         </div>
       )}
+      {picking && network && (
+        <ServerSheet
+          deviceName={routerDeviceLabel(picking)}
+          servers={servers}
+          pings={pings}
+          onRouter={new Set(network.slots.map((item) => item.serverId))}
+          selected={deviceChoice(picking, network).replace(/^server:/, "")}
+          onClose={() => setPickingMac(null)}
+          onSelect={(choice) => {
+            const device = picking;
+            setPickingMac(null);
+            if (choice !== deviceChoice(device, network).replace(/^server:/, "")) {
+              void save(device, choice === "direct" ? "direct" : `server:${choice}`);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function pingColor(ping: number): string {
+  if (ping < 100) return "var(--success)";
+  if (ping < 200) return "var(--warning)";
+  return "var(--danger)";
+}
+
+function formatTrafficBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${formatDecimal(bytes / 1024 ** 3, 1)} ${t("unit_gb")}`;
+  return `${Math.round(bytes / 1024 ** 2)} ${t("unit_mb")}`;
+}
+
+/** VPN traffic of the home network through the router: today, month, by hour. */
+function RouterTraffic() {
+  const traffic = useRouterTraffic(60_000);
+  const day = periodRanges("day");
+  const month = periodRanges("month");
+  const hours = day.map(([start, end]) => routerTrafficBetween(traffic.hours, start, end));
+  const today = hours.reduce((sum, bytes) => sum + bytes, 0);
+  const monthTotal = routerTrafficBetween(traffic.hours, month[0][0], month[month.length - 1][1]);
+  const peak = Math.max(...hours, 1);
+  const currentHour = new Date().getHours();
+  return (
+    <div className="router-panel router-traffic">
+      <div className="router-traffic__totals">
+        <div className="router-traffic__total">
+          <span className="router-traffic__value">{formatTrafficBytes(today)}</span>
+          <span className="router-traffic__label">{t("router_traffic_today")}</span>
+        </div>
+        <div className="router-traffic__total router-traffic__total--secondary">
+          <span className="router-traffic__value">{formatTrafficBytes(monthTotal)}</span>
+          <span className="router-traffic__label">{t("router_traffic_month")}</span>
+        </div>
+      </div>
+      <div className="router-traffic__chart" aria-hidden="true">
+        {hours.map((bytes, index) => (
+          <span key={index} className="router-traffic__slot">
+            <span
+              className={`router-traffic__bar ${index > currentHour ? "router-traffic__bar--future" : ""}`}
+              style={{ height: bytes > 0 ? `${Math.max((bytes / peak) * 100, 6)}%` : "2px" }}
+            />
+          </span>
+        ))}
+      </div>
+      <div className="router-traffic__axis" aria-hidden="true">
+        <span>0:00</span>
+        <span>6:00</span>
+        <span>12:00</span>
+        <span>18:00</span>
+        <span>24:00</span>
+      </div>
+    </div>
+  );
+}
+
+/** The device's server as a button: flag and name, or "No VPN". */
+function ServerChip({
+  server,
+  serverName,
+  disabled,
+  onClick,
+}: {
+  server: VpnServer | null;
+  serverName: string | null;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const name = server?.name ?? serverName;
+  return (
+    <button type="button" className={`router-chip ${name ? "" : "router-chip--off"}`} disabled={disabled} onClick={onClick}>
+      {name ? (
+        <>
+          <span className="router-chip__flag">{countryFlagForUi(server?.country, name)}</span>
+          <span className="router-chip__name">{serverDisplayName(name, server?.country)}</span>
+        </>
+      ) : (
+        <span className="router-chip__name">{t("router_no_vpn")}</span>
+      )}
+      <svg className="router-chip__chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <polyline points="6 9 12 15 18 9" />
+      </svg>
+    </button>
+  );
+}
+
+/** Choice of a server for one device, in the app's own list style. */
+function ServerSheet({
+  deviceName,
+  servers,
+  pings,
+  onRouter,
+  selected,
+  onSelect,
+  onClose,
+}: {
+  deviceName: string;
+  servers: VpnServer[];
+  pings: Map<string, number>;
+  /** Servers already on the router: choosing one does not restart the tunnels. */
+  onRouter: Set<string>;
+  /** "direct" or a server id. */
+  selected: string;
+  onSelect: (choice: string) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const check = (
+    <svg className="router-sheet__check" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+
+  return (
+    <div className="router-sheet" role="dialog" aria-modal="true" aria-label={`${t("router_pick_server_title")}: ${deviceName}`} onClick={onClose}>
+      <div className="router-sheet__panel" onClick={(event) => event.stopPropagation()}>
+        <div className="router-sheet__header">
+          <span className="router-sheet__heading">
+            <span className="router-sheet__title">{t("router_pick_server_title")}</span>
+            <span className="router-sheet__device">{deviceName}</span>
+          </span>
+          <button type="button" className="router-sheet__close" aria-label={t("cancel")} onClick={onClose}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <ScrollEdgeAffordance className="router-sheet__list" overlayFade>
+          <button
+            type="button"
+            className={`router-sheet__row ${selected === "direct" ? "router-sheet__row--selected" : ""}`}
+            onClick={() => onSelect("direct")}
+          >
+            <span className="router-sheet__flag router-sheet__flag--off">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <line x1="5.6" y1="5.6" x2="18.4" y2="18.4" />
+              </svg>
+            </span>
+            <span className="router-sheet__text">
+              <span className="router-sheet__name">{t("router_no_vpn")}</span>
+              <span className="router-sheet__sub">{t("router_no_vpn_hint")}</span>
+            </span>
+            {selected === "direct" && check}
+          </button>
+          {servers.map((server) => {
+            const ping = pings.get(server.id);
+            return (
+              <button
+                key={server.id}
+                type="button"
+                className={`router-sheet__row ${selected === server.id ? "router-sheet__row--selected" : ""}`}
+                onClick={() => onSelect(server.id)}
+              >
+                <span className="router-sheet__flag">{countryFlagForUi(server.country, server.name)}</span>
+                <span className="router-sheet__text">
+                  <span className="router-sheet__name">{serverDisplayName(server.name, server.country)}</span>
+                  {onRouter.has(server.id) && <span className="router-sheet__sub">{t("router_server_on_router")}</span>}
+                </span>
+                {ping !== undefined && (
+                  <span className="router-sheet__ping" style={{ color: ping >= 0 ? pingColor(ping) : "var(--text-muted)" }}>
+                    {ping >= 0 ? tf("router_ping_ms", ping) : t("router_ping_none")}
+                  </span>
+                )}
+                {selected === server.id && check}
+              </button>
+            );
+          })}
+        </ScrollEdgeAffordance>
+      </div>
     </div>
   );
 }

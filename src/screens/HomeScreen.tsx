@@ -47,10 +47,6 @@ import {
 } from "../session/subscriptionReminderSnooze";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
-import { RouterIcon } from "./RouterScreen";
-import { useRouterTraffic } from "../session/useRouterTraffic";
-import { routerTrafficBetween } from "../session/router";
-import { periodRanges } from "../session/stats";
 import MaterialIcon from "../components/MaterialIcon";
 import { dismissPaymentSuccess, usePaymentSuccessVisible } from "../session/notifications";
 import { getCachedProfileDelays } from "../session/serverProbe";
@@ -350,13 +346,6 @@ export default function HomeScreen({
   const elapsed = sessionStartTime
     ? Math.floor((Date.now() - sessionStartTime) / 1000)
     : 0;
-
-  // VPN traffic of the home network through the router, today.
-  const routerTraffic = useRouterTraffic();
-  const todayRanges = periodRanges("day");
-  const routerHours = todayRanges.map(([start, end]) => routerTrafficBetween(routerTraffic.hours, start, end));
-  const routerToday = routerHours.reduce((sum, bytes) => sum + bytes, 0);
-  const routerPeak = Math.max(...routerHours, 1);
 
   // Ping for the selected server (refreshed when selection changes).
   const [ping, setPing] = useState(0);
@@ -778,22 +767,6 @@ export default function HomeScreen({
               <div className="home-session__label">{t("session_time")}</div>
             </div>
           </div>
-          {routerTraffic.linked && (
-            <div className="home-session__router" title={t("home_router_today")}>
-              <span className="home-session__router-icon"><RouterIcon size={16} /></span>
-              <span className="home-session__router-label">{t("home_router")}</span>
-              <span className="home-session__spark" aria-hidden="true">
-                {routerHours.map((bytes, index) => (
-                  <span
-                    key={index}
-                    className="home-session__spark-bar"
-                    style={{ height: `${bytes > 0 ? Math.max((bytes / routerPeak) * 100, 8) : 0}%` }}
-                  />
-                ))}
-              </span>
-              <span className="home-session__router-value">{formatSessionBytes(routerToday)}</span>
-            </div>
-          )}
         </div>
 
         {/* Speed test card */}

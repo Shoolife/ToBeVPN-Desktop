@@ -474,60 +474,6 @@
   color: var(--text-muted);
 }
 
-/* Router summary: today's home-network traffic under the session metrics */
-.home-session__router {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 12px 0 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.home-session__router-icon {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: color-mix(in srgb, #9C6BFF 16%, transparent);
-  color: #9C6BFF;
-}
-
-.home-session__router-label {
-  flex-shrink: 0;
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.home-session__spark {
-  display: flex;
-  flex: 1;
-  align-items: flex-end;
-  gap: 2px;
-  justify-content: center;
-  min-width: 0;
-  height: 22px;
-  padding: 0 6px;
-}
-
-.home-session__spark-bar {
-  flex: 1;
-  max-width: 12px;
-  border-radius: 2px 2px 0 0;
-  background: linear-gradient(to bottom, #9C6BFF, rgba(156, 107, 255, 0.4));
-}
-
-.home-session__router-value {
-  flex-shrink: 0;
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 700;
-}
-
 /* Subscription */
 .home-sub__label {
   font-size: 13px;
