@@ -7,6 +7,8 @@ import { useRouterTraffic } from "../session/useRouterTraffic";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
+import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
+import "../components/SubscriptionSheet.css";
 import { getCachedVpnServers, isAvailableVpnServer, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
@@ -41,6 +43,9 @@ import "./DevicesScreen.css";
 import "./RouterScreen.css";
 
 const MIN_REFRESH_FEEDBACK_MS = 800;
+/** As on the subscription sheet: its slide-down and drag threshold. */
+const SHEET_CLOSE_MS = 300;
+const SHEET_DRAG_ACTIVATION_PX = 9;
 
 export function RouterIcon({ size = 20 }: { size?: number }) {
   return (
@@ -470,10 +475,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     <span className="settings-switch__thumb" />
                   </span>
                 </button>
-                <div className="router-actions">
+                <div className="router-actions router-actions--center">
                   <button
                     type="button"
-                    className="router-panel__action"
+                    className="router-panel__action router-panel__action--wide"
                     disabled={busy}
                     onClick={() => void runAction(status.running ? "stop" : "start")}
                   >
@@ -784,7 +789,6 @@ function HomeNetwork({
           onClose={() => setPickingMac(null)}
           onSelect={(choice) => {
             const device = picking;
-            setPickingMac(null);
             if (choice !== deviceChoice(device, network).replace(/^server:/, "")) {
               void save(device, choice === "direct" ? "direct" : `server:${choice}`);
             }
@@ -879,7 +883,7 @@ function ServerChip({
   );
 }
 
-/** Choice of a server for one device, in the app's own list style. */
+/** Choice of a server for one device, in the bottom sheet of the subscription plans. */
 function ServerSheet({
   deviceName,
   servers,
@@ -899,40 +903,135 @@ function ServerSheet({
   onSelect: (choice: string) => void;
   onClose: () => void;
 }) {
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ pointerId: number; startY: number; offset: number; activated: boolean } | null>(null);
+  const snapTimerRef = useRef<number | null>(null);
+  const { closing, requestClose } = useAnimatedDialogClose(onClose, SHEET_CLOSE_MS);
+
+  /** Closes with the slide-down; `after` runs once the sheet is gone. */
+  const close = (after?: () => void) => {
+    if (snapTimerRef.current !== null) window.clearTimeout(snapTimerRef.current);
+    dragRef.current = null;
+    requestClose(after ? () => {
+      onClose();
+      after();
+    } : undefined);
+  };
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") close();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (snapTimerRef.current !== null) window.clearTimeout(snapTimerRef.current);
+    };
+  }, []);
+
+  // Drag down to close, as on the subscription sheet.
+  const resetDrag = () => {
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    sheet.classList.remove("sub-sheet--dragging", "sub-sheet--snapping");
+    sheet.style.removeProperty("transform");
+    sheet.style.removeProperty("--sub-sheet-close-from");
+    sheet.style.removeProperty("--sub-sheet-snap-duration");
+  };
+  const startDrag = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || closing || !sheetRef.current) return;
+    if (snapTimerRef.current !== null) window.clearTimeout(snapTimerRef.current);
+    resetDrag();
+    dragRef.current = { pointerId: event.pointerId, startY: event.clientY, offset: 0, activated: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+  const moveDrag = (event: React.PointerEvent<HTMLElement>) => {
+    const drag = dragRef.current;
+    const sheet = sheetRef.current;
+    if (!drag || !sheet || drag.pointerId !== event.pointerId) return;
+    const offset = Math.min(sheet.offsetHeight, Math.max(0, event.clientY - drag.startY));
+    if (!drag.activated) {
+      if (offset < SHEET_DRAG_ACTIVATION_PX) return;
+      drag.activated = true;
+      sheet.classList.add("sub-sheet--settled", "sub-sheet--dragging");
+    }
+    drag.offset = offset;
+    sheet.style.transform = `translateY(${offset}px)`;
+    event.preventDefault();
+  };
+  const finishDrag = (event: React.PointerEvent<HTMLElement>, allowClose: boolean) => {
+    const drag = dragRef.current;
+    const sheet = sheetRef.current;
+    if (!drag || !sheet || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!drag.activated) {
+      resetDrag();
+      return;
+    }
+    sheet.classList.remove("sub-sheet--dragging");
+    if (allowClose && drag.offset >= Math.min(150, Math.max(76, sheet.offsetHeight * 0.18))) {
+      sheet.style.setProperty("--sub-sheet-close-from", `${drag.offset}px`);
+      sheet.style.removeProperty("transform");
+      close();
+      return;
+    }
+    sheet.classList.add("sub-sheet--snapping");
+    const duration = Math.round(Math.min(310, Math.max(210, 175 + drag.offset * 0.72)));
+    sheet.style.setProperty("--sub-sheet-snap-duration", `${duration}ms`);
+    void sheet.offsetHeight;
+    sheet.style.transform = "translateY(0px)";
+    snapTimerRef.current = window.setTimeout(() => {
+      snapTimerRef.current = null;
+      if (!dragRef.current) resetDrag();
+    }, duration + 32);
+  };
+  const dragHandlers = {
+    onPointerDown: startDrag,
+    onPointerMove: moveDrag,
+    onPointerUp: (event: React.PointerEvent<HTMLElement>) => finishDrag(event, true),
+    onPointerCancel: (event: React.PointerEvent<HTMLElement>) => finishDrag(event, false),
+  };
 
   const check = (
     <svg className="router-sheet__check" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <polyline points="20 6 9 17 4 12" />
     </svg>
   );
+  const pick = (choice: string) => close(() => onSelect(choice));
 
   return (
-    <div className="router-sheet" role="dialog" aria-modal="true" aria-label={`${t("router_pick_server_title")}: ${deviceName}`} onClick={onClose}>
-      <div className="router-sheet__panel" onClick={(event) => event.stopPropagation()}>
-        <div className="router-sheet__header">
-          <span className="router-sheet__heading">
-            <span className="router-sheet__title">{t("router_pick_server_title")}</span>
-            <span className="router-sheet__device">{deviceName}</span>
-          </span>
-          <button type="button" className="router-sheet__close" aria-label={t("cancel")} onClick={onClose}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
+    <div
+      className={`sub-sheet-overlay ${closing ? "sub-sheet-overlay--closing" : ""}`}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) close();
+      }}
+    >
+      <div
+        ref={sheetRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${t("router_pick_server_title")}: ${deviceName}`}
+        className={`sub-sheet router-sheet ${closing ? "sub-sheet--closing" : ""}`}
+      >
+        <div className="sub-sheet__handle" aria-hidden="true" {...dragHandlers} />
+        <button type="button" className="sub-sheet__close" onClick={() => close()} aria-label={t("close")} title={t("close")}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </button>
+        <div className="router-sheet__heading" {...dragHandlers}>
+          <span className="router-sheet__title">{t("router_pick_server_title")}</span>
+          <span className="router-sheet__device">{deviceName}</span>
         </div>
         <ScrollEdgeAffordance className="router-sheet__list" overlayFade>
           <button
             type="button"
             className={`router-sheet__row ${selected === "direct" ? "router-sheet__row--selected" : ""}`}
-            onClick={() => onSelect("direct")}
+            onClick={() => pick("direct")}
           >
             <span className="router-sheet__flag router-sheet__flag--off">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -953,7 +1052,7 @@ function ServerSheet({
                 key={server.id}
                 type="button"
                 className={`router-sheet__row ${selected === server.id ? "router-sheet__row--selected" : ""}`}
-                onClick={() => onSelect(server.id)}
+                onClick={() => pick(server.id)}
               >
                 <span className="router-sheet__flag">{countryFlagForUi(server.country, server.name)}</span>
                 <span className="router-sheet__text">
