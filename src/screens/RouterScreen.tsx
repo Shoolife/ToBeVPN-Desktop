@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { formatDecimal, t, tf, type StringKey } from "../i18n";
 import { countryFlagForUi, serverDisplayName } from "../components/serverDisplay";
@@ -27,6 +27,7 @@ import {
   refreshRouterTraffic,
   routerTrafficBetween,
   routerDeviceLabel,
+  unlinkRouterFromAccount,
   cachedLanNames,
   discoverLanNames,
   ROUTER_MAX_SERVERS,
@@ -490,19 +491,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               </div>
 
               <div className="router-bottom">
-                {confirmUninstall ? (
-                  <div className="router-bottom__confirm">
-                    <span>{t("router_uninstall_confirm")}</span>
-                    <div className="router-bottom__buttons">
-                      <button type="button" className="router-button router-button--danger" disabled={busy} onClick={() => void runAction("uninstall")}>
-                        {t("router_uninstall_yes")}
-                      </button>
-                      <button type="button" className="router-button" disabled={busy} onClick={() => setConfirmUninstall(false)}>
-                        {t("cancel")}
-                      </button>
-                    </div>
-                  </div>
-                ) : (
+                {(
                   <div className="router-bottom__buttons">
                     <button
                       type="button"
@@ -519,6 +508,18 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                 )}
                 {busy && <Spinner size={18} />}
               </div>
+              {confirmUninstall && link && (
+                <UninstallSheet
+                  link={link}
+                  hwid={status.hwid ?? link.hwid ?? null}
+                  onClose={() => setConfirmUninstall(false)}
+                  onRemoved={() => {
+                    setLink(null);
+                    setStatus(null);
+                    setNetwork(null);
+                  }}
+                />
+              )}
             </>
           ) : (
             <>
@@ -548,7 +549,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     </label>
                     <p className="router-panel__hint">{t("router_install_scope")}</p>
                     <div className="router-actions">
-                      <button type="submit" className="router-panel__action" disabled={busy || !password || !selectedServer}>
+                      <button type="submit" className="router-button router-button--primary" disabled={busy || !password || !selectedServer}>
                         {t("router_install")}
                       </button>
                       {busy && <Spinner size={18} />}
@@ -563,7 +564,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                 ) : (
                   <button
                     type="button"
-                    className="router-panel__action"
+                    className="router-button router-button--primary"
                     disabled={!info.supported || !accountSubscriptionUrl() || servers.length === 0}
                     onClick={() => setFormOpen(true)}
                   >
@@ -944,37 +945,33 @@ function ServerChip({
   );
 }
 
-/** Choice of a server for one device, in the bottom sheet of the subscription plans. */
-function ServerSheet({
-  deviceName,
-  servers,
-  pings,
-  onRouter,
-  canAdd,
-  limit,
-  selected,
-  onSelect,
+/**
+ * The bottom sheet of the subscription plans: blurred backdrop, slide in and
+ * out, handle, drag down to close. `children` gets `close`, which slides the
+ * sheet away and then runs `after`. While `locked`, it cannot be closed.
+ */
+function BottomSheet({
+  label,
+  heading,
+  locked = false,
   onClose,
+  className = "",
+  children,
 }: {
-  deviceName: string;
-  servers: VpnServer[];
-  pings: Map<string, number>;
-  /** Servers already on the router: choosing one does not restart the tunnels. */
-  onRouter: Set<string>;
-  /** False when the router holds as many servers as its memory allows. */
-  canAdd: boolean;
-  limit: number;
-  /** "direct" or a server id. */
-  selected: string;
-  onSelect: (choice: string) => void;
+  label: string;
+  heading: ReactNode;
+  locked?: boolean;
   onClose: () => void;
+  className?: string;
+  children: (close: (after?: () => void) => void) => ReactNode;
 }) {
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ pointerId: number; startY: number; offset: number; activated: boolean } | null>(null);
   const snapTimerRef = useRef<number | null>(null);
+  const lockedRef = useRef(locked);
+  lockedRef.current = locked;
   const { closing, requestClose } = useAnimatedDialogClose(onClose, SHEET_CLOSE_MS);
 
-  /** Closes with the slide-down; `after` runs once the sheet is gone. */
   const close = (after?: () => void) => {
     if (snapTimerRef.current !== null) window.clearTimeout(snapTimerRef.current);
     dragRef.current = null;
@@ -986,7 +983,7 @@ function ServerSheet({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
+      if (event.key === "Escape" && !lockedRef.current) close();
     };
     window.addEventListener("keydown", onKey);
     return () => {
@@ -995,7 +992,6 @@ function ServerSheet({
     };
   }, []);
 
-  // Drag down to close, as on the subscription sheet.
   const resetDrag = () => {
     const sheet = sheetRef.current;
     if (!sheet) return;
@@ -1005,7 +1001,7 @@ function ServerSheet({
     sheet.style.removeProperty("--sub-sheet-snap-duration");
   };
   const startDrag = (event: React.PointerEvent<HTMLElement>) => {
-    if (event.button !== 0 || closing || !sheetRef.current) return;
+    if (event.button !== 0 || closing || locked || !sheetRef.current) return;
     if (snapTimerRef.current !== null) window.clearTimeout(snapTimerRef.current);
     resetDrag();
     dragRef.current = { pointerId: event.pointerId, startY: event.clientY, offset: 0, activated: false };
@@ -1062,84 +1058,262 @@ function ServerSheet({
     onPointerCancel: (event: React.PointerEvent<HTMLElement>) => finishDrag(event, false),
   };
 
-  const check = (
-    <svg className="router-sheet__check" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-  const pick = (choice: string) => close(() => onSelect(choice));
-
   return (
     <div
       className={`sub-sheet-overlay ${closing ? "sub-sheet-overlay--closing" : ""}`}
       onClick={(event) => {
-        if (event.target === event.currentTarget) close();
+        if (event.target === event.currentTarget && !locked) close();
       }}
     >
       <div
         ref={sheetRef}
         role="dialog"
         aria-modal="true"
-        aria-label={`${t("router_pick_server_title")}: ${deviceName}`}
-        className={`sub-sheet router-sheet ${closing ? "sub-sheet--closing" : ""}`}
+        aria-label={label}
+        className={`sub-sheet router-sheet ${className} ${closing ? "sub-sheet--closing" : ""}`}
       >
         <div className="sub-sheet__handle" aria-hidden="true" {...dragHandlers} />
-        <button type="button" className="sub-sheet__close" onClick={() => close()} aria-label={t("close")} title={t("close")}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-          </svg>
-        </button>
-        <div className="router-sheet__heading" {...dragHandlers}>
-          <span className="router-sheet__title">{t("router_pick_server_title")}</span>
-          <span className="router-sheet__device">{deviceName}</span>
-        </div>
-        {!canAdd && <p className="router-sheet__notice">{tf("router_sheet_full", limit)}</p>}
-        <ScrollEdgeAffordance className="router-sheet__list" overlayFade>
-          <button
-            type="button"
-            className={`router-sheet__row ${selected === "direct" ? "router-sheet__row--selected" : ""}`}
-            onClick={() => pick("direct")}
-          >
-            <span className="router-sheet__flag router-sheet__flag--off">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="9" />
-                <line x1="5.6" y1="5.6" x2="18.4" y2="18.4" />
-              </svg>
-            </span>
-            <span className="router-sheet__text">
-              <span className="router-sheet__name">{t("router_no_vpn")}</span>
-              <span className="router-sheet__sub">{t("router_no_vpn_hint")}</span>
-            </span>
-            {selected === "direct" && check}
+        {!locked && (
+          <button type="button" className="sub-sheet__close" onClick={() => close()} aria-label={t("close")} title={t("close")}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
           </button>
-          {servers.map((server) => {
-            const ping = pings.get(server.id);
-            const blocked = !canAdd && !onRouter.has(server.id) && selected !== server.id;
-            return (
-              <button
-                key={server.id}
-                type="button"
-                className={`router-sheet__row ${selected === server.id ? "router-sheet__row--selected" : ""}`}
-                disabled={blocked}
-                onClick={() => pick(server.id)}
-              >
-                <span className="router-sheet__flag">{countryFlagForUi(server.country, server.name)}</span>
-                <span className="router-sheet__text">
-                  <span className="router-sheet__name">{serverDisplayName(server.name, server.country)}</span>
-                  {onRouter.has(server.id) && <span className="router-sheet__sub">{t("router_server_on_router")}</span>}
-                  {blocked && <span className="router-sheet__sub">{t("router_server_no_room")}</span>}
-                </span>
-                {ping !== undefined && (
-                  <span className="router-sheet__ping" style={{ color: ping >= 0 ? pingColor(ping) : "var(--text-muted)" }}>
-                    {ping >= 0 ? tf("router_ping_ms", ping) : t("router_ping_none")}
-                  </span>
-                )}
-                {selected === server.id && check}
-              </button>
-            );
-          })}
-        </ScrollEdgeAffordance>
+        )}
+        <div className="router-sheet__heading" {...dragHandlers}>
+          {heading}
+        </div>
+        {children(close)}
       </div>
     </div>
+  );
+}
+
+const CHECK_ICON = (
+  <svg className="router-sheet__check" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+/** Choice of a server for one device. */
+function ServerSheet({
+  deviceName,
+  servers,
+  pings,
+  onRouter,
+  canAdd,
+  limit,
+  selected,
+  onSelect,
+  onClose,
+}: {
+  deviceName: string;
+  servers: VpnServer[];
+  pings: Map<string, number>;
+  /** Servers already on the router: choosing one does not restart the tunnels. */
+  onRouter: Set<string>;
+  /** False when the router holds as many servers as its memory allows. */
+  canAdd: boolean;
+  limit: number;
+  /** "direct" or a server id. */
+  selected: string;
+  onSelect: (choice: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <BottomSheet
+      label={`${t("router_pick_server_title")}: ${deviceName}`}
+      onClose={onClose}
+      heading={
+        <>
+          <span className="router-sheet__title">{t("router_pick_server_title")}</span>
+          <span className="router-sheet__device">{deviceName}</span>
+        </>
+      }
+    >
+      {(close) => {
+        const pick = (choice: string) => close(() => onSelect(choice));
+        return (
+          <>
+            {!canAdd && <p className="router-sheet__notice">{tf("router_sheet_full", limit)}</p>}
+            <ScrollEdgeAffordance className="router-sheet__list" overlayFade>
+              <button
+                type="button"
+                className={`router-sheet__row ${selected === "direct" ? "router-sheet__row--selected" : ""}`}
+                onClick={() => pick("direct")}
+              >
+                <span className="router-sheet__flag router-sheet__flag--off">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" />
+                    <line x1="5.6" y1="5.6" x2="18.4" y2="18.4" />
+                  </svg>
+                </span>
+                <span className="router-sheet__text">
+                  <span className="router-sheet__name">{t("router_no_vpn")}</span>
+                  <span className="router-sheet__sub">{t("router_no_vpn_hint")}</span>
+                </span>
+                {selected === "direct" && CHECK_ICON}
+              </button>
+              {servers.map((server) => {
+                const ping = pings.get(server.id);
+                const blocked = !canAdd && !onRouter.has(server.id) && selected !== server.id;
+                return (
+                  <button
+                    key={server.id}
+                    type="button"
+                    className={`router-sheet__row ${selected === server.id ? "router-sheet__row--selected" : ""}`}
+                    disabled={blocked}
+                    onClick={() => pick(server.id)}
+                  >
+                    <span className="router-sheet__flag">{countryFlagForUi(server.country, server.name)}</span>
+                    <span className="router-sheet__text">
+                      <span className="router-sheet__name">{serverDisplayName(server.name, server.country)}</span>
+                      {onRouter.has(server.id) && <span className="router-sheet__sub">{t("router_server_on_router")}</span>}
+                      {blocked && <span className="router-sheet__sub">{t("router_server_no_room")}</span>}
+                    </span>
+                    {ping !== undefined && (
+                      <span className="router-sheet__ping" style={{ color: ping >= 0 ? pingColor(ping) : "var(--text-muted)" }}>
+                        {ping >= 0 ? tf("router_ping_ms", ping) : t("router_ping_none")}
+                      </span>
+                    )}
+                    {selected === server.id && CHECK_ICON}
+                  </button>
+                );
+              })}
+            </ScrollEdgeAffordance>
+          </>
+        );
+      }}
+    </BottomSheet>
+  );
+}
+
+type StepState = "pending" | "active" | "done" | "failed";
+
+/**
+ * Removing ToBeVPN: a question, then each step with its spinner, then the
+ * result, all in one sheet. The router is also taken off the account, so it
+ * no longer takes a device of the subscription.
+ */
+function UninstallSheet({
+  link,
+  hwid,
+  onClose,
+  onRemoved,
+}: {
+  link: RouterLink;
+  hwid: string | null;
+  onClose: () => void;
+  /** After "Done": the screen goes back to the router without ToBeVPN. */
+  onRemoved: () => void;
+}) {
+  const [phase, setPhase] = useState<"confirm" | "working" | "done" | "failed">("confirm");
+  const [steps, setSteps] = useState<StepState[]>(["pending", "pending"]);
+  const [error, setError] = useState<string | null>(null);
+  const removedRef = useRef(false);
+
+  const setStep = (index: number, state: StepState) =>
+    setSteps((current) => current.map((value, position) => (position === index ? state : value)));
+
+  const run = async () => {
+    setPhase("working");
+    setError(null);
+    try {
+      if (!removedRef.current) {
+        setStep(0, "active");
+        await routerControl(link, "uninstall");
+        removedRef.current = true;
+        setStep(0, "done");
+      }
+      setStep(1, "active");
+      await unlinkRouterFromAccount(hwid);
+      setStep(1, "done");
+      setPhase("done");
+    } catch (failure) {
+      setSteps((current) => current.map((value) => (value === "active" ? "failed" : value)));
+      setError(routerErrorText(failure));
+      setPhase("failed");
+    }
+  };
+
+  const finish = (close: (after?: () => void) => void) =>
+    close(() => {
+      if (removedRef.current) onRemoved();
+    });
+
+  const labels = [t("router_uninstall_step_router"), t("router_uninstall_step_account")];
+
+  return (
+    <BottomSheet
+      label={t("router_uninstall")}
+      locked={phase === "working"}
+      onClose={() => {
+        onClose();
+        if (removedRef.current) onRemoved();
+      }}
+      heading={
+        <span className="router-sheet__title">
+          {phase === "done" ? t("router_uninstall_done_title") : t("router_uninstall")}
+        </span>
+      }
+    >
+      {(close) => (
+        <div className="router-uninstall-sheet">
+          {phase === "confirm" ? (
+            <p className="router-uninstall-sheet__text">{t("router_uninstall_explain")}</p>
+          ) : phase === "done" ? (
+            <div className="router-uninstall-sheet__done">
+              <span className="router-uninstall-sheet__done-icon">{CHECK_ICON}</span>
+              <p className="router-uninstall-sheet__text">{t("router_uninstall_done_text")}</p>
+            </div>
+          ) : (
+            <ul className="router-uninstall-sheet__steps">
+              {labels.map((label, index) => (
+                <li key={label} className={`router-uninstall-sheet__step router-uninstall-sheet__step--${steps[index]}`}>
+                  <span className="router-uninstall-sheet__mark" aria-hidden="true">
+                    {steps[index] === "active" ? (
+                      <span className="router-traffic__spinner" />
+                    ) : steps[index] === "done" ? (
+                      CHECK_ICON
+                    ) : steps[index] === "failed" ? (
+                      "!"
+                    ) : null}
+                  </span>
+                  {label}
+                </li>
+              ))}
+            </ul>
+          )}
+          {error && <p className="router-uninstall-sheet__error">{error}</p>}
+          <div className="router-bottom__buttons">
+            {phase === "confirm" && (
+              <>
+                <button type="button" className="router-button" onClick={() => close()}>
+                  {t("cancel")}
+                </button>
+                <button type="button" className="router-button router-button--danger-solid" onClick={() => void run()}>
+                  {t("router_uninstall_yes")}
+                </button>
+              </>
+            )}
+            {phase === "failed" && (
+              <>
+                <button type="button" className="router-button" onClick={() => finish(close)}>
+                  {t("close")}
+                </button>
+                <button type="button" className="router-button router-button--danger-solid" onClick={() => void run()}>
+                  {t("router_retry")}
+                </button>
+              </>
+            )}
+            {phase === "done" && (
+              <button type="button" className="router-button router-button--primary" onClick={() => finish(close)}>
+                {t("router_done")}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </BottomSheet>
   );
 }

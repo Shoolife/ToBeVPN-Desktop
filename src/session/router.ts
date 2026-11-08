@@ -9,7 +9,7 @@ import { SUBSCRIPTION_BASE_URL } from "../api/config";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { getSession } from "./store";
 import type { ServerVpnConfig } from "./vpn";
-import { getCachedVpnServers } from "./auth";
+import { fetchDevices, getCachedVpnServers, unlinkOtherDevice } from "./auth";
 
 export interface RouterInfo {
   /** Default gateway, e.g. "192.168.1.1"; null without a network. */
@@ -368,6 +368,20 @@ export async function routerStatus(link: RouterLink): Promise<RouterStatus> {
   const status = await invoke<RouterStatus>("router_status", { host: link.host, user: link.user });
   if (status.installed) remember(link, status);
   return status;
+}
+
+/**
+ * Takes the router's device off the account, so it no longer takes a device
+ * of the subscription. Nothing to do when the account does not list it.
+ */
+export async function unlinkRouterFromAccount(hwid: string | null | undefined): Promise<void> {
+  if (!hwid) return;
+  const data = await fetchDevices();
+  const wanted = hwid.toLowerCase();
+  const device = data?.devices.find(
+    (item) => (item.hwid ?? "").toLowerCase() === wanted || item.device_id.toLowerCase() === wanted,
+  );
+  if (device) await unlinkOtherDevice(device.device_id);
 }
 
 export type RouterAction = "start" | "stop" | "restart" | "autostart-on" | "autostart-off" | "uninstall";

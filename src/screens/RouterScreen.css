@@ -820,3 +820,142 @@
 @keyframes router-traffic-spin {
   to { transform: rotate(360deg); }
 }
+
+.router-button--primary {
+  flex: 1 1 auto;
+  width: 100%;
+  border-color: transparent;
+  background: var(--cta-bg);
+  color: var(--cta-text);
+}
+
+.router-button--primary:hover:not(:disabled) {
+  background: var(--cta-bg);
+  filter: brightness(1.08);
+}
+
+.router-button--danger-solid {
+  border-color: transparent;
+  background: var(--danger);
+  color: #fff;
+}
+
+.router-button--danger-solid:hover:not(:disabled) {
+  background: var(--danger);
+  filter: brightness(1.08);
+}
+
+/* The install form's submit: the button takes the row, the spinner and
+   step text go under it. */
+.router-form .router-actions {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* Removing ToBeVPN, in a bottom sheet */
+.router-uninstall-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 24px 24px;
+}
+
+.router-uninstall-sheet__text {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.router-uninstall-sheet__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.router-uninstall-sheet__step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.router-uninstall-sheet__step--active,
+.router-uninstall-sheet__step--done {
+  color: var(--text);
+}
+
+.router-uninstall-sheet__step--failed {
+  color: var(--danger);
+}
+
+.router-uninstall-sheet__mark {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 2px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+  border-radius: 50%;
+  font-weight: 700;
+}
+
+.router-uninstall-sheet__step--active .router-uninstall-sheet__mark {
+  border: 0;
+}
+
+.router-uninstall-sheet__step--done .router-uninstall-sheet__mark {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.router-uninstall-sheet__step--done .router-sheet__check {
+  width: 14px;
+  height: 14px;
+  color: var(--success);
+}
+
+.router-uninstall-sheet__step--failed .router-uninstall-sheet__mark {
+  border-color: var(--danger);
+}
+
+.router-uninstall-sheet__done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.router-uninstall-sheet__done-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  animation: router-done-pop 320ms cubic-bezier(0.2, 0.8, 0.2, 1.2);
+}
+
+.router-uninstall-sheet__done-icon .router-sheet__check {
+  width: 28px;
+  height: 28px;
+  color: var(--success);
+}
+
+.router-uninstall-sheet__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+@keyframes router-done-pop {
+  from { transform: scale(0.6); opacity: 0; }
+}
