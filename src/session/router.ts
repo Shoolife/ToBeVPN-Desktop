@@ -399,9 +399,47 @@ export async function setRouterDefaultMode(
   return invoke<RouterStatus>("router_set_default_mode", { host: link.host, user: link.user, mode });
 }
 
-/** Name to show for a home device. */
-export function routerDeviceLabel(device: RouterDevice): string {
-  return device.name || device.hostname || device.mac.toUpperCase();
+// Names home devices announce over UPnP ("[LG] webOS TV UJ630V" where DHCP
+// only says "LGwebOSTV"), kept by MAC so a device that is off keeps its name.
+const LAN_NAMES_KEY = "tobevpn_router_lan_names_v1";
+
+export function cachedLanNames(): Record<string, string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LAN_NAMES_KEY) ?? "{}") as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Asks the home network for the names its devices announce, sent from this
+ * computer's address there. Returns the names by MAC, merged with earlier ones.
+ */
+export async function discoverLanNames(
+  localIp: string,
+  devices: RouterDevice[],
+): Promise<Record<string, string>> {
+  const names = cachedLanNames();
+  if (!ROUTER_SECTION_AVAILABLE || isBrowserPreviewRuntime()) return names;
+  const byIp = await invoke<Record<string, { friendlyName: string }>>("lan_device_names", { localIp }).catch(
+    () => ({}) as Record<string, { friendlyName: string }>,
+  );
+  for (const device of devices) {
+    const found = device.ip ? byIp[device.ip]?.friendlyName : undefined;
+    if (found) names[device.mac] = found;
+  }
+  try {
+    localStorage.setItem(LAN_NAMES_KEY, JSON.stringify(names));
+  } catch {
+    // Asked again next time.
+  }
+  return names;
+}
+
+/** Name to show for a home device: the owner's, the announced one, DHCP's, the MAC. */
+export function routerDeviceLabel(device: RouterDevice, lanNames: Record<string, string> = {}): string {
+  return device.name || lanNames[device.mac] || device.hostname || device.mac.toUpperCase();
 }
 
 /**

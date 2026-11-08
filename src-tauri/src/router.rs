@@ -86,10 +86,154 @@ fn page_title(page: &str) -> Option<String> {
     Some(model.to_string())
 }
 
+// ------------------------------------------------------- device names ---
+
+/// What a home device says about itself over UPnP (SSDP): smart TVs, set-top
+/// boxes and media players announce a readable name, while DHCP only carries
+/// a short host name such as "LGwebOSTV".
+#[derive(Serialize, Default, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LanName {
+    pub friendly_name: String,
+    pub manufacturer: String,
+    pub model: String,
+}
+
+const SSDP_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
+const SSDP_LISTEN: Duration = Duration::from_millis(2500);
+
+/// Names announced by devices of the home network, by IPv4 address.
+/// `local_ip` is this computer's address in that network: the search is
+/// sent from it, so it reaches the home network and not a VPN tunnel.
+#[tauri::command]
+pub async fn lan_device_names(local_ip: String) -> std::collections::HashMap<String, LanName> {
+    let mut names = std::collections::HashMap::new();
+    let Ok(local) = local_ip.parse::<Ipv4Addr>() else {
+        return names;
+    };
+    let answers = tokio::task::spawn_blocking(move || ssdp_search(local))
+        .await
+        .unwrap_or_default();
+    let interface = default_gateway().and_then(|(_, interface)| interface);
+    for (ip, location) in answers {
+        if names.contains_key(&ip.to_string()) {
+            continue;
+        }
+        let Some((port, path)) = location_on(&location, ip) else {
+            continue;
+        };
+        let Some(page) = http_get_at(ip, port, interface.as_deref(), &path).await else {
+            continue;
+        };
+        let name = LanName {
+            friendly_name: xml_tag(&page, "friendlyName"),
+            manufacturer: xml_tag(&page, "manufacturer"),
+            model: xml_tag(&page, "modelName"),
+        };
+        if !name.friendly_name.is_empty() {
+            names.insert(ip.to_string(), name);
+        }
+    }
+    names
+}
+
+/// SSDP M-SEARCH from `local`; each answer's address and description URL.
+fn ssdp_search(local: Ipv4Addr) -> Vec<(Ipv4Addr, String)> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let mut answers = Vec::new();
+    let Ok(socket) = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)) else {
+        return answers;
+    };
+    if socket.bind(&SocketAddr::from((local, 0)).into()).is_err()
+        || socket.set_multicast_if_v4(&local).is_err()
+    {
+        return answers;
+    }
+    let _ = socket.set_multicast_ttl_v4(2);
+    let socket: std::net::UdpSocket = socket.into();
+    let request = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n";
+    if socket
+        .send_to(request.as_bytes(), SocketAddr::from((SSDP_ADDR, 1900)))
+        .is_err()
+    {
+        return answers;
+    }
+    let deadline = std::time::Instant::now() + SSDP_LISTEN;
+    let mut buffer = [0u8; 2048];
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        if left.is_zero() || socket.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        let Ok((read, from)) = socket.recv_from(&mut buffer) else {
+            break;
+        };
+        let std::net::SocketAddr::V4(from) = from else {
+            continue;
+        };
+        if !from.ip().is_private() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&buffer[..read]);
+        if let Some(location) = text.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case("location")
+                .then(|| value.trim().to_string())
+        }) {
+            answers.push((*from.ip(), location));
+        }
+    }
+    answers
+}
+
+/// Port and path of a description URL served by the answering device
+/// itself; any other host is ignored.
+fn location_on(location: &str, ip: Ipv4Addr) -> Option<(u16, String)> {
+    let rest = location.strip_prefix("http://")?;
+    let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse().ok()?),
+        None => (host_port, 80),
+    };
+    (host.parse::<Ipv4Addr>().ok()? == ip).then(|| (port, format!("/{path}")))
+}
+
+fn xml_tag(page: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    page.find(&open)
+        .and_then(|start| {
+            let value = &page[start + open.len()..];
+            value.find(&close).map(|end| &value[..end])
+        })
+        .map(|value| {
+            value
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(80)
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
 /// One HTTP/1.0 GET to the router. On Linux the socket is bound to the
 /// physical interface, so the request reaches the router even while an
 /// older tunnel setup sends local networks into the VPN.
 async fn http_get(gateway: Ipv4Addr, interface: Option<&str>, path: &str) -> Option<String> {
+    http_get_at(gateway, 80, interface, path).await
+}
+
+async fn http_get_at(
+    gateway: Ipv4Addr,
+    port: u16,
+    interface: Option<&str>,
+    path: &str,
+) -> Option<String> {
     let socket = TcpSocket::new_v4().ok()?;
     #[cfg(target_os = "linux")]
     if let Some(interface) = interface {
@@ -99,12 +243,13 @@ async fn http_get(gateway: Ipv4Addr, interface: Option<&str>, path: &str) -> Opt
     let _ = interface;
     let mut stream = timeout(
         HTTP_TIMEOUT,
-        socket.connect(SocketAddr::from((gateway, 80))),
+        socket.connect(SocketAddr::from((gateway, port))),
     )
     .await
     .ok()?
     .ok()?;
-    let request = format!("GET {path} HTTP/1.0\r\nHost: {gateway}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET {path} HTTP/1.0\r\nHost: {gateway}:{port}\r\nConnection: close\r\n\r\n");
     timeout(HTTP_TIMEOUT, stream.write_all(request.as_bytes()))
         .await
         .ok()?
@@ -214,5 +359,26 @@ mod tests {
             parse_proc_net_route(table),
             Some((Ipv4Addr::new(192, 168, 2, 1), "eth0".to_string()))
         );
+    }
+}
+
+#[cfg(test)]
+mod lan_name_tests {
+    use super::*;
+
+    #[test]
+    fn reads_description_url_and_names() {
+        let ip = Ipv4Addr::new(192, 168, 1, 139);
+        assert_eq!(
+            location_on("http://192.168.1.139:1528/desc.xml", ip),
+            Some((1528, "/desc.xml".to_string()))
+        );
+        assert_eq!(location_on("http://10.0.0.5:80/x.xml", ip), None);
+        assert_eq!(location_on("https://192.168.1.139/x.xml", ip), None);
+        let page = "<root><device><friendlyName>[LG] webOS TV UJ630V</friendlyName>\
+                    <manufacturer>LG Electronics</manufacturer><modelName>LG TV</modelName></device></root>";
+        assert_eq!(xml_tag(page, "friendlyName"), "[LG] webOS TV UJ630V");
+        assert_eq!(xml_tag(page, "modelName"), "LG TV");
+        assert_eq!(xml_tag(page, "serialNumber"), "");
     }
 }

@@ -1181,6 +1181,7 @@ pub fn run() {
             router_agent::router_set_device,
             router_agent::router_set_default_mode,
             router_agent::router_set_name,
+            router::lan_device_names,
             router_agent::router_traffic,
             server_probe::probe_server_profiles,
             server_probe::cancel_server_probe,

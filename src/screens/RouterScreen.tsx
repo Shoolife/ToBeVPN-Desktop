@@ -27,6 +27,8 @@ import {
   refreshRouterTraffic,
   routerTrafficBetween,
   routerDeviceLabel,
+  cachedLanNames,
+  discoverLanNames,
   ROUTER_MAX_SERVERS,
   routerServerLimit,
   routerDevices,
@@ -659,13 +661,20 @@ function HomeNetwork({
 }) {
   const [savingMac, setSavingMac] = useState<string | null>(null);
   const [pickingMac, setPickingMac] = useState<string | null>(null);
+  const [lanNames, setLanNames] = useState<Record<string, string>>(cachedLanNames);
   const migratingRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
     routerDevices(link)
       .then((next) => {
-        if (alive) onNetwork(next);
+        if (!alive) return;
+        onNetwork(next);
+        if (status.clientIp) {
+          void discoverLanNames(status.clientIp, next.devices).then((names) => {
+            if (alive) setLanNames(names);
+          });
+        }
       })
       .catch((error) => {
         if (!alive) return;
@@ -774,7 +783,7 @@ function HomeNetwork({
               >
                 <div className="router-device__info">
                   <div className="router-device__name router-device__name--static">
-                    <span className="router-device__label">{routerDeviceLabel(device)}</span>
+                    <span className="router-device__label">{routerDeviceLabel(device, lanNames)}</span>
                     {isThis && <span className="visually-hidden">{` · ${t("router_this_computer")}`}</span>}
                   </div>
                   <span className={`router-device__meta ${serverDown ? "router-device__meta--warn" : ""}`}>
@@ -800,7 +809,7 @@ function HomeNetwork({
       )}
       {picking && network && (
         <ServerSheet
-          deviceName={routerDeviceLabel(picking)}
+          deviceName={routerDeviceLabel(picking, lanNames)}
           servers={servers}
           pings={pings}
           onRouter={new Set(network.slots.map((item) => item.serverId))}
