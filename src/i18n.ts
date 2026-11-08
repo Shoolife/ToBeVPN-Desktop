@@ -104,6 +104,10 @@ const strings = {
 
     // Connection states
     state_disconnected: "Отключено",
+    state_router_vpn: "VPN на роутере",
+    home_router_vpn_hint: "Этот компьютер уже идёт через VPN роутера ({0}). Дома включать VPN в приложении не обязательно.",
+    home_router_vpn_hint_plain: "Этот компьютер уже идёт через VPN роутера. Дома включать VPN в приложении не обязательно.",
+    home_router_vpn_turn_off: "Выключить",
     state_connecting: "Подключение…",
     state_disconnecting: "Отключение…",
     state_connected: "Подключено",
@@ -979,6 +983,10 @@ const strings = {
 
     // Connection states
     state_disconnected: "Disconnected",
+    state_router_vpn: "VPN on the router",
+    home_router_vpn_hint: "This computer already goes through the router's VPN ({0}). The VPN in the app is not needed at home.",
+    home_router_vpn_hint_plain: "This computer already goes through the router's VPN. The VPN in the app is not needed at home.",
+    home_router_vpn_turn_off: "Turn off",
     state_connecting: "Connecting…",
     state_disconnecting: "Disconnecting…",
     state_connected: "Connected",

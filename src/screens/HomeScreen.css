@@ -319,6 +319,50 @@
   color: var(--text-muted);
 }
 
+/* The home router already sends this computer through the VPN */
+.home__status-sub {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.home-router-hint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 420px;
+  margin-top: 10px;
+  padding: 10px 10px 10px 14px;
+  border-radius: 14px;
+  background: var(--surface);
+  text-align: left;
+}
+
+.home-router-hint__text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.home-router-hint__btn {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.home-router-hint__btn:hover {
+  background: var(--surface-2);
+}
+
 .home__vpn-error {
   font-size: 13px;
   color: var(--danger);

@@ -47,6 +47,7 @@ import {
 } from "../session/subscriptionReminderSnooze";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
+import { useRouterProtection } from "../session/useRouterProtection";
 import MaterialIcon from "../components/MaterialIcon";
 import { dismissPaymentSuccess, usePaymentSuccessVisible } from "../session/notifications";
 import { getCachedProfileDelays } from "../session/serverProbe";
@@ -594,19 +595,25 @@ export default function HomeScreen({
     void startConnection();
   }, [autostartConnectRequested]);
 
+  // The home router may already send this computer through the VPN.
+  const routerVpn = useRouterProtection();
+  const routerOnly = routerVpn.active && !connected && !activating && !disconnecting;
+
   const statusText = activating
     ? t("state_connecting")
     : disconnecting
       ? t("state_disconnecting")
     : connected
       ? t("state_connected")
-      : t("state_disconnected");
+      : routerOnly
+        ? t("state_router_vpn")
+        : t("state_disconnected");
 
   const statusClass = activating
     ? "home__status-label--connecting"
     : disconnecting
       ? "home__status-label--disconnecting"
-    : connected
+    : connected || routerOnly
       ? "home__status-label--on"
       : "";
 
@@ -657,6 +664,21 @@ export default function HomeScreen({
             </svg>
           </button>
           <div className={`home__status-label ${statusClass}`}>{statusText}</div>
+          {routerOnly && routerVpn.serverName && (
+            <div className="home__status-sub">{routerVpn.serverName}</div>
+          )}
+          {connected && routerVpn.active && (
+            <div className="home-router-hint">
+              <span className="home-router-hint__text">
+                {routerVpn.serverName
+                  ? tf("home_router_vpn_hint", routerVpn.serverName)
+                  : t("home_router_vpn_hint_plain")}
+              </span>
+              <button type="button" className="home-router-hint__btn" onClick={handleToggle}>
+                {t("home_router_vpn_turn_off")}
+              </button>
+            </div>
+          )}
           {vpnError && !subscriptionUsageBlocked && (
             <div className="home__vpn-error">{vpnError}</div>
           )}
