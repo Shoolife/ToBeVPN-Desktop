@@ -389,3 +389,29 @@
 .router-card__name:hover .router-card__pencil {
   opacity: 1;
 }
+
+.router-device__name--static {
+  cursor: default;
+}
+
+/* This computer: the row itself is marked, not a tag beside the name. */
+.router-device--this {
+  margin: 2px -10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.router-device--this + .router-device {
+  border-top-color: transparent;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

@@ -10,7 +10,6 @@ import {
 } from "../session/stats";
 import { routerTrafficBetween } from "../session/router";
 import { useRouterTraffic } from "../session/useRouterTraffic";
-import { RouterIcon } from "./RouterScreen";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import "./StatsScreen.css";
 
@@ -117,24 +116,30 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
     };
   }, [period]);
 
-  const totalBytes = stats.reduce((s, st) => s + st.totalBytes, 0);
-  const totalSessions = stats.reduce((s, st) => s + st.sessions, 0);
-  const totalSeconds = stats.reduce((s, st) => s + st.totalSeconds, 0);
-  const avgPerSession = totalSessions > 0 ? Math.floor(totalBytes / totalSessions) : 0;
-
-  const maxBytes = Math.max(...stats.map((s) => s.totalBytes), 1);
-  const maxIndex = stats.findIndex((s) => s.totalBytes === maxBytes && maxBytes > 0);
-
-  const nonZeroStats = stats.filter((s) => s.totalBytes > 0);
-  const maxRowBytes = nonZeroStats.length > 0 ? Math.max(...nonZeroStats.map((s) => s.totalBytes)) : 1;
-
-  // The home network's VPN traffic through the router, in the same slots.
+  // With a linked router, its traffic (the whole home network) joins this
+  // computer's in the total, the chart and the rows; without one the screen
+  // is unchanged.
   const routerTraffic = useRouterTraffic(60_000);
-  const routerSlots = routerTraffic.linked
+  const withRouter = routerTraffic.linked;
+  const routerSlots = withRouter
     ? periodRanges(period).map(([start, end]) => routerTrafficBetween(routerTraffic.hours, start, end))
     : [];
+  const routerAt = (index: number) => routerSlots[index] ?? 0;
   const routerTotal = routerSlots.reduce((sum, bytes) => sum + bytes, 0);
-  const routerMax = Math.max(...routerSlots, 1);
+  const computerBytes = stats.reduce((s, st) => s + st.totalBytes, 0);
+  const totalBytes = computerBytes + routerTotal;
+  const totalSessions = stats.reduce((s, st) => s + st.sessions, 0);
+  const totalSeconds = stats.reduce((s, st) => s + st.totalSeconds, 0);
+  const avgPerSession = totalSessions > 0 ? Math.floor(computerBytes / totalSessions) : 0;
+
+  const slotBytes = stats.map((s, i) => s.totalBytes + routerAt(i));
+  const maxBytes = Math.max(...slotBytes, 1);
+  const maxIndex = slotBytes.findIndex((bytes) => bytes === maxBytes && maxBytes > 0);
+
+  const nonZeroStats = stats
+    .map((stat, index) => ({ stat, router: routerAt(index), bytes: slotBytes[index] }))
+    .filter((row) => row.bytes > 0);
+  const maxRowBytes = nonZeroStats.length > 0 ? Math.max(...nonZeroStats.map((row) => row.bytes)) : 1;
 
   const periodLabel =
     period === "day" ? t("stats_today_by_hour")
@@ -166,7 +171,19 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
               <div className="stats-hero__sublabel">{t("stats_your_stats")}</div>
             </div>
           </div>
-          <div className="stats-hero__total">{formatBytes(totalBytes)}</div>
+          <div className={`stats-hero__total ${withRouter ? "stats-hero__total--split" : ""}`}>{formatBytes(totalBytes)}</div>
+          {withRouter && (
+            <div className="stats-hero__split">
+              <span className="stats-hero__split-item">
+                <span className="stats-legend__dot" />
+                {t("stats_this_computer")} {formatBytes(computerBytes)}
+              </span>
+              <span className="stats-hero__split-item">
+                <span className="stats-legend__dot stats-legend__dot--router" />
+                {t("stats_router_title")} {formatBytes(routerTotal)}
+              </span>
+            </div>
+          )}
           <div className="stats-hero__metrics">
             <div className="stats-hero__metric">
               <svg className="stats-hero__metric-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -210,26 +227,10 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
           ))}
         </div>
 
-        {routerTraffic.linked && (
-          <div className="stats-router">
-            <div className="stats-router__top">
-              <span className="stats-router__icon"><RouterIcon size={20} /></span>
-              <div className="stats-router__text">
-                <div className="stats-router__title">{t("stats_router_title")}</div>
-                <div className="stats-router__subtitle">{t("stats_router_subtitle")}</div>
-              </div>
-              <div className="stats-router__total">{formatBytes(routerTotal)}</div>
-            </div>
-            <div className="stats-router__bars" aria-hidden="true">
-              {routerSlots.map((bytes, index) => (
-                <div key={index} className="stats-router__bar-wrapper">
-                  <div
-                    className="stats-router__bar"
-                    style={{ height: animated ? `${Math.max((bytes / routerMax) * 100, bytes > 0 ? 4 : 0)}%` : "0%" }}
-                  />
-                </div>
-              ))}
-            </div>
+        {withRouter && (
+          <div className="stats-legend">
+            <span className="stats-legend__item"><span className="stats-legend__dot" />{t("stats_this_computer")}</span>
+            <span className="stats-legend__item"><span className="stats-legend__dot stats-legend__dot--router" />{t("stats_router_legend")}</span>
           </div>
         )}
 
@@ -249,12 +250,19 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
             <div className="stats-chart__bars">
               {stats.map((slot, i) => {
                 const frac = slot.totalBytes / maxBytes;
+                const routerFrac = routerAt(i) / maxBytes;
                 const label = formatSlotLabel(slot.period, period, i);
                 const isMax = i === maxIndex && maxBytes > 0;
                 return (
                   <div key={i} className="stats-chart__bar-wrapper">
+                    {withRouter && (
+                      <div
+                        className={`stats-chart__bar stats-chart__bar--router ${frac > 0 ? "stats-chart__bar--stacked" : ""}`}
+                        style={{ height: animated ? `${Math.max(routerFrac * 100, routerFrac > 0 ? 2 : 0)}%` : "0%" }}
+                      />
+                    )}
                     <div
-                      className={`stats-chart__bar ${isMax ? "stats-chart__bar--max" : ""}`}
+                      className={`stats-chart__bar ${isMax && !withRouter ? "stats-chart__bar--max" : ""} ${withRouter && routerFrac > 0 ? "stats-chart__bar--under" : ""}`}
                       style={{ height: animated ? `${Math.max(frac * 100, frac > 0 ? 2 : 0)}%` : "0%" }}
                     >
                       {label && <span className="stats-chart__bar-label">{label}</span>}
@@ -270,16 +278,23 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
         <div className="stats-section-title">{periodLabel}</div>
 
         {/* Stat rows */}
-        {nonZeroStats.map((stat, i) => {
-          const fraction = stat.totalBytes / maxRowBytes;
+        {nonZeroStats.map(({ stat, router, bytes }, i) => {
+          const fraction = bytes / maxRowBytes;
           return (
             <div key={i} className="stats-row">
               <div className="stats-row__top">
                 <span className="stats-row__period">{formatRowLabel(stat.period, period)}</span>
-                <span className="stats-row__bytes">{formatBytes(stat.totalBytes)}</span>
+                <span className="stats-row__bytes">{formatBytes(bytes)}</span>
               </div>
               <div className="stats-row__detail">
-                {stat.sessions} {t("stats_sessions_short")}  &bull;  {formatTime(stat.totalSeconds)}
+                {[
+                  stat.sessions > 0 || stat.totalSeconds > 0
+                    ? `${stat.sessions} ${t("stats_sessions_short")}  \u2022  ${formatTime(stat.totalSeconds)}`
+                    : null,
+                  withRouter && router > 0 ? `${t("stats_router_short")} ${formatBytes(router)}` : null,
+                ]
+                  .filter(Boolean)
+                  .join("  \u2022  ")}
               </div>
               <div className="stats-row__bar-bg">
                 <div className="stats-row__bar-fill" style={{ width: `${fraction * 100}%` }} />

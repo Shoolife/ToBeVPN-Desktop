@@ -47,7 +47,6 @@ import {
 } from "../session/subscriptionReminderSnooze";
 import type { SelectedServer } from "../App";
 import "./HomeScreen.css";
-import { RouterIcon } from "./RouterScreen";
 import { useRouterTraffic } from "../session/useRouterTraffic";
 import { routerTrafficBetween } from "../session/router";
 import { periodRanges } from "../session/stats";
@@ -779,16 +778,13 @@ export default function HomeScreen({
               <div className="home-session__value">{formatElapsed(elapsed)}</div>
               <div className="home-session__label">{t("session_time")}</div>
             </div>
+            {routerTraffic.linked && (
+              <div className="home-session__metric">
+                <div className="home-session__value">{formatSessionBytes(routerToday)}</div>
+                <div className="home-session__label">{t("home_router_today")}</div>
+              </div>
+            )}
           </div>
-          {routerTraffic.linked && (
-            <div className="home-session__router">
-              <span className="home-session__router-label">
-                <RouterIcon size={16} />
-                {t("home_router_today")}
-              </span>
-              <span className="home-session__router-value">{formatSessionBytes(routerToday)}</span>
-            </div>
-          )}
         </div>
 
         {/* Speed test card */}

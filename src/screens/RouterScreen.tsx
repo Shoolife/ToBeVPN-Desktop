@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { formatDecimal, t, tf, type StringKey } from "../i18n";
+import { t, tf, type StringKey } from "../i18n";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { getCachedVpnServers, isAvailableVpnServer, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
-import { periodRanges } from "../session/stats";
-import { useRouterTraffic } from "../session/useRouterTraffic";
 import { serverProfileConfig } from "../session/vpn";
 import {
   accountSubscriptionUrl,
@@ -22,7 +20,6 @@ import {
   setRouterServers,
   setRouterName,
   refreshRouterTraffic,
-  routerTrafficBetween,
   routerDeviceLabel,
   ROUTER_EXTRA_SLOTS,
   routerDevices,
@@ -136,11 +133,6 @@ function InstallLog({ lines, open, onToggle }: { lines: InstallLogLine[]; open: 
   );
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 ** 3) return `${formatDecimal(bytes / 1024 ** 3, 1)} ${t("unit_gb")}`;
-  return `${Math.round(bytes / 1024 ** 2)} ${t("unit_mb")}`;
-}
-
 /** Server name with its ping; the router reaches servers the way this computer does. */
 function serverLabel(server: VpnServer, pings: Map<string, number>): string {
   const ping = pings.get(server.id);
@@ -211,15 +203,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [pings, setPings] = useState<Map<string, number>>(new Map());
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
-  const routerTraffic = useRouterTraffic(60_000);
-  const dayRanges = periodRanges("day");
-  const monthRanges = periodRanges("month");
-  const trafficToday = routerTrafficBetween(routerTraffic.hours, dayRanges[0][0], dayRanges[dayRanges.length - 1][1]);
-  const trafficMonth = routerTrafficBetween(
-    routerTraffic.hours,
-    monthRanges[0][0],
-    monthRanges[monthRanges.length - 1][1],
-  );
   const generationRef = useRef(0);
 
   const load = async (refresh: boolean) => {
@@ -421,7 +404,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                 <button
                   type="button"
                   className="router-device__name router-card__name"
-                  title={t("router_rename_hint")}
+                  aria-label={t("router_rename_hint")}
                   disabled={busy}
                   onClick={() => {
                     setNameDraft(status?.name ?? "");
@@ -479,26 +462,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     ))}
                   </select>
                 </label>
-                <div className="router-row">
-                  <span>{t("router_traffic_today")}</span>
-                  <span className="router-row__value">{formatBytes(trafficToday)}</span>
-                </div>
-                <div className="router-row">
-                  <span>{t("router_traffic_month")}</span>
-                  <span className="router-row__value">{formatBytes(trafficMonth)}</span>
-                </div>
-                {status.xrayMemoryKb !== null && status.memoryAvailableKb !== null && (
-                  <div className="router-row">
-                    <span>{t("router_memory")}</span>
-                    <span className="router-row__value">
-                      {tf(
-                        "router_memory_value",
-                        Math.round(status.xrayMemoryKb / 1024),
-                        Math.round(status.memoryAvailableKb / 1024),
-                      )}
-                    </span>
-                  </div>
-                )}
                 <button
                   type="button"
                   className="router-row router-row--toggle"
@@ -699,8 +662,6 @@ function HomeNetwork({
   onError: (message: string | null) => void;
 }) {
   const [savingMac, setSavingMac] = useState<string | null>(null);
-  const [editingMac, setEditingMac] = useState<string | null>(null);
-  const [nameDraft, setNameDraft] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -769,7 +730,6 @@ function HomeNetwork({
       onError(message.includes("slots-full") ? tf("router_slots_full", ROUTER_EXTRA_SLOTS) : routerErrorText(error));
     } finally {
       setSavingMac(null);
-      setEditingMac(null);
     }
   };
 
@@ -815,41 +775,16 @@ function HomeNetwork({
               ? network.slots.find((item) => item.slot === device.slot)
               : null;
             return (
-              <div key={device.mac} className={`router-device ${device.online ? "" : "router-device--offline"}`}>
+              <div
+                key={device.mac}
+                className={`router-device ${device.online ? "" : "router-device--offline"} ${isThis ? "router-device--this" : ""}`}
+                title={isThis ? t("router_this_computer") : undefined}
+              >
                 <div className="router-device__info">
-                  {editingMac === device.mac ? (
-                    <form
-                      className="router-device__rename"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        void save(device, choice, nameDraft.trim() || null);
-                      }}
-                    >
-                      <input
-                        value={nameDraft}
-                        maxLength={40}
-                        autoFocus
-                        disabled={busy}
-                        onChange={(event) => setNameDraft(event.target.value)}
-                        placeholder={device.hostname ?? ""}
-                      />
-                      <button type="submit" className="router-link" disabled={busy}>{t("router_rename_save")}</button>
-                    </form>
-                  ) : (
-                    <button
-                      type="button"
-                      className="router-device__name"
-                      disabled={busy}
-                      title={t("router_rename")}
-                      onClick={() => {
-                        setEditingMac(device.mac);
-                        setNameDraft(device.name ?? "");
-                      }}
-                    >
-                      <span className="router-device__label">{routerDeviceLabel(device)}</span>
-                      {isThis && <span className="router-device__tag">{t("router_this_computer")}</span>}
-                    </button>
-                  )}
+                  <div className="router-device__name router-device__name--static">
+                    <span className="router-device__label">{routerDeviceLabel(device)}</span>
+                    {isThis && <span className="visually-hidden">{` · ${t("router_this_computer")}`}</span>}
+                  </div>
                   <span className="router-device__meta">
                     {[
                       device.ip,
