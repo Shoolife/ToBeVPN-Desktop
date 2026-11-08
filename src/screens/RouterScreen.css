@@ -1,0 +1,70 @@
+.router-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 0 16px 16px;
+}
+
+.router-status {
+  margin: 8px 4px 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.router-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+.router-panel__text,
+.router-panel__hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.router-panel__text {
+  color: var(--text);
+}
+
+.router-panel__hint {
+  color: var(--text-muted);
+}
+
+.router-panel__action {
+  align-self: flex-start;
+  padding: 9px 16px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--cta-bg);
+  color: var(--cta-text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.router-panel__action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.devices-card--router {
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  width: 100%;
+}
+
+.devices-card__chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}

@@ -3,6 +3,7 @@ mod diagnostics;
 #[cfg(target_os = "linux")]
 pub mod linux_update;
 mod notifications;
+mod router;
 mod server_probe;
 mod settings_transfer;
 mod speed_test;
@@ -1169,6 +1170,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             notifications::show_system_notification,
+            router::detect_router,
             server_probe::probe_server_profiles,
             server_probe::cancel_server_probe,
             server_probe::probe_core_delay,

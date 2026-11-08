@@ -14,6 +14,7 @@ import { stopSpeedTestRun } from "./session/speedTestRun";
 import SpeedTestHistoryScreen from "./screens/SpeedTestHistoryScreen";
 import SettingsTransferScreen from "./screens/SettingsTransferScreen";
 import DevicesScreen from "./screens/DevicesScreen";
+import RouterScreen from "./screens/RouterScreen";
 import RoutingScreen from "./screens/RoutingScreen";
 import ReferralsScreen from "./screens/ReferralsScreen";
 import PromocodesScreen from "./screens/PromocodesScreen";
@@ -77,7 +78,7 @@ import {
 } from "./session/interfaceScale";
 import "./App.css";
 
-export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "speedtest-history" | "settings-transfer" | "devices" | "routing" | "referrals" | "promocodes";
+export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "speedtest-history" | "settings-transfer" | "devices" | "router" | "routing" | "referrals" | "promocodes";
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
 
@@ -1032,7 +1033,14 @@ export default function App({
           />
         );
       case "devices":
-        return <DevicesScreen onBack={() => goBack("settings")} />;
+        return (
+          <DevicesScreen
+            onBack={() => goBack("settings")}
+            onOpenRouter={() => goForward("router")}
+          />
+        );
+      case "router":
+        return <RouterScreen onBack={() => goBack("devices")} />;
       case "routing":
         return <RoutingScreen onBack={() => goBack("settings")} />;
       case "referrals":

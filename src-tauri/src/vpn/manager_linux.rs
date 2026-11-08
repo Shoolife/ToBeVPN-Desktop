@@ -1170,6 +1170,15 @@ for BYPASS_IP in {route_ip_args}; do
 done
 echo "[TUN-SCRIPT] Direct-access routes added"
 
+# Local networks stay direct, as on Windows: copy the on-link routes of every
+# interface but the tunnel from the main table, so the router, printers and
+# other LAN hosts are reached without the VPN.
+ip -4 route show table main scope link | sed 's/ linkdown//' | while read -r LOCAL_ROUTE; do
+    case " $LOCAL_ROUTE " in *" dev {tun} "*) continue ;; esac
+    ip route replace $LOCAL_ROUTE table {table} 2>/dev/null || true
+done
+echo "[TUN-SCRIPT] Local network routes added"
+
 # 5. Default route via TUN in table 100
 echo "[TUN-SCRIPT] Adding default route via {tun} table {table}"
 ip route add default dev {tun} table {table}

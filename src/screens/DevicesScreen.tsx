@@ -7,6 +7,14 @@ import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import type { LinkedDeviceDto } from "../api/types";
 import { usePersonalDataHidden } from "../session/profileDisplay";
+import {
+  detectRouter,
+  getCachedRouter,
+  isRouterDevice,
+  ROUTER_SECTION_AVAILABLE,
+  type RouterInfo,
+} from "../session/router";
+import { RouterIcon, routerMeta } from "./RouterScreen";
 import "./DevicesScreen.css";
 
 type DeviceKind = "phone" | "desktop" | "tv";
@@ -109,7 +117,14 @@ function DeviceCardSkeleton({ action = false }: { action?: boolean }) {
   );
 }
 
-export default function DevicesScreen({ onBack }: { onBack: () => void }) {
+export default function DevicesScreen({
+  onBack,
+  onOpenRouter,
+}: {
+  onBack: () => void;
+  onOpenRouter: () => void;
+}) {
+  const [router, setRouter] = useState<RouterInfo | null>(() => getCachedRouter());
   const personalHidden = usePersonalDataHidden();
   const [devices, setDevices] = useState<LinkedDeviceDto[]>([]);
   const [maxDevices, setMaxDevices] = useState(0);
@@ -163,6 +178,17 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
   };
 
   useEffect(() => {
+    if (!ROUTER_SECTION_AVAILABLE) return;
+    let alive = true;
+    void detectRouter().then((info) => {
+      if (alive) setRouter(info);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
     mountedRef.current = true;
     void load(false);
     return () => {
@@ -200,7 +226,11 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
 
   const devicesCount = currentCount ?? devices.length;
   const currentDevice = devices.find((d) => deviceMatchesAliases(d, currentAliases));
-  const otherDevices = devices.filter((d) => !deviceMatchesAliases(d, currentAliases));
+  // The router is shown once, as its own card, not again among other devices.
+  const otherDevices = devices.filter(
+    (d) => !deviceMatchesAliases(d, currentAliases) && !isRouterDevice(d),
+  );
+  const showRouter = ROUTER_SECTION_AVAILABLE && !!router?.gateway;
 
   return (
     <div className="devices-root">
@@ -264,6 +294,24 @@ export default function DevicesScreen({ onBack }: { onBack: () => void }) {
                   </div>
                   <span className="devices-card__badge">{t("devices_current_badge")}</span>
                 </div>
+              </>
+            )}
+
+            {showRouter && router && (
+              <>
+                <div className="devices-section-title">{t("router_section_title")}</div>
+                <button type="button" className="devices-card devices-card--router" onClick={onOpenRouter}>
+                  <div className="devices-card__icon"><RouterIcon /></div>
+                  <div className="devices-card__info">
+                    <div className="devices-card__name">{router.model ?? t("router_not_detected")}</div>
+                    <div className="devices-card__meta">
+                      {router.supported ? t("router_card_protect_home") : routerMeta(router)}
+                    </div>
+                  </div>
+                  <svg className="devices-card__chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                </button>
               </>
             )}
 

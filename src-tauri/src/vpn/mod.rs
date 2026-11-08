@@ -57,3 +57,11 @@ pub mod manager;
 
 #[cfg(target_os = "windows")]
 mod windows_routes;
+
+/// Gateway of the lowest-metric physical default route, skipping our tunnel.
+#[cfg(target_os = "windows")]
+pub fn default_physical_gateway() -> Option<std::net::Ipv4Addr> {
+    windows_routes::default_ipv4_route(manager::WINTUN_ADAPTER, manager::WINTUN_GATEWAY)
+        .ok()
+        .map(|route| route.gateway)
+}

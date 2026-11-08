@@ -268,6 +268,14 @@ case "$1" in
             ip route add "${BYPASS_IP}/32" dev "$DEFAULT_DEV" scope link table "$TUN_TABLE"
         fi
     done
+    # Local networks stay direct, as on Windows: copy the on-link routes of
+    # every interface but the tunnel from the main table, so the router,
+    # printers and other LAN hosts are reached without the VPN.
+    ip -4 route show table main scope link | sed 's/ linkdown//' | while read -r LOCAL_ROUTE; do
+        case " $LOCAL_ROUTE " in *" dev $TUN_NAME "*) continue ;; esac
+        # shellcheck disable=SC2086 # the route is a list of ip(8) arguments
+        ip route replace $LOCAL_ROUTE table "$TUN_TABLE" 2>/dev/null || true
+    done
     ip route add default dev "$TUN_NAME" table "$TUN_TABLE"
     ip -6 route add "$TUN_PUBLIC_V6_PREFIX" dev "$TUN_NAME" table "$TUN_TABLE"
     ip rule add not fwmark "$FWMARK" table "$TUN_TABLE" prio 100

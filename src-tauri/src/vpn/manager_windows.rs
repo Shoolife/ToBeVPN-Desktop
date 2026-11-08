@@ -64,9 +64,9 @@ macro_rules! log_win {
 // Wintun adapter parameters. The /30 subnet keeps the wintun side off any
 // real LAN; tun2socks doesn't actually route via WINTUN_GATEWAY, but Windows
 // requires a sensible address on the interface.
-const WINTUN_ADAPTER: &str = "ToBeVPN";
+pub(crate) const WINTUN_ADAPTER: &str = "ToBeVPN";
 const WINTUN_IP: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 2);
-const WINTUN_GATEWAY: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
+pub(crate) const WINTUN_GATEWAY: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
 const WINTUN_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd66, 0x6f62, 0x6576, 0x706e, 0, 0, 0, 2);
 const WINTUN_PUBLIC_IPV6_ROUTE: Ipv6Addr = Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0);
 const WINTUN_PUBLIC_IPV6_PREFIX: u8 = 3;
