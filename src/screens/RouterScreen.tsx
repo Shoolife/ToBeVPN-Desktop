@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { t, tf, type StringKey } from "../i18n";
+import { formatDecimal, t, tf, type StringKey } from "../i18n";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
+import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { getCachedVpnServers, isAvailableVpnServer, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
+import { periodRanges } from "../session/stats";
+import { useRouterTraffic } from "../session/useRouterTraffic";
 import { serverProfileConfig } from "../session/vpn";
 import {
   accountSubscriptionUrl,
@@ -17,6 +20,9 @@ import {
   routerFirmwareLabel,
   routerStatus,
   setRouterServers,
+  setRouterName,
+  refreshRouterTraffic,
+  routerTrafficBetween,
   routerDeviceLabel,
   ROUTER_EXTRA_SLOTS,
   routerDevices,
@@ -131,7 +137,7 @@ function InstallLog({ lines, open, onToggle }: { lines: InstallLogLine[]; open: 
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} ${t("unit_gb")}`;
+  if (bytes >= 1024 ** 3) return `${formatDecimal(bytes / 1024 ** 3, 1)} ${t("unit_gb")}`;
   return `${Math.round(bytes / 1024 ** 2)} ${t("unit_mb")}`;
 }
 
@@ -203,6 +209,17 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [logLines, setLogLines] = useState<InstallLogLine[]>([]);
   const [logOpen, setLogOpen] = useState(false);
   const [pings, setPings] = useState<Map<string, number>>(new Map());
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const routerTraffic = useRouterTraffic(60_000);
+  const dayRanges = periodRanges("day");
+  const monthRanges = periodRanges("month");
+  const trafficToday = routerTrafficBetween(routerTraffic.hours, dayRanges[0][0], dayRanges[dayRanges.length - 1][1]);
+  const trafficMonth = routerTrafficBetween(
+    routerTraffic.hours,
+    monthRanges[0][0],
+    monthRanges[monthRanges.length - 1][1],
+  );
   const generationRef = useRef(0);
 
   const load = async (refresh: boolean) => {
@@ -225,6 +242,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
     }
     if (generation !== generationRef.current) return;
+    if (refresh && currentLink) void refreshRouterTraffic(0);
     const nextServers = routableServers();
     setServers(nextServers);
     void measureVpnServerPings(nextServers, { force: refresh })
@@ -323,6 +341,21 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const saveName = async () => {
+    if (!link) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await setRouterName(link, nameDraft.trim()));
+      setLink(getRouterLink());
+      setRenaming(false);
+    } catch (nameError) {
+      setError(routerErrorText(nameError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const installed = !!link && !!status?.installed;
   const detected = !!info?.model;
   const statusText = !info?.gateway
@@ -354,13 +387,62 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
         <div className="spinner-center devices-spinner">
           <Spinner size={32} />
         </div>
+      ) : refreshing ? (
+        <ScrollEdgeAffordance className="router-content" overlayFade>
+          <RouterSkeleton installed={!!link} />
+        </ScrollEdgeAffordance>
       ) : (
-        <div className="router-content">
+        <ScrollEdgeAffordance className="router-content" overlayFade>
           <div className="devices-card devices-card--current">
             <div className="devices-card__icon"><RouterIcon /></div>
             <div className="devices-card__info">
-              <div className="devices-card__name">{detected ? info.model : t("router_not_detected")}</div>
-              {routerMeta(info) && <div className="devices-card__meta">{routerMeta(info)}</div>}
+              {installed && renaming ? (
+                <form
+                  className="router-device__rename"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void saveName();
+                  }}
+                >
+                  <input
+                    value={nameDraft}
+                    maxLength={40}
+                    autoFocus
+                    disabled={busy}
+                    placeholder={t("router_name_placeholder")}
+                    onChange={(event) => setNameDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setRenaming(false);
+                    }}
+                  />
+                  <button type="submit" className="router-link" disabled={busy}>{t("router_rename_save")}</button>
+                </form>
+              ) : installed ? (
+                <button
+                  type="button"
+                  className="router-device__name router-card__name"
+                  title={t("router_rename_hint")}
+                  disabled={busy}
+                  onClick={() => {
+                    setNameDraft(status?.name ?? "");
+                    setRenaming(true);
+                  }}
+                >
+                  <span className="router-device__label">{status?.name || info.model || t("router_title")}</span>
+                  <svg className="router-card__pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                  </svg>
+                </button>
+              ) : (
+                <div className="devices-card__name">{detected ? info.model : t("router_not_detected")}</div>
+              )}
+              {routerMeta(info) && (
+                <div className="devices-card__meta">
+                  {installed && status?.name && info.model ? `${info.model} · ` : ""}
+                  {routerMeta(info)}
+                </div>
+              )}
             </div>
             {installed ? (
               <span className={`router-state ${status?.running ? "router-state--on" : ""}`}>
@@ -398,10 +480,12 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   </select>
                 </label>
                 <div className="router-row">
-                  <span>{t("router_tunnel_traffic")}</span>
-                  <span className="router-row__value">
-                    {formatBytes(status.tunnelRxBytes + status.tunnelTxBytes)}
-                  </span>
+                  <span>{t("router_traffic_today")}</span>
+                  <span className="router-row__value">{formatBytes(trafficToday)}</span>
+                </div>
+                <div className="router-row">
+                  <span>{t("router_traffic_month")}</span>
+                  <span className="router-row__value">{formatBytes(trafficMonth)}</span>
                 </div>
                 {status.xrayMemoryKb !== null && status.memoryAvailableKb !== null && (
                   <div className="router-row">
@@ -535,9 +619,43 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               </div>
             </>
           )}
-        </div>
+        </ScrollEdgeAffordance>
       )}
     </div>
+  );
+}
+
+/** Placeholders while the screen refreshes, as on the Devices screen. */
+function RouterSkeleton({ installed }: { installed: boolean }) {
+  const panel = (rows: number) => (
+    <div className="router-panel router-skeleton" aria-hidden="true">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="router-skeleton__row">
+          <span className="devices-skeleton__line" />
+          <span className="devices-skeleton__line router-skeleton__value" />
+        </div>
+      ))}
+    </div>
+  );
+  return (
+    <>
+      <div className="devices-card devices-skeleton__card" aria-hidden="true">
+        <span className="devices-skeleton__icon" />
+        <span className="devices-skeleton__info">
+          <span className="devices-skeleton__line" />
+          <span className="devices-skeleton__line devices-skeleton__line--wide" />
+        </span>
+        <span className="devices-skeleton__action" />
+      </div>
+      <div className="devices-section-title">{t("router_vpn_section")}</div>
+      {panel(installed ? 4 : 2)}
+      {installed && (
+        <>
+          <div className="devices-section-title">{t("router_home_network_section")}</div>
+          {panel(3)}
+        </>
+      )}
+    </>
   );
 }
 

@@ -305,49 +305,62 @@ function slotFromRange(store: StatsStore, startSec: number, endSec: number): Sta
   return { period: startSec, totalBytes: bytes, sessions, totalSeconds: seconds };
 }
 
-export function getDayStats(): StatSlot[] {
-  const stats = load();
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  const slots: StatSlot[] = [];
-  for (let cursor = start.getTime(); cursor < end.getTime(); cursor += 3600_000) {
-    slots.push(slotFromRange(stats, cursor / 1000, Math.min(cursor + 3600_000, end.getTime()) / 1000));
+export type StatsPeriod = "day" | "week" | "month";
+
+/**
+ * Slot bounds in epoch seconds: today by hour, this week by day, this month
+ * by week. Shared with the router's traffic, so both line up.
+ */
+export function periodRanges(period: StatsPeriod, now = new Date()): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  if (period === "day") {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    for (let cursor = start.getTime(); cursor < end.getTime(); cursor += 3600_000) {
+      ranges.push([cursor / 1000, Math.min(cursor + 3600_000, end.getTime()) / 1000]);
+    }
+  } else if (period === "week") {
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+    monday.setHours(0, 0, 0, 0);
+    for (let i = 0; i < 7; i++) {
+      const dayStart = new Date(monday);
+      dayStart.setDate(monday.getDate() + i);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setDate(dayStart.getDate() + 1);
+      ranges.push([dayStart.getTime() / 1000, dayEnd.getTime() / 1000]);
+    }
+  } else {
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    for (let weekStart = new Date(monthStart); weekStart < monthEnd;) {
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekStart.getDate() + 7);
+      const cappedEnd = weekEnd < monthEnd ? weekEnd : monthEnd;
+      ranges.push([weekStart.getTime() / 1000, cappedEnd.getTime() / 1000]);
+      weekStart = weekEnd;
+    }
   }
-  return slots;
+  return ranges;
+}
+
+function periodStats(period: StatsPeriod): StatSlot[] {
+  const stats = load();
+  return periodRanges(period).map(([start, end]) => slotFromRange(stats, start, end));
+}
+
+export function getDayStats(): StatSlot[] {
+  return periodStats("day");
 }
 
 export function getWeekStats(): StatSlot[] {
-  const stats = load();
-  const now = new Date();
-  const day = now.getDay();
-  const monday = new Date(now);
-  monday.setDate(now.getDate() - ((day + 6) % 7));
-  monday.setHours(0, 0, 0, 0);
-  return Array.from({ length: 7 }, (_, i) => {
-    const dayStart = new Date(monday);
-    dayStart.setDate(monday.getDate() + i);
-    const dayEnd = new Date(dayStart);
-    dayEnd.setDate(dayStart.getDate() + 1);
-    return slotFromRange(stats, dayStart.getTime() / 1000, dayEnd.getTime() / 1000);
-  });
+  return periodStats("week");
 }
 
 export function getMonthStats(): StatSlot[] {
-  const stats = load();
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-  const slots: StatSlot[] = [];
-  for (let weekStart = new Date(monthStart); weekStart < monthEnd;) {
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekStart.getDate() + 7);
-    const cappedEnd = weekEnd < monthEnd ? weekEnd : monthEnd;
-    slots.push(slotFromRange(stats, weekStart.getTime() / 1000, cappedEnd.getTime() / 1000));
-    weekStart = weekEnd;
-  }
-  return slots;
+  return periodStats("month");
 }
 
 /** Total bytes ever recorded in the retained buckets. */

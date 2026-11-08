@@ -107,6 +107,18 @@ pub struct RouterStatus {
     pub down_slots: Vec<u8>,
     /// Routes that keep ToBeVPN servers outside the tunnel.
     pub server_bypass_rules: u64,
+    /// Name the owner gave the router; None keeps the model.
+    pub name: Option<String>,
+    /// The router's device id in the account (from its LAN MAC).
+    pub hwid: Option<String>,
+}
+
+/// Traffic through the router's tunnels in one hour.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct TrafficHour {
+    /// Epoch seconds of the hour's start.
+    pub hour: u64,
+    pub bytes: u64,
 }
 
 // ---------------------------------------------------------------- SSH ---
@@ -788,6 +800,66 @@ pub async fn router_set_device(
         .map(|_| ())
 }
 
+/// Name of the router, kept on the router so every app paired with it sees
+/// it. An empty name returns to the model.
+#[tauri::command]
+pub async fn router_set_name(
+    app: AppHandle,
+    host: String,
+    user: String,
+    name: String,
+) -> Result<RouterStatus, String> {
+    let name = clean_router_name(&name);
+    let session = open(&app, &host, &user).await?;
+    session
+        .run_ok(
+            &format!(
+                "/opt/tobevpn/tobevpn-router.sh set-name '{}'",
+                shell_quote_inner(&name)
+            ),
+            None,
+        )
+        .await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh status", None)
+        .await?;
+    Ok(parse_status(&output))
+}
+
+fn clean_router_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| !character.is_control() && !"|\\\"`$".contains(*character))
+        .take(40)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Hourly traffic through the router's tunnels, about the last 5 weeks.
+#[tauri::command]
+pub async fn router_traffic(
+    app: AppHandle,
+    host: String,
+    user: String,
+) -> Result<Vec<TrafficHour>, String> {
+    let session = open(&app, &host, &user).await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh traffic", None)
+        .await?;
+    Ok(parse_traffic(&output))
+}
+
+fn parse_traffic(text: &str) -> Vec<TrafficHour> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let hour = fields.next()?.parse().ok()?;
+            let bytes = fields.next()?.parse().ok()?;
+            Some(TrafficHour { hour, bytes })
+        })
+        .collect()
+}
+
 /// Mode for devices without their own choice: "vpn" or "direct".
 #[tauri::command]
 pub async fn router_set_default_mode(
@@ -1087,6 +1159,8 @@ fn parse_status(text: &str) -> RouterStatus {
             })
             .unwrap_or_default(),
         server_bypass_rules: number("bypass_rules").unwrap_or(0),
+        name: values.get("name").filter(|name| !name.is_empty()).cloned(),
+        hwid: values.get("hwid").filter(|hwid| !hwid.is_empty()).cloned(),
     }
 }
 
@@ -1289,7 +1363,30 @@ mod tests {
         assert_eq!(status.subscription_used_bytes, Some(68544880231));
         assert_eq!(status.subscription_total_bytes, Some(268435456000));
         assert_eq!(status.down_slots, vec![0, 2]);
+        assert_eq!(status.name, None);
         assert!(parse_status("down_slots=\n").down_slots.is_empty());
+    }
+
+    #[test]
+    fn parses_name_traffic_and_cleans_names() {
+        let status = parse_status("name=Дача\nhwid=1b2c\n");
+        assert_eq!(status.name.as_deref(), Some("Дача"));
+        assert_eq!(status.hwid.as_deref(), Some("1b2c"));
+        assert_eq!(
+            parse_traffic("1794150000 52085819\nbad\n1794153600 7\n"),
+            vec![
+                TrafficHour {
+                    hour: 1794150000,
+                    bytes: 52085819
+                },
+                TrafficHour {
+                    hour: 1794153600,
+                    bytes: 7
+                },
+            ]
+        );
+        assert_eq!(clean_router_name("  Дача`$ у мамы\n "), "Дача у мамы");
+        assert_eq!(clean_router_name(&"я".repeat(60)).chars().count(), 40);
     }
 
     #[test]

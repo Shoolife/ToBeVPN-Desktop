@@ -89,6 +89,10 @@ export interface RouterStatus {
   failed: boolean;
   /** Slots whose server does not answer; 0 means the whole home is direct for now. */
   downSlots: number[];
+  /** Name the owner gave the router, kept on the router. */
+  name: string | null;
+  /** The router's device id in the account. */
+  hwid: string | null;
   serverBypassRules: number;
 }
 
@@ -136,6 +140,9 @@ export interface RouterLink {
   user: string;
   serverId: string | null;
   serverName: string | null;
+  /** Device id of the router in the account, once its status was read. */
+  hwid?: string | null;
+  name?: string | null;
 }
 
 const LINK_KEY = "tobevpn_router_v1";
@@ -151,11 +158,15 @@ export function getRouterLink(): RouterLink | null {
       user: parsed.user,
       serverId: typeof parsed.serverId === "string" ? parsed.serverId : null,
       serverName: typeof parsed.serverName === "string" ? parsed.serverName : null,
+      hwid: typeof parsed.hwid === "string" ? parsed.hwid : null,
+      name: typeof parsed.name === "string" ? parsed.name : null,
     };
   } catch {
     return null;
   }
 }
+
+export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
 
 function saveRouterLink(link: RouterLink | null): void {
   try {
@@ -164,6 +175,125 @@ function saveRouterLink(link: RouterLink | null): void {
   } catch {
     // Without storage the router is paired again next time.
   }
+  window.dispatchEvent(new Event(ROUTER_CHANGED_EVENT));
+}
+
+// Names of every router this app has talked to, by device id: other routers
+// of the account are shown with them on the Devices screen. The name lives on
+// the router; the panel only knows the model.
+const NAMES_KEY = "tobevpn_router_names_v1";
+
+function readNames(): Record<string, string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(NAMES_KEY) ?? "{}") as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function routerNameFor(hwid: string | null | undefined): string | null {
+  if (!hwid) return null;
+  const name = readNames()[hwid];
+  return typeof name === "string" && name ? name : null;
+}
+
+/** Keeps the link and the name list in step with what the router reported. */
+function remember(link: RouterLink, status: RouterStatus): void {
+  if (status.hwid) {
+    try {
+      const names = readNames();
+      if (status.name) names[status.hwid] = status.name;
+      else delete names[status.hwid];
+      localStorage.setItem(NAMES_KEY, JSON.stringify(names));
+    } catch {
+      // The name is shown again after the next status.
+    }
+  }
+  if (link.hwid !== status.hwid || link.name !== status.name) {
+    saveRouterLink({ ...link, hwid: status.hwid, name: status.name });
+  }
+}
+
+/** Name to show: the owner's name, else the model. */
+export function routerDisplayName(link: RouterLink | null, info: RouterInfo | null): string | null {
+  return link?.name || info?.model || null;
+}
+
+export async function setRouterName(link: RouterLink, name: string): Promise<RouterStatus> {
+  const status = await invoke<RouterStatus>("router_set_name", { host: link.host, user: link.user, name });
+  remember(getRouterLink() ?? link, status);
+  return status;
+}
+
+// ------------------------------------------------------------- traffic ---
+
+/** VPN traffic of the whole home network through the router, by hour. */
+export interface RouterTrafficHour {
+  /** Epoch seconds of the hour's start. */
+  hour: number;
+  bytes: number;
+}
+
+const TRAFFIC_KEY = "tobevpn_router_traffic_v1";
+export const ROUTER_TRAFFIC_EVENT = "tobevpn:router-traffic";
+
+interface TrafficCache {
+  hwid: string | null;
+  fetchedAt: number;
+  hours: RouterTrafficHour[];
+}
+
+export function getCachedRouterTraffic(): RouterTrafficHour[] {
+  const link = getRouterLink();
+  if (!link) return [];
+  try {
+    const cache = JSON.parse(localStorage.getItem(TRAFFIC_KEY) ?? "null") as TrafficCache | null;
+    if (!cache || !Array.isArray(cache.hours) || (cache.hwid && link.hwid && cache.hwid !== link.hwid)) return [];
+    return cache.hours;
+  } catch {
+    return [];
+  }
+}
+
+let trafficInFlight: Promise<void> | null = null;
+
+/**
+ * Reads the router's traffic when the cached copy is older than `maxAgeMs`.
+ * Silent on failure (another network, router off): the cache stays.
+ */
+export function refreshRouterTraffic(maxAgeMs = 5 * 60_000): Promise<void> {
+  const link = getRouterLink();
+  if (!link || !ROUTER_SECTION_AVAILABLE || isBrowserPreviewRuntime()) return Promise.resolve();
+  try {
+    const cache = JSON.parse(localStorage.getItem(TRAFFIC_KEY) ?? "null") as TrafficCache | null;
+    if (cache && Date.now() - cache.fetchedAt < maxAgeMs && (!link.hwid || cache.hwid === link.hwid)) {
+      return Promise.resolve();
+    }
+  } catch {
+    // Read it again below.
+  }
+  if (trafficInFlight) return trafficInFlight;
+  trafficInFlight = invoke<RouterTrafficHour[]>("router_traffic", { host: link.host, user: link.user })
+    .then((hours) => {
+      const cache: TrafficCache = { hwid: link.hwid ?? null, fetchedAt: Date.now(), hours };
+      try {
+        localStorage.setItem(TRAFFIC_KEY, JSON.stringify(cache));
+      } catch {
+        // Shown until the screen closes.
+      }
+      window.dispatchEvent(new Event(ROUTER_TRAFFIC_EVENT));
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      trafficInFlight = null;
+    });
+  return trafficInFlight;
+}
+
+/** Bytes through the router between two epoch-second bounds. */
+export function routerTrafficBetween(hours: RouterTrafficHour[], startSec: number, endSec: number): number {
+  return hours.reduce((sum, item) => (item.hour >= startSec && item.hour < endSec ? sum + item.bytes : sum), 0);
 }
 
 /** SSH login of the router's administrator by firmware family. */
@@ -194,12 +324,16 @@ export async function installRouter(options: {
     subscriptionUrl,
     autostart,
   });
-  saveRouterLink({ host, user, serverId: server.id, serverName: server.name });
+  const link = { host, user, serverId: server.id, serverName: server.name };
+  saveRouterLink(link);
+  remember(link, status);
   return status;
 }
 
 export async function routerStatus(link: RouterLink): Promise<RouterStatus> {
-  return invoke<RouterStatus>("router_status", { host: link.host, user: link.user });
+  const status = await invoke<RouterStatus>("router_status", { host: link.host, user: link.user });
+  if (status.installed) remember(link, status);
+  return status;
 }
 
 export type RouterAction = "start" | "stop" | "restart" | "autostart-on" | "autostart-off" | "uninstall";

@@ -5,8 +5,12 @@ import {
   getWeekStats,
   getMonthStats,
   subscribeStats,
+  periodRanges,
   type StatSlot,
 } from "../session/stats";
+import { routerTrafficBetween } from "../session/router";
+import { useRouterTraffic } from "../session/useRouterTraffic";
+import { RouterIcon } from "./RouterScreen";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import "./StatsScreen.css";
 
@@ -124,6 +128,14 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   const nonZeroStats = stats.filter((s) => s.totalBytes > 0);
   const maxRowBytes = nonZeroStats.length > 0 ? Math.max(...nonZeroStats.map((s) => s.totalBytes)) : 1;
 
+  // The home network's VPN traffic through the router, in the same slots.
+  const routerTraffic = useRouterTraffic(60_000);
+  const routerSlots = routerTraffic.linked
+    ? periodRanges(period).map(([start, end]) => routerTrafficBetween(routerTraffic.hours, start, end))
+    : [];
+  const routerTotal = routerSlots.reduce((sum, bytes) => sum + bytes, 0);
+  const routerMax = Math.max(...routerSlots, 1);
+
   const periodLabel =
     period === "day" ? t("stats_today_by_hour")
     : period === "week" ? t("stats_week_by_day")
@@ -197,6 +209,29 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
             </button>
           ))}
         </div>
+
+        {routerTraffic.linked && (
+          <div className="stats-router">
+            <div className="stats-router__top">
+              <span className="stats-router__icon"><RouterIcon size={20} /></span>
+              <div className="stats-router__text">
+                <div className="stats-router__title">{t("stats_router_title")}</div>
+                <div className="stats-router__subtitle">{t("stats_router_subtitle")}</div>
+              </div>
+              <div className="stats-router__total">{formatBytes(routerTotal)}</div>
+            </div>
+            <div className="stats-router__bars" aria-hidden="true">
+              {routerSlots.map((bytes, index) => (
+                <div key={index} className="stats-router__bar-wrapper">
+                  <div
+                    className="stats-router__bar"
+                    style={{ height: animated ? `${Math.max((bytes / routerMax) * 100, bytes > 0 ? 4 : 0)}%` : "0%" }}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Chart */}
         <div className="stats-chart">

@@ -11,6 +11,10 @@ import {
   detectRouter,
   getCachedRouter,
   isRouterDevice,
+  getRouterLink,
+  routerNameFor,
+  ROUTER_CHANGED_EVENT,
+  type RouterLink,
   ROUTER_SECTION_AVAILABLE,
   type RouterInfo,
 } from "../session/router";
@@ -125,6 +129,7 @@ export default function DevicesScreen({
   onOpenRouter: () => void;
 }) {
   const [router, setRouter] = useState<RouterInfo | null>(() => getCachedRouter());
+  const [routerLink, setRouterLink] = useState<RouterLink | null>(() => getRouterLink());
   const personalHidden = usePersonalDataHidden();
   const [devices, setDevices] = useState<LinkedDeviceDto[]>([]);
   const [maxDevices, setMaxDevices] = useState(0);
@@ -178,6 +183,12 @@ export default function DevicesScreen({
   };
 
   useEffect(() => {
+    const update = () => setRouterLink(getRouterLink());
+    window.addEventListener(ROUTER_CHANGED_EVENT, update);
+    return () => window.removeEventListener(ROUTER_CHANGED_EVENT, update);
+  }, []);
+
+  useEffect(() => {
     if (!ROUTER_SECTION_AVAILABLE) return;
     let alive = true;
     void detectRouter().then((info) => {
@@ -226,11 +237,18 @@ export default function DevicesScreen({
 
   const devicesCount = currentCount ?? devices.length;
   const currentDevice = devices.find((d) => deviceMatchesAliases(d, currentAliases));
-  // The router is shown once, as its own card, not again among other devices.
+  // Routers have their own section: the one of this network opens its
+  // settings; other routers of the account (another home, a cottage) are
+  // listed with the names given to them and can be disconnected.
   const otherDevices = devices.filter(
     (d) => !deviceMatchesAliases(d, currentAliases) && !isRouterDevice(d),
   );
-  const showRouter = ROUTER_SECTION_AVAILABLE && !!router?.gateway;
+  const linkedHere = !!routerLink && !!router?.gateway && routerLink.host === router.gateway;
+  const otherRouters = ROUTER_SECTION_AVAILABLE
+    ? devices.filter((d) => isRouterDevice(d) && !(linkedHere && d.hwid && d.hwid === routerLink?.hwid))
+    : [];
+  const showRouter = ROUTER_SECTION_AVAILABLE && (!!router?.gateway || otherRouters.length > 0);
+  const hereName = (linkedHere && routerLink?.name) || router?.model || t("router_not_detected");
 
   return (
     <div className="devices-root">
@@ -297,21 +315,50 @@ export default function DevicesScreen({
               </>
             )}
 
-            {showRouter && router && (
+            {showRouter && (
               <>
-                <div className="devices-section-title">{t("router_section_title")}</div>
-                <button type="button" className="devices-card devices-card--router" onClick={onOpenRouter}>
-                  <div className="devices-card__icon"><RouterIcon /></div>
-                  <div className="devices-card__info">
-                    <div className="devices-card__name">{router.model ?? t("router_not_detected")}</div>
-                    <div className="devices-card__meta">
-                      {router.supported ? t("router_card_protect_home") : routerMeta(router)}
+                <div className="devices-section-title">
+                  {otherRouters.length + (router?.gateway ? 1 : 0) > 1
+                    ? t("router_section_title_many")
+                    : t("router_section_title")}
+                </div>
+                {router?.gateway && (
+                  <button type="button" className="devices-card devices-card--router" onClick={onOpenRouter}>
+                    <div className="devices-card__icon"><RouterIcon /></div>
+                    <div className="devices-card__info">
+                      <div className="devices-card__name">{hereName}</div>
+                      <div className="devices-card__meta">
+                        {linkedHere && routerLink?.name && router.model ? `${router.model} · ` : ""}
+                        {router.supported ? t("router_card_protect_home") : routerMeta(router)}
+                      </div>
                     </div>
+                    <svg className="devices-card__chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                  </button>
+                )}
+                {otherRouters.map((d) => (
+                  <div key={d.device_id} className="devices-card">
+                    <div className="devices-card__icon"><RouterIcon /></div>
+                    <div className="devices-card__info">
+                      <div className="devices-card__name">
+                        {routerNameFor(d.hwid) || d.device_model || t("router_title")}
+                      </div>
+                      <div className="devices-card__meta">
+                        {t("router_other_network")}
+                        {routerNameFor(d.hwid) && d.device_model ? ` \u00B7 ${d.device_model}` : ""}
+                        {d.last_seen_at ? ` \u00B7 ${formatEpochSecondsDateDots(d.last_seen_at)}` : ""}
+                      </div>
+                    </div>
+                    <button
+                      className="devices-card__disconnect"
+                      onClick={() => handleUnlink(d.device_id)}
+                      disabled={unlinkingId !== null}
+                    >
+                      {t("devices_disconnect")}
+                    </button>
                   </div>
-                  <svg className="devices-card__chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <polyline points="9 18 15 12 9 6" />
-                  </svg>
-                </button>
+                ))}
               </>
             )}
 

@@ -193,6 +193,40 @@ dns_upstream() {
     fi
 }
 
+# Traffic through the tunnels by hour ("HOUR_EPOCH BYTES" lines). Counted in
+# RAM every minute; written to flash once an hour and on stop, so the flash
+# is not worn. About 5 weeks are kept.
+TRAFFIC_KEEP=900
+
+account_traffic() {
+    [ -f "$RUN/traffic" ] || cp "$DIR/traffic" "$RUN/traffic" 2>/dev/null || : >"$RUN/traffic"
+    delta=0
+    for slot in 0 1 2 3; do
+        stats=/sys/class/net/$(tunnel_of "$slot")/statistics
+        [ -r "$stats/rx_bytes" ] || { rm -f "$RUN/counter_$slot"; continue; }
+        now=$(($(cat "$stats/rx_bytes") + $(cat "$stats/tx_bytes")))
+        # No previous reading: the tunnel is new since start, counting from 0.
+        last=$(cat "$RUN/counter_$slot" 2>/dev/null || echo 0)
+        # A restarted tunnel starts its counters from zero.
+        if [ "$now" -ge "$last" ]; then delta=$((delta + now - last)); else delta=$((delta + now)); fi
+        echo "$now" >"$RUN/counter_$slot"
+    done
+    hour=$(($(date +%s) / 3600 * 3600))
+    if [ "$delta" -gt 0 ]; then
+        awk -v hour="$hour" -v delta="$delta" '
+            $1 == hour {$2 += delta; found = 1} {print $1, $2}
+            END {if (!found) print hour, delta}' "$RUN/traffic" >"$RUN/traffic.tmp" &&
+            mv "$RUN/traffic.tmp" "$RUN/traffic"
+    fi
+    [ "$(cat "$RUN/traffic_saved" 2>/dev/null)" = "$hour" ] || save_traffic "$hour"
+}
+
+save_traffic() {
+    [ -f "$RUN/traffic" ] || return 0
+    tail -n "$TRAFFIC_KEEP" "$RUN/traffic" >"$DIR/traffic.tmp" && mv "$DIR/traffic.tmp" "$DIR/traffic"
+    echo "${1:-$(($(date +%s) / 3600 * 3600))}" >"$RUN/traffic_saved"
+}
+
 slot_down() {
     grep -qx "$1" "$RUN/down" 2>/dev/null
 }
@@ -395,6 +429,7 @@ watch() {
             fi
             bring_up_tunnels && apply_routes
         fi
+        [ $((ticks % 6)) -eq 0 ] && account_traffic
         [ $((ticks % 3)) -eq 0 ] && check_health && apply_routes
         [ $((ticks % 2160)) -eq 0 ] && apply_server_bypass
         # Devices that reconnected with another address; DHCP events also
@@ -457,6 +492,12 @@ stop() {
         kill "$(cat "$RUN/watch.pid")" 2>/dev/null
         rm -f "$RUN/watch.pid"
     fi
+    # The last minute of traffic, before the tunnels and their counters go.
+    if [ -d "$RUN" ]; then
+        account_traffic
+        save_traffic
+        rm -f "$RUN"/counter_*
+    fi
     stop_routing
     rm -f "$RUN/down" "$RUN"/fails_*
     # busybox killall matches the 15-character kernel name; pidof does not.
@@ -499,6 +540,8 @@ status() {
     echo "tun_rx_bytes=$rx"
     echo "tun_tx_bytes=$tx"
     echo "default_mode=$(default_mode)"
+    echo "name=$(cat "$DIR/name" 2>/dev/null)"
+    sed -n "s/^HWID='\(.*\)'$/hwid=\1/p" "$DIR/subscription.conf" 2>/dev/null
     echo "client_ip=${SSH_CLIENT%% *}"
     grep -i '^subscription-userinfo:' "$RUN/subscription.headers" 2>/dev/null |
         sed 's/^[^:]*: */subscription_userinfo=/' | tr -d '\r'
@@ -521,6 +564,17 @@ restart) stop >/dev/null; start ;;
 status) status ;;
 watch) watch ;;
 devices) list_devices ;;
+set-name)
+    # The app limits the name to 40 characters; bytes are capped here only
+    # as a guard (busybox cut counts bytes, not letters).
+    name=$(printf '%s' "$2" | tr -d '\t\r\n|\\"`$' | head -c 200)
+    if [ -n "$name" ]; then printf '%s\n' "$name" >"$DIR/name"; else rm -f "$DIR/name"; fi
+    echo "saved=1"
+    ;;
+traffic)
+    # Counted by the watchdog every minute; read only, so the two never race.
+    cat "$RUN/traffic" 2>/dev/null || cat "$DIR/traffic" 2>/dev/null
+    ;;
 set-device) set_device "$2" "$3" "$4" "$5" ;;
 set-default)
     case "$2" in vpn | direct) echo "$2" >"$DIR/default_mode" ;; *) echo "error=bad mode"; exit 2 ;; esac

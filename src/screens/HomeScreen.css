@@ -474,6 +474,36 @@
   color: var(--text-muted);
 }
 
+.home-session__router {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 4px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.home-session__router-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.home-session__router-label svg {
+  flex-shrink: 0;
+}
+
+.home-session__router-value {
+  flex-shrink: 0;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
 /* Subscription */
 .home-sub__label {
   font-size: 13px;
