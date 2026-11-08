@@ -60,6 +60,8 @@ struct Binary {
     zip_member: Option<&'static str>,
     /// Digest of the binary installed on the router.
     sha256: &'static str,
+    /// MD5 of the same binary: the router's busybox has md5sum, not sha256sum.
+    md5: &'static str,
 }
 
 const BINARIES: &[Binary] = &[
@@ -69,6 +71,7 @@ const BINARIES: &[Binary] = &[
         download_sha256: "1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d",
         zip_member: Some("xray"),
         sha256: "5939649960deaf535bcd5f7ce0467a2b1d63b72a2758a6f42eade714ae8d5328",
+        md5: "1ac186b69bff1fa9937de653fbb2bd19",
     },
     Binary {
         name: "hev-socks5-tunnel",
@@ -76,6 +79,7 @@ const BINARIES: &[Binary] = &[
         download_sha256: "3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d",
         zip_member: None,
         sha256: "3a7e5e6fc21ce507d6106cefcdb101d43e43f04e7aac20f892edbd2d1264110d",
+        md5: "7720e92733082f4920c511205bb115da",
     },
 ];
 
@@ -301,7 +305,21 @@ pub async fn router_pair(
     user: String,
     password: String,
 ) -> Result<(), String> {
+    log(&app, "info", format!("SSH {user}@{host}:22"));
+    let result = pair(&app, host, user, password).await;
+    match &result {
+        Ok(()) => log(&app, "info", "app key installed on the router"),
+        Err(error) => log(&app, "error", error.clone()),
+    }
+    result
+}
+
+async fn pair(app: &AppHandle, host: String, user: String, password: String) -> Result<(), String> {
+    let app = app.clone();
     let (mut session, fingerprint) = connect(&app, &host, true).await?;
+    if let Some(fingerprint) = &fingerprint {
+        log(&app, "info", format!("new router host key {fingerprint}"));
+    }
     let auth = session
         .handle
         .authenticate_password(&user, password)
@@ -310,6 +328,7 @@ pub async fn router_pair(
     if !auth.success() {
         return Err("wrong router login or password".into());
     }
+    log(&app, "info", "password accepted");
     let public = app_key(&app)?
         .public_key()
         .to_openssh()
@@ -342,6 +361,24 @@ pub async fn router_pair(
 
 fn progress(app: &AppHandle, step: &str) {
     let _ = app.emit("router-install-progress", step);
+    log(app, "step", step);
+}
+
+/// A line of the install log the Router screen can show in full.
+#[derive(Serialize, Clone)]
+struct LogLine {
+    level: &'static str,
+    text: String,
+}
+
+fn log(app: &AppHandle, level: &'static str, text: impl Into<String>) {
+    let _ = app.emit(
+        "router-install-log",
+        LogLine {
+            level,
+            text: text.into(),
+        },
+    );
 }
 
 /// Installs (or updates) ToBeVPN on the paired router and starts it.
@@ -355,44 +392,107 @@ pub async fn router_install(
     subscription_url: String,
     autostart: bool,
 ) -> Result<RouterStatus, String> {
+    let result = install(
+        &app,
+        host,
+        user,
+        servers,
+        server_hosts,
+        subscription_url,
+        autostart,
+    )
+    .await;
+    if let Err(error) = &result {
+        log(&app, "error", error.clone());
+    }
+    result
+}
+
+async fn install(
+    app: &AppHandle,
+    host: String,
+    user: String,
+    servers: Vec<SlotServer>,
+    server_hosts: Vec<String>,
+    subscription_url: String,
+    autostart: bool,
+) -> Result<RouterStatus, String> {
+    let app = app.clone();
     validate_slots(&servers)?;
+    for server in &servers {
+        log(
+            &app,
+            "info",
+            format!("server slot {}: {}", server.slot, server.name),
+        );
+    }
     progress(&app, "connect");
     let session = open(&app, &host, &user).await?;
 
     progress(&app, "check");
+    let md5_checks: String = BINARIES
+        .iter()
+        .map(|binary| {
+            format!(
+                "echo md5_{0}=$(md5sum /opt/tobevpn/{0} 2>/dev/null | cut -d' ' -f1); ",
+                binary.name
+            )
+        })
+        .collect();
     let facts = parse_key_values(
         &session
             .run_ok(
-                "echo arch=$(uname -m); echo free_kb=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'); \
-                 echo tun=$([ -c /dev/net/tun ] || grep -qw tun /proc/modules && echo 1 || echo 0); \
-                 echo opkg=$(command -v opkg >/dev/null && echo 1 || echo 0); \
-                 echo installed_sha=$(cat /opt/tobevpn/VERSIONS 2>/dev/null | tr '\\n' ' '); \
-                 echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
-                 echo client=${SSH_CLIENT%% *}; \
-                 . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_RELEASE\"; \
-                 echo model=$(cat /tmp/sysinfo/model 2>/dev/null | tr ' ' '-')",
+                &format!(
+                    "echo arch=$(uname -m); echo free_kb=$(df -k /overlay 2>/dev/null | awk 'NR==2{{print $4}}'); \
+                     echo tun=$([ -c /dev/net/tun ] || grep -qw tun /proc/modules && echo 1 || echo 0); \
+                     echo opkg=$(command -v opkg >/dev/null && echo 1 || echo 0); \
+                     {md5_checks}\
+                     echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
+                     . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_RELEASE\"; \
+                     echo model=$(cat /tmp/sysinfo/model 2>/dev/null | tr ' ' '-')"
+                ),
                 None,
             )
             .await?,
     );
-    if facts.get("arch").map(String::as_str) != Some("aarch64") {
-        return Err(format!(
-            "unsupported router CPU: {}",
-            facts.get("arch").cloned().unwrap_or_default()
-        ));
+    let fact = |key: &str| facts.get(key).map(String::as_str).unwrap_or("");
+    log(
+        &app,
+        "info",
+        format!(
+            "router: {} · {} {} · free {} KB on /overlay · TUN {}",
+            fact("model"),
+            fact("arch"),
+            fact("os").trim_matches('"'),
+            fact("free_kb"),
+            if fact("tun") == "1" { "yes" } else { "no" }
+        ),
+    );
+    if fact("arch") != "aarch64" {
+        return Err(format!("unsupported router CPU: {}", fact("arch")));
     }
-    let pinned = BINARIES
+    let needed: Vec<&Binary> = BINARIES
         .iter()
-        .map(|binary| binary.sha256)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let binaries_current =
-        facts.get("installed_sha").map(|value| value.trim()) == Some(pinned.as_str());
-    if !binaries_current {
-        let free_kb: u64 = facts
-            .get("free_kb")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
+        .filter(|binary| fact(&format!("md5_{}", binary.name)) != binary.md5)
+        .collect();
+    for binary in BINARIES {
+        let current = !needed.iter().any(|item| item.name == binary.name);
+        log(
+            &app,
+            "info",
+            format!(
+                "{}: {}",
+                binary.name,
+                if current {
+                    "already on the router, up to date"
+                } else {
+                    "will be installed"
+                }
+            ),
+        );
+    }
+    if !needed.is_empty() {
+        let free_kb: u64 = fact("free_kb").parse().unwrap_or(0);
         if free_kb < REQUIRED_FREE_KB {
             return Err(format!(
                 "not enough space on the router: {} MB free",
@@ -401,17 +501,26 @@ pub async fn router_install(
         }
     }
 
+    // Everything is downloaded before the running VPN is touched: a failed
+    // download leaves the router as it was.
+    let mut downloads = Vec::new();
+    for binary in &needed {
+        progress(&app, &format!("download:{}", binary.name));
+        downloads.push((*binary, fetch_binary(&app, binary).await?));
+    }
+
     // An earlier run may be active; it is restarted with the new files.
-    session
+    let (stopped, _) = session
         .run(
             "[ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh stop",
             None,
         )
         .await?;
+    log_output(&app, &stopped);
 
-    if facts.get("tun").map(String::as_str) != Some("1") {
+    if fact("tun") != "1" {
         progress(&app, "tun");
-        if facts.get("opkg").map(String::as_str) != Some("1") {
+        if fact("opkg") != "1" {
             return Err("the router has no TUN support and no package manager".into());
         }
         session
@@ -421,25 +530,20 @@ pub async fn router_install(
                 None,
             )
             .await?;
+        log(&app, "info", "kmod-tun installed");
     }
 
     session.run_ok("mkdir -p /opt/tobevpn", None).await?;
-    if !binaries_current {
-        for binary in BINARIES {
-            progress(&app, &format!("download:{}", binary.name));
-            let content = fetch_binary(&app, binary).await?;
-            progress(&app, &format!("upload:{}", binary.name));
-            session
-                .write_file(&format!("/opt/tobevpn/{}", binary.name), &content, "755")
-                .await?;
-        }
+    for (binary, content) in downloads {
+        progress(&app, &format!("upload:{}", binary.name));
         session
-            .write_file(
-                "/opt/tobevpn/VERSIONS",
-                format!("{}\n", pinned.replace(' ', "\n")).as_bytes(),
-                "644",
-            )
+            .write_file(&format!("/opt/tobevpn/{}", binary.name), &content, "755")
             .await?;
+        log(
+            &app,
+            "info",
+            format!("{}: uploaded {} KB", binary.name, content.len() / 1024),
+        );
     }
 
     progress(&app, "configure");
@@ -523,13 +627,20 @@ pub async fn router_install(
         )
         .await?;
 
+    log(
+        &app,
+        "info",
+        format!("autostart {}", if autostart { "on" } else { "off" }),
+    );
     progress(&app, "start");
-    session
+    let started = session
         .run_ok("/opt/tobevpn/tobevpn-router.sh start", None)
         .await?;
+    log_output(&app, &started);
     let status = session
         .run_ok("/opt/tobevpn/tobevpn-router.sh status", None)
         .await?;
+    log_output(&app, &status);
     progress(&app, "done");
     Ok(parse_status(&status))
 }
@@ -986,26 +1097,59 @@ async fn fetch_binary(app: &AppHandle, binary: &Binary) -> Result<Vec<u8>, Strin
     let cached = cache.join(format!("{}-{}", binary.name, &binary.sha256[..16]));
     if let Ok(content) = std::fs::read(&cached) {
         if sha256_hex(&content) == binary.sha256 {
+            log(
+                app,
+                "info",
+                format!("{}: taken from the app cache", binary.name),
+            );
             return Ok(content);
         }
     }
-    let url = binary.url.to_string();
-    let downloaded = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()
-            .map_err(|error| format!("http client: {error}"))?
-            .get(&url)
-            .send()
-            .and_then(|response| response.error_for_status())
-            .map_err(|error| format!("download {url}: {error}"))?;
-        response
-            .bytes()
-            .map(|bytes| bytes.to_vec())
-            .map_err(|error| format!("download {url}: {error}"))
-    })
-    .await
-    .map_err(|error| format!("download task: {error}"))??;
+    let mut attempt = 0;
+    let downloaded = loop {
+        attempt += 1;
+        log(
+            app,
+            "info",
+            format!(
+                "{}: download attempt {attempt}/{DOWNLOAD_ATTEMPTS}: {}",
+                binary.name, binary.url
+            ),
+        );
+        let url = binary.url.to_string();
+        let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+            let response = reqwest::blocking::Client::builder()
+                .connect_timeout(Duration::from_secs(20))
+                .timeout(Duration::from_secs(300))
+                .build()
+                .map_err(|error| format!("http client: {error}"))?
+                .get(&url)
+                .send()
+                .and_then(|response| response.error_for_status())
+                .map_err(|error| format!("download {url}: {}", error_chain(&error)))?;
+            response
+                .bytes()
+                .map(|bytes| bytes.to_vec())
+                .map_err(|error| format!("download {url}: {}", error_chain(&error)))
+        })
+        .await
+        .map_err(|error| format!("download task: {error}"))?;
+        match result {
+            Ok(bytes) => {
+                log(
+                    app,
+                    "info",
+                    format!("{}: downloaded {} KB", binary.name, bytes.len() / 1024),
+                );
+                break bytes;
+            }
+            Err(error) if attempt < DOWNLOAD_ATTEMPTS => {
+                log(app, "warn", error);
+                tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    };
     if sha256_hex(&downloaded) != binary.download_sha256 {
         return Err(format!("{}: download checksum mismatch", binary.name));
     }
@@ -1018,6 +1162,34 @@ async fn fetch_binary(app: &AppHandle, binary: &Binary) -> Result<Vec<u8>, Strin
     }
     let _ = std::fs::write(&cached, &content);
     Ok(content)
+}
+
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// The error with its causes: reqwest's top message alone hides them.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
+/// Each line of a command's output as a log line.
+fn log_output(app: &AppHandle, output: &str) {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        // The subscription header carries no secret, but keep the log short.
+        if !line.starts_with("subscription_userinfo=") {
+            log(app, "info", line.to_string());
+        }
+    }
 }
 
 fn sha256_hex(data: &[u8]) -> String {

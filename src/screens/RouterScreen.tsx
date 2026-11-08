@@ -78,6 +78,51 @@ function routerErrorText(error: unknown): string {
   return tf("router_error_generic", raw.replace(/^Error:\s*/, "").slice(0, 200));
 }
 
+interface InstallLogLine {
+  level: "step" | "info" | "warn" | "error";
+  text: string;
+  time: string;
+}
+
+/** Full install log: every step, check, download attempt and error. */
+function InstallLog({ lines, open, onToggle }: { lines: InstallLogLine[]; open: boolean; onToggle: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const errors = lines.filter((line) => line.level === "error").length;
+  const lineText = (line: InstallLogLine) =>
+    line.level === "step" && INSTALL_STEPS[line.text] ? `— ${t(INSTALL_STEPS[line.text])}` : line.text;
+  const copy = () => {
+    const text = lines.map((line) => `${line.time} ${line.level.toUpperCase()} ${lineText(line)}`).join("\n");
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <div className="router-log">
+      <div className="router-log__bar">
+        <button type="button" className="router-link" onClick={onToggle} aria-expanded={open}>
+          {open ? t("router_log_hide") : tf("router_log_show", lines.length)}
+        </button>
+        {errors > 0 && !open && <span className="router-log__errors">{tf("router_log_errors", errors)}</span>}
+        {open && (
+          <button type="button" className="router-link" onClick={copy}>
+            {copied ? t("router_log_copied") : t("router_log_copy")}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="router-log__lines" role="log">
+          {lines.map((line, index) => (
+            <div key={index} className={`router-log__line router-log__line--${line.level}`}>
+              <span className="router-log__time">{line.time}</span> {lineText(line)}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} ${t("unit_gb")}`;
   return `${Math.round(bytes / 1024 ** 2)} ${t("unit_mb")}`;
@@ -141,6 +186,8 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [servers, setServers] = useState<VpnServer[]>(routableServers);
   const [serverId, setServerId] = useState<string>(() => link?.serverId ?? servers[0]?.id ?? "");
   const [network, setNetwork] = useState<RouterNetwork | null>(null);
+  const [logLines, setLogLines] = useState<InstallLogLine[]>([]);
+  const [logOpen, setLogOpen] = useState(false);
   const generationRef = useRef(0);
 
   const load = async (refresh: boolean) => {
@@ -177,9 +224,15 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     void load(false);
     const unlisten = listen<string>("router-install-progress", (event) => setStep(event.payload));
+    const unlistenLog = listen<{ level: InstallLogLine["level"]; text: string }>("router-install-log", (event) => {
+      const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      setLogLines((lines) => [...lines, { ...event.payload, time }].slice(-500));
+      if (event.payload.level === "error") setLogOpen(true);
+    });
     return () => {
       generationRef.current += 1;
       void unlisten.then((stop) => stop());
+      void unlistenLog.then((stop) => stop());
     };
   }, []);
 
@@ -190,6 +243,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     if (!info?.gateway || !selectedServer || !subscriptionUrl || !password) return;
     setBusy(true);
     setError(null);
+    setLogLines([]);
     setStep("connect");
     try {
       const next = await installRouter({
@@ -439,6 +493,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                         <span className="router-panel__hint">{t(INSTALL_STEPS[step])}</span>
                       )}
                     </div>
+                    {logLines.length > 0 && (
+                      <InstallLog lines={logLines} open={logOpen} onToggle={() => setLogOpen((value) => !value)} />
+                    )}
                   </form>
                 ) : (
                   <button

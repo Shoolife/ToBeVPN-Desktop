@@ -277,3 +277,58 @@
   padding: 6px 8px;
   font-size: 13px;
 }
+
+.router-log {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.router-log__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.router-log__errors {
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.router-log__lines {
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--input-bg);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  user-select: text;
+}
+
+.router-log__line {
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.router-log__line--step {
+  margin-top: 4px;
+  font-weight: 600;
+}
+
+.router-log__line--warn {
+  color: var(--warning, #d9a400);
+}
+
+.router-log__line--error {
+  color: var(--danger);
+}
+
+.router-log__time {
+  color: var(--text-muted);
+}
