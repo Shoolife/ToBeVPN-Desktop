@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { formatDecimal, t, tf, type StringKey } from "../i18n";
 import { countryFlagForUi, serverDisplayName } from "../components/serverDisplay";
 import { periodRanges } from "../session/stats";
+import { loadLastServer } from "../session/lastServer";
+import { findSameServer } from "../session/serverSelection";
 import { useRouterTraffic } from "../session/useRouterTraffic";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
@@ -206,8 +208,14 @@ function canAddServer(servers: VpnServer[], network: RouterNetwork, exceptMac: s
   return kept.length < limit;
 }
 
-/** Server for a fresh install: the fastest answer, else the first one. */
+/**
+ * Server for a fresh install: the one this computer last used (known to
+ * work here), else the fastest answer, else the first one.
+ */
 function installServer(servers: VpnServer[], pings: Map<string, number>): VpnServer | null {
+  const last = loadLastServer();
+  const used = findSameServer(last, servers);
+  if (used) return used;
   const answered = servers.filter((server) => (pings.get(server.id) ?? -1) >= 0);
   answered.sort((x, y) => (pings.get(x.id) ?? 0) - (pings.get(y.id) ?? 0));
   return answered[0] ?? servers[0] ?? null;
@@ -452,7 +460,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
           </div>
           {!installed && <p className="router-status">{statusText}</p>}
           {installed && status?.failed && !status.running && <p className="router-error">{t("router_failed")}</p>}
-          {installed && status?.running && status.downSlots.length > 0 && (
+          {installed &&
+            status?.running &&
+            network?.devices.some((device) => device.mode === "vpn" && status.downSlots.includes(device.slot)) && (
             <p className="router-error">{t("router_server_down")}</p>
           )}
           {error && <p className="router-error">{error}</p>}
