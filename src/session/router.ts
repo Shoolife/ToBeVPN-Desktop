@@ -364,6 +364,22 @@ export async function installRouter(options: {
   return status;
 }
 
+export interface RouterUpdate {
+  available: boolean;
+  /** "xray", "hev-socks5-tunnel", "agent". */
+  components: string[];
+}
+
+/** Whether the router runs older components than this app carries. */
+export async function routerUpdateCheck(link: RouterLink): Promise<RouterUpdate> {
+  return invoke<RouterUpdate>("router_update_check", { host: link.host, user: link.user });
+}
+
+/** Brings the router's components up to date; servers and device choices stay. */
+export async function updateRouter(link: RouterLink): Promise<RouterStatus> {
+  return invoke<RouterStatus>("router_update", { host: link.host, user: link.user });
+}
+
 export async function routerStatus(link: RouterLink): Promise<RouterStatus> {
   const status = await invoke<RouterStatus>("router_status", { host: link.host, user: link.user });
   if (status.installed) remember(link, status);

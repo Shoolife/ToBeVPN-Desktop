@@ -1011,3 +1011,46 @@
   color: var(--text-muted);
   opacity: 0.7;
 }
+
+/* "An update of the VPN on the router is available" under the router card */
+.router-update {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 10px 10px 14px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+
+.router-update__icon {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.router-update__text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.router-update__button {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.router-update__button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

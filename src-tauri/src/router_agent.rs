@@ -662,6 +662,154 @@ async fn install(
     Ok(parse_status(&status))
 }
 
+/// Components on the router that differ from the ones this app carries.
+#[derive(Serialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterUpdate {
+    pub available: bool,
+    /// "xray", "hev-socks5-tunnel", "agent".
+    pub components: Vec<String>,
+}
+
+/// Binaries that differ from the pinned ones (by MD5: the router's busybox
+/// has md5sum, not sha256sum) and whether the agent script differs.
+async fn outdated_components(session: &Session) -> Result<(Vec<&'static Binary>, bool), String> {
+    let md5_checks: String = BINARIES
+        .iter()
+        .map(|binary| {
+            format!(
+                "echo md5_{0}=$(md5sum /opt/tobevpn/{0} 2>/dev/null | cut -d' ' -f1); ",
+                binary.name
+            )
+        })
+        .collect();
+    let facts = parse_key_values(&session.run_ok(&md5_checks, None).await?);
+    let needed = BINARIES
+        .iter()
+        .filter(|binary| {
+            facts
+                .get(&format!("md5_{}", binary.name))
+                .map(String::as_str)
+                != Some(binary.md5)
+        })
+        .collect();
+    let (agent, _) = session
+        .run("cat /opt/tobevpn/tobevpn-router.sh 2>/dev/null", None)
+        .await?;
+    Ok((needed, agent != AGENT_SCRIPT))
+}
+
+/// Whether the router runs older components than this app carries. Uses
+/// the app's key; nothing on the router changes.
+#[tauri::command]
+pub async fn router_update_check(
+    app: AppHandle,
+    host: String,
+    user: String,
+) -> Result<RouterUpdate, String> {
+    let session = open(&app, &host, &user).await?;
+    let (binaries, agent) = outdated_components(&session).await?;
+    let mut components: Vec<String> = binaries
+        .iter()
+        .map(|binary| binary.name.to_string())
+        .collect();
+    if agent {
+        components.push("agent".into());
+    }
+    Ok(RouterUpdate {
+        available: !components.is_empty(),
+        components,
+    })
+}
+
+/// Brings the router's components to this app's versions: everything is
+/// downloaded and checked first, then the VPN is stopped, the files
+/// replaced and the VPN started again. Servers and device choices stay.
+#[tauri::command]
+pub async fn router_update(
+    app: AppHandle,
+    host: String,
+    user: String,
+) -> Result<RouterStatus, String> {
+    let result = update(&app, &host, &user).await;
+    if let Err(error) = &result {
+        log(&app, "error", error.clone());
+    }
+    result
+}
+
+async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus, String> {
+    progress(app, "connect");
+    let session = open(app, host, user).await?;
+    progress(app, "check");
+    let (needed, _) = outdated_components(&session).await?;
+    if !needed.is_empty() {
+        let free_kb: u64 = session
+            .run_ok("df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'", None)
+            .await?
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        if free_kb < REQUIRED_FREE_KB {
+            return Err(format!(
+                "not enough space on the router: {} MB free",
+                free_kb / 1024
+            ));
+        }
+    }
+    let mut downloads = Vec::new();
+    for binary in &needed {
+        progress(app, &format!("download:{}", binary.name));
+        downloads.push((*binary, fetch_binary(app, binary).await?));
+    }
+
+    progress(app, "configure");
+    let (stopped, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh stop", None)
+        .await?;
+    log_output(app, &stopped);
+    for (binary, content) in downloads {
+        progress(app, &format!("upload:{}", binary.name));
+        session
+            .write_file(&format!("/opt/tobevpn/{}", binary.name), &content, "755")
+            .await?;
+        log(
+            app,
+            "info",
+            format!("{}: uploaded {} KB", binary.name, content.len() / 1024),
+        );
+    }
+    session
+        .write_file(
+            "/opt/tobevpn/tobevpn-router.sh",
+            AGENT_SCRIPT.as_bytes(),
+            "755",
+        )
+        .await?;
+    session
+        .write_file(
+            "/etc/hotplug.d/dhcp/90-tobevpn",
+            DHCP_HOOK.as_bytes(),
+            "755",
+        )
+        .await?;
+    // Rewriting the init script keeps its enabled/disabled state (rc.d link).
+    session
+        .write_file("/etc/init.d/tobevpn", INIT_SCRIPT.as_bytes(), "755")
+        .await?;
+
+    progress(app, "start");
+    let started = session
+        .run_ok("/opt/tobevpn/tobevpn-router.sh start", None)
+        .await?;
+    log_output(app, &started);
+    let status = session
+        .run_ok("/opt/tobevpn/tobevpn-router.sh status", None)
+        .await?;
+    progress(app, "done");
+    Ok(parse_status(&status))
+}
+
 #[tauri::command]
 pub async fn router_status(
     app: AppHandle,

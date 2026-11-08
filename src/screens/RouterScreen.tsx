@@ -32,6 +32,8 @@ import {
   routerTrafficBetween,
   routerDeviceLabel,
   unlinkRouterFromAccount,
+  routerUpdateCheck,
+  updateRouter,
   cachedLanNames,
   discoverLanNames,
   ROUTER_MAX_SERVERS,
@@ -243,6 +245,8 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [logOpen, setLogOpen] = useState(false);
   const [pings, setPings] = useState<Map<string, number>>(new Map());
   const [renaming, setRenaming] = useState(false);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const generationRef = useRef(0);
 
@@ -267,6 +271,14 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     }
     if (generation !== generationRef.current) return;
     if (refresh && currentLink) void refreshRouterTraffic(0);
+    // Newer components in this app than on the router: offered with a button.
+    if (currentLink && nextStatus?.installed) {
+      void routerUpdateCheck(currentLink)
+        .then((update) => {
+          if (generation === generationRef.current) setUpdateAvailable(update.available);
+        })
+        .catch(() => undefined);
+    }
     const nextServers = routableServers();
     setServers(nextServers);
     void measureVpnServerPings(nextServers, { force: refresh })
@@ -466,6 +478,31 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
             <p className="router-error">{t("router_server_down")}</p>
           )}
           {error && <p className="router-error">{error}</p>}
+          {installed && updateAvailable && (
+            <div className="router-update">
+              <span className="router-update__icon" aria-hidden="true">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 3v12" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <path d="M5 21h14" />
+                </svg>
+              </span>
+              <span className="router-update__text">{t("router_update_available")}</span>
+              <button type="button" className="router-update__button" disabled={busy} onClick={() => setUpdateOpen(true)}>
+                {t("router_update_button")}
+              </button>
+            </div>
+          )}
+          {updateOpen && link && (
+            <UpdateDialog
+              link={link}
+              onClose={() => setUpdateOpen(false)}
+              onUpdated={(next) => {
+                setStatus(next);
+                setUpdateAvailable(false);
+              }}
+            />
+          )}
 
           {installed && status ? (
             <>
@@ -1423,6 +1460,124 @@ function UninstallSheet({
             )}
             {phase === "done" && (
               <button type="button" className="router-button router-button--primary" onClick={() => finish(close)}>
+                {t("router_done")}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </CenterDialog>
+  );
+}
+
+/**
+ * Updating the router's VPN components, in the same dialog as the removal:
+ * a question, the steps with spinners (from the install's progress events),
+ * the result.
+ */
+function UpdateDialog({
+  link,
+  onClose,
+  onUpdated,
+}: {
+  link: RouterLink;
+  onClose: () => void;
+  onUpdated: (status: RouterStatus) => void;
+}) {
+  const [phase, setPhase] = useState<"confirm" | "working" | "done" | "failed">("confirm");
+  const [stage, setStage] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unlisten = listen<string>("router-install-progress", (event) => {
+      const step = event.payload;
+      if (step.startsWith("download")) setStage((current) => Math.max(current, 0));
+      else if (step === "configure" || step.startsWith("upload")) setStage((current) => Math.max(current, 1));
+      else if (step === "start") setStage((current) => Math.max(current, 2));
+      else if (step === "done") setStage(3);
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  const run = async () => {
+    setPhase("working");
+    setStage(0);
+    setError(null);
+    try {
+      onUpdated(await updateRouter(link));
+      setStage(3);
+      setPhase("done");
+    } catch (failure) {
+      setError(routerErrorText(failure));
+      setPhase("failed");
+    }
+  };
+
+  const labels = [t("router_update_step_download"), t("router_update_step_install"), t("router_update_step_start")];
+  const stateOf = (index: number): StepState =>
+    phase === "failed" && index === stage ? "failed" : index < stage ? "done" : index === stage ? "active" : "pending";
+
+  return (
+    <CenterDialog label={t("router_update_title")} locked={phase === "working"} onClose={onClose}>
+      {(close) => (
+        <div className="router-uninstall-sheet">
+          <h2 className="whats-new-dialog__title">
+            {phase === "done" ? t("router_update_done_title") : t("router_update_title")}
+          </h2>
+          {phase === "confirm" ? (
+            <p className="router-uninstall-sheet__text">{t("router_update_explain")}</p>
+          ) : phase === "done" ? (
+            <div className="router-uninstall-sheet__done">
+              <span className="router-uninstall-sheet__done-icon">{CHECK_ICON}</span>
+              <p className="router-uninstall-sheet__text">{t("router_update_done_text")}</p>
+            </div>
+          ) : (
+            <ul className="router-uninstall-sheet__steps">
+              {labels.map((label, index) => {
+                const state = stateOf(index);
+                return (
+                  <li key={label} className={`router-uninstall-sheet__step router-uninstall-sheet__step--${state}`}>
+                    <span className="router-uninstall-sheet__mark" aria-hidden="true">
+                      {state === "active" ? (
+                        <span className="router-traffic__spinner" />
+                      ) : state === "done" ? (
+                        CHECK_ICON
+                      ) : state === "failed" ? (
+                        "!"
+                      ) : null}
+                    </span>
+                    {label}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {error && <p className="router-uninstall-sheet__error">{error}</p>}
+          <div className="router-bottom__buttons">
+            {phase === "confirm" && (
+              <>
+                <button type="button" className="router-button" onClick={() => close()}>
+                  {t("cancel")}
+                </button>
+                <button type="button" className="router-button router-button--primary" onClick={() => void run()}>
+                  {t("router_update_button")}
+                </button>
+              </>
+            )}
+            {phase === "failed" && (
+              <>
+                <button type="button" className="router-button" onClick={() => close()}>
+                  {t("close")}
+                </button>
+                <button type="button" className="router-button router-button--primary" onClick={() => void run()}>
+                  {t("router_retry")}
+                </button>
+              </>
+            )}
+            {phase === "done" && (
+              <button type="button" className="router-button router-button--primary" onClick={() => close()}>
                 {t("router_done")}
               </button>
             )}
