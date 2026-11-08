@@ -1141,3 +1141,11 @@
   font-size: 13px;
   line-height: 1.4;
 }
+
+/* Two buttons in a row (dialogs, start/stop and remove): equal halves,
+   whatever the primary button does on its own. */
+.router-bottom__buttons .router-button {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
