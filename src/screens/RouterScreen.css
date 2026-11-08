@@ -1151,13 +1151,21 @@
 }
 
 .router-notice-wrap {
-  display: grid;
-  grid-template-rows: 1fr;
-  animation: router-notice-in 280ms ease-out;
-  transition: grid-template-rows 280ms ease, opacity 280ms ease, margin 280ms ease;
+  flex-shrink: 0;
+  overflow: hidden;
+  transition:
+    height 260ms cubic-bezier(0.2, 0, 0, 1),
+    margin-top 260ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 200ms ease;
 }
 
-.router-notice-wrap > .router-notice {
+@media (prefers-reduced-motion: reduce) {
+  .router-notice-wrap {
+    transition: none;
+  }
+}
+
+.router-notice {
   min-height: 0;
   overflow: hidden;
 }

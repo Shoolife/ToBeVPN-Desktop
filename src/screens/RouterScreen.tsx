@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { formatDecimal, t, tf, type StringKey } from "../i18n";
 import { countryFlagForUi, serverDisplayName } from "../components/serverDisplay";
@@ -840,24 +840,55 @@ function deviceChoice(device: RouterDevice, network: RouterNetwork): string {
  * reconnecting does not change it; new devices start without VPN.
  */
 const NOTICE_VISIBLE_MS = 6000;
-const NOTICE_FADE_MS = 280;
+const NOTICE_MOTION_MS = 260;
 
-// A short-lived notice: slides in, stays a few seconds, then folds away so
-// the list below moves up smoothly instead of jumping.
+/**
+ * A short-lived notice: it opens to its measured height, stays a few
+ * seconds and closes the same way, so the list below glides instead of
+ * jumping. Heights are set in pixels (WebKitGTK does not animate grid rows
+ * or "auto").
+ */
 function FadingNotice({ text, onDone }: { text: string; onDone: () => void }) {
-  const [leaving, setLeaving] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
   const doneRef = useRef(onDone);
   doneRef.current = onDone;
-  useEffect(() => {
-    const hide = window.setTimeout(() => setLeaving(true), NOTICE_VISIBLE_MS);
-    const done = window.setTimeout(() => doneRef.current(), NOTICE_VISIBLE_MS + NOTICE_FADE_MS);
-    return () => {
-      window.clearTimeout(hide);
-      window.clearTimeout(done);
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const timers: number[] = [];
+    const animate = (from: number, to: number, shown: boolean) => {
+      element.style.transition = "none";
+      element.style.height = `${from}px`;
+      element.style.opacity = shown ? "0" : "1";
+      element.style.marginTop = shown ? "-10px" : "0px";
+      void element.offsetHeight;
+      element.style.transition = "";
+      element.style.height = `${to}px`;
+      element.style.opacity = shown ? "1" : "0";
+      element.style.marginTop = shown ? "0px" : "-10px";
     };
+    if (!reduced) {
+      animate(0, element.scrollHeight, true);
+      // Back to its natural height once open, so a window resize reflows it.
+      timers.push(window.setTimeout(() => (element.style.height = ""), NOTICE_MOTION_MS));
+    }
+    timers.push(
+      window.setTimeout(() => {
+        if (reduced) {
+          doneRef.current();
+          return;
+        }
+        animate(element.offsetHeight, 0, false);
+        timers.push(window.setTimeout(() => doneRef.current(), NOTICE_MOTION_MS));
+      }, NOTICE_VISIBLE_MS),
+    );
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, []);
+
   return (
-    <div className={`router-notice-wrap${leaving ? " router-notice-wrap--leaving" : ""}`} role="status">
+    <div ref={ref} className="router-notice-wrap" role="status">
       <p className="router-notice">{text}</p>
     </div>
   );
