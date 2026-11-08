@@ -1006,3 +1006,8 @@
   opacity: 0.5;
   cursor: default;
 }
+
+.router-field input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.7;
+}

@@ -269,7 +269,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setInfo(nextInfo);
     setLink(currentLink);
     setStatus(nextStatus);
-    setUser((value) => value || defaultRouterUser(nextInfo));
     setLoading(false);
     setRefreshing(false);
   };
@@ -540,7 +539,14 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   >
                     <label className="router-field">
                       <span>{t("router_login")}</span>
-                      <input value={user} onChange={(event) => setUser(event.target.value)} autoComplete="off" disabled={busy} />
+                      <input
+                        value={user}
+                        placeholder={defaultRouterUser(info)}
+                        onChange={(event) => setUser(event.target.value)}
+                        autoComplete="off"
+                        spellCheck={false}
+                        disabled={busy}
+                      />
                     </label>
                     <label className="router-field">
                       <span>{t("router_password")}</span>
@@ -549,6 +555,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                           type={passwordVisible ? "text" : "password"}
                           value={password}
                           onChange={(event) => setPassword(event.target.value)}
+                          placeholder={t("router_password_placeholder")}
                           autoComplete="off"
                           spellCheck={false}
                           disabled={busy}
