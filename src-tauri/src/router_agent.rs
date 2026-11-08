@@ -342,6 +342,140 @@ async fn router_arch(session: &Session) -> Result<Arch, String> {
 const MIN_TOTAL_MEMORY_KB: u64 = 120 * 1024;
 const MIN_FREE_MEMORY_KB: u64 = 64 * 1024;
 
+/// What the install needs to know about a router, as shell lines.
+fn base_facts_command() -> String {
+    "echo arch=$(uname -m); echo free_kb=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'); \
+     echo tun=$([ -c /dev/net/tun ] || grep -qw tun /proc/modules && echo 1 || echo 0); \
+     echo pkg=$(command -v apk >/dev/null || command -v opkg >/dev/null && echo 1 || echo 0); \
+     echo curl=$(command -v curl >/dev/null && echo 1 || echo 0); \
+     echo firewall=$(if command -v nft >/dev/null && { [ -x /sbin/fw4 ] || ! command -v iptables >/dev/null; }; then echo nftables; elif command -v iptables >/dev/null; then echo iptables; else echo none; fi); \
+     echo installed=$([ -x /opt/tobevpn/xray ] && echo 1 || echo 0); \
+     echo mem_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); \
+     echo mem_available_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo); \
+     echo own_xray_kb=$(p=$(pidof xray); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
+     echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
+     . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_ID $DISTRIB_RELEASE\"; echo release=\"$DISTRIB_RELEASE\"; \
+     echo model=$(cat /tmp/sysinfo/model 2>/dev/null | tr ' ' '-')"
+        .to_string()
+}
+
+/// Whether the VPN fits a router, from what it reports. "Check the router"
+/// shows it; the install stops on its first problem.
+#[derive(Serialize, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterCheck {
+    pub ok: bool,
+    pub model: String,
+    pub firmware: String,
+    /// `uname -m`, and whether it is a CPU the VPN runs on.
+    pub machine: String,
+    pub cpu_ok: bool,
+    pub memory_total_mb: u64,
+    /// Free memory, our own Xray counted as free (it is replaced).
+    pub memory_free_mb: u64,
+    pub space_free_mb: u64,
+    /// "nftables", "iptables" or "none".
+    pub firewall: String,
+    /// Packages the install adds (kmod-tun, curl).
+    pub packages: Vec<String>,
+    /// "cpu", "memory_total", "memory_free", "space", "packages", "firewall".
+    pub problems: Vec<String>,
+}
+
+fn assess(facts: &HashMap<String, String>) -> RouterCheck {
+    let fact = |key: &str| facts.get(key).map(String::as_str).unwrap_or("");
+    let number = |key: &str| fact(key).parse::<u64>().unwrap_or(0);
+    let mut check = RouterCheck {
+        model: fact("model").replace('-', " "),
+        firmware: fact("os").trim_matches('"').to_string(),
+        machine: fact("arch").to_string(),
+        cpu_ok: Arch::from_uname(fact("arch")).is_some(),
+        memory_total_mb: number("mem_total_kb") / 1024,
+        memory_free_mb: (number("mem_available_kb") + number("own_xray_kb")) / 1024,
+        space_free_mb: number("free_kb") / 1024,
+        firewall: fact("firewall").to_string(),
+        ..Default::default()
+    };
+    if fact("tun") != "1" {
+        check.packages.push("kmod-tun".into());
+    }
+    if fact("curl") != "1" {
+        check.packages.push("curl".into());
+    }
+    if !check.cpu_ok {
+        check.problems.push("cpu".into());
+    }
+    let total_kb = number("mem_total_kb");
+    if total_kb > 0 && total_kb < MIN_TOTAL_MEMORY_KB {
+        check.problems.push("memory_total".into());
+    } else if total_kb > 0
+        && number("mem_available_kb") + number("own_xray_kb") < MIN_FREE_MEMORY_KB
+    {
+        check.problems.push("memory_free".into());
+    }
+    if fact("installed") != "1" && number("free_kb") < REQUIRED_FREE_KB {
+        check.problems.push("space".into());
+    }
+    if !check.packages.is_empty() && fact("pkg") != "1" {
+        check.problems.push("packages".into());
+    }
+    if check.firewall == "none" {
+        check.problems.push("firewall".into());
+    }
+    check.ok = check.problems.is_empty();
+    check
+}
+
+/// The install's error for a router that does not fit (the Router screen
+/// turns these into readable text).
+fn check_error(check: &RouterCheck) -> Option<String> {
+    let problem = check.problems.first()?;
+    Some(match problem.as_str() {
+        "cpu" => format!("unsupported router CPU: {}", check.machine),
+        "memory_total" => format!("router has too little memory: {} MB", check.memory_total_mb),
+        "memory_free" => format!(
+            "not enough free memory on the router: {} MB free",
+            check.memory_free_mb
+        ),
+        "space" => format!(
+            "not enough space on the router: {} MB free",
+            check.space_free_mb
+        ),
+        "packages" => format!(
+            "the router lacks {} and has no package manager",
+            check.packages.join(", ")
+        ),
+        _ => "the router has no supported firewall".to_string(),
+    })
+}
+
+fn check_summary(check: &RouterCheck) -> String {
+    format!(
+        "router: {} · {} · {} · memory {} MB, {} MB free · {} MB free on /overlay · firewall {} · to add: {}",
+        check.model,
+        check.firmware,
+        check.machine,
+        check.memory_total_mb,
+        check.memory_free_mb,
+        check.space_free_mb,
+        check.firewall,
+        if check.packages.is_empty() { "nothing".to_string() } else { check.packages.join(", ") }
+    )
+}
+
+/// Checks a paired router without changing it: CPU, memory, space,
+/// firewall and the packages the install would add.
+#[tauri::command]
+pub async fn router_check(
+    app: AppHandle,
+    host: String,
+    user: String,
+) -> Result<RouterCheck, String> {
+    let session = open(&app, &host, &user).await?;
+    let facts = parse_key_values(&session.run_ok(&base_facts_command(), None).await?);
+    Ok(assess(&facts))
+}
+
 /// Packages a stock OpenWrt may lack; installed by apk (OpenWrt 25) or opkg.
 fn package_install_command(packages: &[&str]) -> String {
     let list = packages.join(" ");
@@ -752,75 +886,24 @@ async fn install(
     let session = open(&app, &host, &user).await?;
 
     progress(&app, "check");
-    let arch = router_arch(&session).await?;
+    // The same checks as "Check the router": nothing is installed when the
+    // router does not fit.
+    let mut facts = parse_key_values(&session.run_ok(&base_facts_command(), None).await?);
+    let check = assess(&facts);
+    log(&app, "info", check_summary(&check));
+    if let Some(error) = check_error(&check) {
+        return Err(error);
+    }
+    let arch = Arch::from_uname(&check.machine)
+        .ok_or_else(|| format!("unsupported router CPU: {}", check.machine))?;
     let binaries = router_binaries(&app, arch).await;
-    let md5_checks = component_facts_command(&binaries);
-    let facts = parse_key_values(
+    facts.extend(parse_key_values(
         &session
-            .run_ok(
-                &format!(
-                    "echo arch=$(uname -m); echo free_kb=$(df -k /overlay 2>/dev/null | awk 'NR==2{{print $4}}'); \
-                     echo tun=$([ -c /dev/net/tun ] || grep -qw tun /proc/modules && echo 1 || echo 0); \
-                     echo pkg=$(command -v apk >/dev/null || command -v opkg >/dev/null && echo 1 || echo 0); \
-                     echo curl=$(command -v curl >/dev/null && echo 1 || echo 0); \
-                     echo mem_total_kb=$(awk '/^MemTotal:/{{print $2}}' /proc/meminfo); \
-                     echo mem_available_kb=$(awk '/^MemAvailable:/{{print $2}}' /proc/meminfo); \
-                     echo own_xray_kb=$(p=$(pidof xray); [ -n \"$p\" ] && awk '/^VmRSS:/{{print $2}}' /proc/$p/status || echo 0); \
-                     {md5_checks}\
-                     echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
-                     . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_RELEASE\"; \
-                     echo model=$(cat /tmp/sysinfo/model 2>/dev/null | tr ' ' '-')"
-                ),
-                None,
-            )
+            .run_ok(&component_facts_command(&binaries), None)
             .await?,
-    );
+    ));
     let fact = |key: &str| facts.get(key).map(String::as_str).unwrap_or("");
-    log(
-        &app,
-        "info",
-        format!(
-            "router: {} · {} {} · free {} KB on /overlay · memory {} MB, {} MB free · TUN {} · curl {}",
-            fact("model"),
-            fact("arch"),
-            fact("os").trim_matches('"'),
-            fact("free_kb"),
-            fact("mem_total_kb").parse::<u64>().unwrap_or(0) / 1024,
-            fact("mem_available_kb").parse::<u64>().unwrap_or(0) / 1024,
-            if fact("tun") == "1" { "yes" } else { "no" },
-            if fact("curl") == "1" { "yes" } else { "no" }
-        ),
-    );
-    // Before anything changes: a router without the memory for Xray would
-    // freeze or reboot under it.
-    let total_kb: u64 = fact("mem_total_kb").parse().unwrap_or(0);
-    let free_kb: u64 = fact("mem_available_kb").parse::<u64>().unwrap_or(0)
-        + fact("own_xray_kb").parse::<u64>().unwrap_or(0);
-    if total_kb > 0 && total_kb < MIN_TOTAL_MEMORY_KB {
-        return Err(format!(
-            "router has too little memory: {} MB",
-            total_kb / 1024
-        ));
-    }
-    if total_kb > 0 && free_kb < MIN_FREE_MEMORY_KB {
-        return Err(format!(
-            "not enough free memory on the router: {} MB free",
-            free_kb / 1024
-        ));
-    }
-    let mut packages: Vec<&str> = Vec::new();
-    if fact("tun") != "1" {
-        packages.push("kmod-tun");
-    }
-    if fact("curl") != "1" {
-        packages.push("curl");
-    }
-    if !packages.is_empty() && fact("pkg") != "1" {
-        return Err(format!(
-            "the router lacks {} and has no package manager",
-            packages.join(", ")
-        ));
-    }
+    let packages: Vec<&str> = check.packages.iter().map(String::as_str).collect();
     let needed: Vec<&Binary> = binaries
         .iter()
         .filter(|binary| binary_outdated(binary, &facts))
@@ -946,7 +1029,7 @@ async fn install(
         env!("CARGO_PKG_VERSION"),
         shell_quote_inner(
             facts
-                .get("os")
+                .get("release")
                 .map(|value| value.trim_matches('"'))
                 .unwrap_or("")
         ),
@@ -2006,6 +2089,51 @@ mod tests {
     #[ignore]
     fn live_latest_xray_release() {
         println!("LIVE {:?}", latest_xray_release(Arch::Armv7));
+    }
+
+    #[test]
+    fn assesses_routers() {
+        let facts = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<HashMap<_, _>>()
+        };
+        let good = facts(&[
+            ("arch", "armv7l"),
+            ("free_kb", "60000"),
+            ("tun", "0"),
+            ("pkg", "1"),
+            ("curl", "0"),
+            ("firewall", "nftables"),
+            ("installed", "0"),
+            ("mem_total_kb", "245000"),
+            ("mem_available_kb", "170000"),
+            ("own_xray_kb", "0"),
+            ("os", "\"OpenWrt 25.12.6\""),
+            ("model", "Xiaomi-AX3000T"),
+        ]);
+        let check = assess(&good);
+        assert!(check.ok, "{check:?}");
+        assert_eq!(check.packages, vec!["kmod-tun", "curl"]);
+        assert_eq!(check.model, "Xiaomi AX3000T");
+        assert_eq!(check.firmware, "OpenWrt 25.12.6");
+
+        let mut weak = good.clone();
+        weak.insert("arch".into(), "mips".into());
+        weak.insert("mem_total_kb".into(), "60000".into());
+        weak.insert("pkg".into(), "0".into());
+        let check = assess(&weak);
+        assert_eq!(check.problems, vec!["cpu", "memory_total", "packages"]);
+        assert_eq!(check_error(&check).unwrap(), "unsupported router CPU: mips");
+
+        // Our own running Xray counts as free memory.
+        let mut busy = good.clone();
+        busy.insert("mem_available_kb".into(), "40000".into());
+        busy.insert("own_xray_kb".into(), "40000".into());
+        assert!(assess(&busy).ok);
+        busy.insert("own_xray_kb".into(), "0".into());
+        assert_eq!(assess(&busy).problems, vec!["memory_free"]);
     }
 
     #[test]

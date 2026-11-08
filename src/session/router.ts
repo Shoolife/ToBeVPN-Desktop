@@ -339,17 +339,49 @@ export function defaultRouterUser(info: RouterInfo | null): string {
  * Pairs with the router (the password is used once and not stored) and
  * installs or updates ToBeVPN on it with the given server.
  */
+/** Whether the VPN fits a router: what "Check the router" shows. */
+export interface RouterCheck {
+  ok: boolean;
+  model: string;
+  firmware: string;
+  machine: string;
+  cpuOk: boolean;
+  memoryTotalMb: number;
+  memoryFreeMb: number;
+  spaceFreeMb: number;
+  /** "nftables", "iptables" or "none". */
+  firewall: string;
+  /** Packages the install adds. */
+  packages: string[];
+  /** "cpu", "memory_total", "memory_free", "space", "packages", "firewall". */
+  problems: string[];
+}
+
+/**
+ * Logs in once with the router password (which installs the app's key and is
+ * not stored), then checks the router without changing anything else.
+ */
+export async function checkRouter(options: { host: string; user: string; password: string }): Promise<RouterCheck> {
+  const { host, user, password } = options;
+  await invoke("router_pair", { host, user, password });
+  return invoke<RouterCheck>("router_check", { host, user });
+}
+
+/** The check again, with the app's key: no password needed. */
+export async function recheckRouter(host: string, user: string): Promise<RouterCheck> {
+  return invoke<RouterCheck>("router_check", { host, user });
+}
+
+/** Installs ToBeVPN on a router checked (and so paired) before. */
 export async function installRouter(options: {
   host: string;
   user: string;
-  password: string;
   server: SlotServer;
   subscriptionUrl: string;
   autostart: boolean;
 }): Promise<RouterStatus> {
-  const { host, user, password, server, subscriptionUrl, autostart } = options;
+  const { host, user, server, subscriptionUrl, autostart } = options;
   const serverHosts = accountServerHosts();
-  await invoke("router_pair", { host, user, password });
   const status = await invoke<RouterStatus>("router_install", {
     host,
     user,

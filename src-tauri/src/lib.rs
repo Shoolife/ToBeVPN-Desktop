@@ -1182,6 +1182,7 @@ pub fn run() {
             router_agent::router_set_default_mode,
             router_agent::router_set_name,
             router_agent::router_update_check,
+            router_agent::router_check,
             router_agent::router_update,
             router::lan_device_names,
             router_agent::router_traffic,

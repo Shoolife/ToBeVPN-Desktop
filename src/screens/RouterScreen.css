@@ -1066,3 +1066,78 @@
   font-size: 12px;
   font-weight: 400;
 }
+
+/* "Check the router": one row per requirement */
+.router-compat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--input-bg);
+}
+
+.router-compat--ok {
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+}
+
+.router-compat--bad {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+.router-compat__title {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.router-compat--ok .router-compat__title {
+  color: var(--success);
+}
+
+.router-compat--bad .router-compat__title {
+  color: var(--danger);
+}
+
+.router-compat__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.router-compat__mark {
+  flex-shrink: 0;
+  width: 14px;
+  color: var(--success);
+  font-weight: 700;
+  text-align: center;
+}
+
+.router-compat__row--bad .router-compat__mark,
+.router-compat__row--bad .router-compat__value {
+  color: var(--danger);
+}
+
+.router-compat__row--note .router-compat__mark {
+  color: var(--text-muted);
+}
+
+.router-compat__label {
+  flex-shrink: 0;
+  min-width: 150px;
+  color: var(--text-muted);
+}
+
+.router-compat__value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.router-compat__problem {
+  margin: 2px 0 0;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.4;
+}

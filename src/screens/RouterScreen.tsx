@@ -34,6 +34,9 @@ import {
   unlinkRouterFromAccount,
   routerUpdateCheck,
   updateRouter,
+  checkRouter,
+  recheckRouter,
+  type RouterCheck,
   cachedLanNames,
   discoverLanNames,
   ROUTER_MAX_SERVERS,
@@ -243,6 +246,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [user, setUser] = useState("");
   const [password, setPassword] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
+  const [check, setCheck] = useState<RouterCheck | null>(null);
   const [autostart, setAutostart] = useState(true);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   // Read again on every load: the server list may arrive after the screen opens.
@@ -318,9 +322,32 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
 
   const selectedServer = installServer(servers, pings);
 
+  const loginUser = () => user.trim() || defaultRouterUser(info);
+
+  // Step 1: log in once and check the router; nothing is installed yet.
+  const handleCheck = async (again = false) => {
+    if (!info?.gateway || (!again && !password)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setCheck(
+        again
+          ? await recheckRouter(info.gateway, loginUser())
+          : await checkRouter({ host: info.gateway, user: loginUser(), password }),
+      );
+      setPassword("");
+      setPasswordVisible(false);
+    } catch (checkError) {
+      setError(routerErrorText(checkError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Step 2: install on the checked router, with the app's key.
   const handleInstall = async () => {
     const subscriptionUrl = accountSubscriptionUrl();
-    if (!info?.gateway || !selectedServer || !subscriptionUrl || !password) return;
+    if (!info?.gateway || !selectedServer || !subscriptionUrl || !check?.ok) return;
     setBusy(true);
     setError(null);
     setLogLines([]);
@@ -328,8 +355,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     try {
       const next = await installRouter({
         host: info.gateway,
-        user: user.trim() || defaultRouterUser(info),
-        password,
+        user: loginUser(),
         server: slotServer(0, selectedServer),
         subscriptionUrl,
         autostart,
@@ -337,6 +363,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       setStatus(next);
       setLink(getRouterLink());
       setFormOpen(false);
+      setCheck(null);
     } catch (installError) {
       setError(routerErrorText(installError));
     } finally {
@@ -598,7 +625,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     className="router-form"
                     onSubmit={(event) => {
                       event.preventDefault();
-                      void handleInstall();
+                      void (check?.ok ? handleInstall() : handleCheck());
                     }}
                   >
                     <label className="router-field">
@@ -606,7 +633,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       <input
                         value={user}
                         placeholder={tf("router_login_placeholder", defaultRouterUser(info))}
-                        onChange={(event) => setUser(event.target.value)}
+                        onChange={(event) => {
+                          setUser(event.target.value);
+                          setCheck(null);
+                        }}
                         autoComplete="off"
                         spellCheck={false}
                         disabled={busy}
@@ -618,7 +648,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                         <input
                           type={passwordVisible ? "text" : "password"}
                           value={password}
-                          onChange={(event) => setPassword(event.target.value)}
+                          onChange={(event) => {
+                            setPassword(event.target.value);
+                            setCheck(null);
+                          }}
                           placeholder={t("router_password_placeholder")}
                           autoComplete="off"
                           spellCheck={false}
@@ -654,15 +687,30 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       </span>
                     </label>
                     <p className="router-panel__hint">{t("router_password_hint")}</p>
-                    <label className="router-check">
-                      <input type="checkbox" checked={autostart} disabled={busy} onChange={(event) => setAutostart(event.target.checked)} />
-                      <span>{t("router_autostart")}</span>
-                    </label>
-                    <p className="router-panel__hint">{t("router_install_scope")}</p>
+                    {check && <CompatibilityCard check={check} />}
+                    {check?.ok && (
+                      <>
+                        <label className="router-check">
+                          <input type="checkbox" checked={autostart} disabled={busy} onChange={(event) => setAutostart(event.target.checked)} />
+                          <span>{t("router_autostart")}</span>
+                        </label>
+                        <p className="router-panel__hint">{t("router_install_scope")}</p>
+                      </>
+                    )}
                     <div className="router-actions">
-                      <button type="submit" className="router-button router-button--primary" disabled={busy || !password || !selectedServer}>
-                        {t("router_install")}
-                      </button>
+                      {check?.ok ? (
+                        <button type="submit" className="router-button router-button--primary" disabled={busy || !selectedServer}>
+                          {t("router_install")}
+                        </button>
+                      ) : check ? (
+                        <button type="button" className="router-button" disabled={busy} onClick={() => void handleCheck(true)}>
+                          {t("router_check_again")}
+                        </button>
+                      ) : (
+                        <button type="submit" className="router-button router-button--primary" disabled={busy || !password}>
+                          {t("router_check")}
+                        </button>
+                      )}
                       {busy && <Spinner size={18} />}
                       {busy && step && INSTALL_STEPS[step] && (
                         <span className="router-panel__hint">{t(INSTALL_STEPS[step])}</span>
@@ -1605,5 +1653,49 @@ function UpdateDialog({
         </div>
       )}
     </CenterDialog>
+  );
+}
+
+/** What the check found, one row per requirement, before anything is installed. */
+function CompatibilityCard({ check }: { check: RouterCheck }) {
+  const bad = (problem: string) => check.problems.includes(problem);
+  const rows: Array<{ label: string; value: string; ok: boolean }> = [
+    { label: t("router_check_firmware"), value: check.firmware || "—", ok: true },
+    {
+      label: t("router_check_cpu"),
+      value: check.cpuOk ? (check.machine.startsWith("arm") && check.machine !== "arm64" && check.machine !== "aarch64" ? "ARMv7" : "ARM64") : check.machine,
+      ok: !bad("cpu"),
+    },
+    {
+      label: t("router_check_memory"),
+      value: tf("router_check_memory_value", check.memoryTotalMb, check.memoryFreeMb),
+      ok: !bad("memory_total") && !bad("memory_free"),
+    },
+    { label: t("router_check_space"), value: tf("router_check_space_value", check.spaceFreeMb), ok: !bad("space") },
+    { label: t("router_check_firewall"), value: check.firewall === "none" ? "—" : check.firewall, ok: !bad("firewall") },
+  ];
+  return (
+    <div className={`router-compat ${check.ok ? "router-compat--ok" : "router-compat--bad"}`}>
+      <div className="router-compat__title">
+        {check.ok ? t("router_check_ok") : t("router_check_bad")}
+      </div>
+      {rows.map((row) => (
+        <div key={row.label} className={`router-compat__row ${row.ok ? "" : "router-compat__row--bad"}`}>
+          <span className="router-compat__mark" aria-hidden="true">{row.ok ? "✓" : "✕"}</span>
+          <span className="router-compat__label">{row.label}</span>
+          <span className="router-compat__value">{row.value}</span>
+        </div>
+      ))}
+      {check.packages.length > 0 && (
+        <div className={`router-compat__row ${bad("packages") ? "router-compat__row--bad" : "router-compat__row--note"}`}>
+          <span className="router-compat__mark" aria-hidden="true">{bad("packages") ? "✕" : "•"}</span>
+          <span className="router-compat__label">{t("router_check_packages")}</span>
+          <span className="router-compat__value">{check.packages.join(", ")}</span>
+        </div>
+      )}
+      {check.problems.map((problem) => (
+        <p key={problem} className="router-compat__problem">{t(`router_problem_${problem}` as StringKey)}</p>
+      ))}
+    </div>
   );
 }
