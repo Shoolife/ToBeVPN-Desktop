@@ -13,7 +13,7 @@ import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import "../components/SubscriptionSheet.css";
 import "../components/WhatsNewDialog.css";
 import { createPortal } from "react-dom";
-import { getCachedVpnServers, isAvailableVpnServer, type VpnServer } from "../session/auth";
+import { getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
 import {
@@ -306,6 +306,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setLoading(false);
     setRefreshing(false);
   };
+
+  // The server list can arrive (or change, after the subscription link was
+  // reset) while the screen is open.
+  useEffect(() => subscribeVpnServers(() => setServers(routableServers())), []);
 
   useEffect(() => {
     void load(false);
@@ -733,6 +737,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   </button>
                 )}
                 {!info.firmware && <p className="router-panel__hint">{t("router_install_unsupported")}</p>}
+                {info.firmware && servers.length === 0 && (
+                  <p className="router-panel__hint">{t("router_servers_loading")}</p>
+                )}
                 {info.firmware && !info.supported && (
                   <p className="router-panel__hint">{t("router_install_compatibility")}</p>
                 )}

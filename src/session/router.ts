@@ -5,7 +5,7 @@
 // cannot run SSH or install software on another device.
 import { invoke } from "@tauri-apps/api/core";
 import type { LinkedDeviceDto } from "../api/types";
-import { SUBSCRIPTION_BASE_URL } from "../api/config";
+import { BOT_API_BASE_URL, PANEL_BASE_URL, SUBSCRIPTION_BASE_URL } from "../api/config";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { getSession } from "./store";
 import type { ServerVpnConfig } from "./vpn";
@@ -540,7 +540,25 @@ export function routerDeviceLabel(device: RouterDevice, lanNames: Record<string,
  * directly, so a device running its own ToBeVPN is not tunnelled twice.
  */
 function accountServerHosts(): string[] {
-  return [...new Set(getCachedVpnServers().map((server) => server.address).filter(Boolean))];
+  const servers = getCachedVpnServers().map((server) => server.address);
+  return [...new Set([...servers, ...serviceHosts()].filter(Boolean))];
+}
+
+/**
+ * The app's own services (subscription, bot API, panel). The router sends
+ * them direct too: the app on a computer behind the router then reaches
+ * them as without it, not through a foreign server that may not get to
+ * them (its subscription requests timed out that way).
+ */
+function serviceHosts(): string[] {
+  const urls = [SUBSCRIPTION_BASE_URL, PANEL_BASE_URL, BOT_API_BASE_URL, import.meta.env.VITE_BOT_API_URL];
+  return urls.flatMap((url) => {
+    try {
+      return url ? [new URL(url).hostname] : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 /** Subscription address of the account, which the router fetches itself. */
