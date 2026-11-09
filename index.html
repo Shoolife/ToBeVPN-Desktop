@@ -91,7 +91,6 @@
         height: 84px;
         display: block;
         transform-origin: 50% 50%;
-        animation: window-morph-spin 900ms linear infinite;
       }
       #window-morph-loader .morph-shield {
         position: absolute;
@@ -102,6 +101,14 @@
         display: block;
         transform-origin: 50% 50%;
         filter: drop-shadow(0 0 10px rgba(8, 192, 205, 0.45));
+      }
+      /* Only while the loader shows: hidden, the endless spin and the
+         drop-shadow pulse still repainted the window 60 times a second,
+         about a fifth of a CPU core all the time in WebKitGTK. */
+      html[data-window-morph] #window-morph-loader .morph-ring {
+        animation: window-morph-spin 900ms linear infinite;
+      }
+      html[data-window-morph] #window-morph-loader .morph-shield {
         animation: window-morph-pulse 1200ms ease-in-out infinite alternate;
       }
       @keyframes window-morph-spin {
