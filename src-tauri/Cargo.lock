@@ -5724,6 +5724,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "webkit2gtk",
  "windows 0.61.3",
 ]
 

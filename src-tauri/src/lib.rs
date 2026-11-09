@@ -1,5 +1,6 @@
 mod autostart;
 mod diagnostics;
+mod health;
 #[cfg(target_os = "linux")]
 pub mod linux_update;
 mod notifications;
@@ -1014,7 +1015,11 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
-            diagnostics::initialize(diagnostic_data_dir, env!("CARGO_PKG_VERSION").to_string())?;
+            diagnostics::initialize(
+                diagnostic_data_dir.clone(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            )?;
+            health::start(app.handle(), diagnostic_data_dir);
 
             let xray_in_exe_dir = exe_dir.join("xray").exists()
                 || exe_dir.join("xray.exe").exists()
@@ -1117,6 +1122,7 @@ pub fn run() {
             // delete-event callback is reentrant and on some Wayland/GTK setups
             // the call is silently dropped, leaving the window stuck on screen.
             if let Some(main_window) = app.get_webview_window("main") {
+                health::watch_webview(&main_window);
                 restore_window_chrome(&main_window);
                 let _ = main_window.center();
                 let quit_for_window = quit_flag.clone();
@@ -1235,6 +1241,7 @@ pub fn run() {
             // runtime is still alive. Avoids double-prompt for the pkexec password.
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 diagnostics::record_native("App", "Application exit requested");
+                health::mark_clean_exit();
                 if let Some(state) = app_handle.try_state::<AppVpn>() {
                     let manager = state.0.clone();
                     tauri::async_runtime::block_on(async move {
