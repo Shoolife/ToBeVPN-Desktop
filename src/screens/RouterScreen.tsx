@@ -273,7 +273,11 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setRefreshing(refresh);
     setError(null);
     const nextInfo = await detectRouter(refresh);
-    const currentLink = getRouterLink();
+    // The linked router is asked only from its own network: elsewhere this
+    // screen is about the router here, and SSH to the home address would
+    // only fail (the phone app does the same).
+    const savedLink = getRouterLink();
+    const currentLink = savedLink && savedLink.host === nextInfo.gateway ? savedLink : null;
     let nextStatus: RouterStatus | null = null;
     if (currentLink) {
       try {
