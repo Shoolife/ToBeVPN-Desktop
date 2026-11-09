@@ -9,10 +9,11 @@ import { useRouterTraffic } from "../session/useRouterTraffic";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
+import CenterDialog from "../components/CenterDialog";
+import ResetLinkOption from "../components/ResetLinkOption";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import "../components/SubscriptionSheet.css";
 import "../components/WhatsNewDialog.css";
-import { createPortal } from "react-dom";
 import { getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
@@ -1464,60 +1465,6 @@ function ServerSheet({
   );
 }
 
-/**
- * A centred window over the screen, as the app's other dialogs (What's new,
- * demo login): blurred backdrop, rise in, fade out. While `locked` it cannot
- * be closed.
- */
-function CenterDialog({
-  label,
-  locked = false,
-  onClose,
-  children,
-}: {
-  label: string;
-  locked?: boolean;
-  onClose: () => void;
-  children: (close: (after?: () => void) => void) => ReactNode;
-}) {
-  const { closing, requestClose } = useAnimatedDialogClose(onClose);
-  const lockedRef = useRef(locked);
-  lockedRef.current = locked;
-  const close = (after?: () => void) =>
-    requestClose(after ? () => {
-      onClose();
-      after();
-    } : undefined);
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !lockedRef.current) close();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  return createPortal(
-    <div
-      className={`whats-new-overlay ${closing ? "whats-new-overlay--closing" : ""}`}
-      onClick={() => {
-        if (!locked) close();
-      }}
-    >
-      <div
-        className="whats-new-dialog router-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={label}
-        onClick={(event) => event.stopPropagation()}
-      >
-        {children(close)}
-      </div>
-    </div>,
-    document.getElementById("overlay-root") ?? document.body,
-  );
-}
-
 type StepState = "pending" | "active" | "done" | "failed";
 
 /**
@@ -1540,6 +1487,7 @@ function UninstallSheet({
   const [phase, setPhase] = useState<"confirm" | "working" | "done" | "failed">("confirm");
   const [steps, setSteps] = useState<StepState[]>(["pending", "pending"]);
   const [error, setError] = useState<string | null>(null);
+  const [resetLink, setResetLink] = useState(true);
   const removedRef = useRef(false);
 
   const setStep = (index: number, state: StepState) =>
@@ -1556,7 +1504,7 @@ function UninstallSheet({
         setStep(0, "done");
       }
       setStep(1, "active");
-      await unlinkRouterFromAccount(hwid);
+      await unlinkRouterFromAccount(hwid, resetLink);
       setStep(1, "done");
       setPhase("done");
     } catch (failure) {
@@ -1594,7 +1542,10 @@ function UninstallSheet({
             {phase === "done" ? t("router_uninstall_done_title") : t("router_uninstall")}
           </h2>
           {phase === "confirm" ? (
-            <p className="router-uninstall-sheet__text">{t("router_uninstall_explain")}</p>
+            <>
+              <p className="router-uninstall-sheet__text">{t("router_uninstall_explain")}</p>
+              {hwid && <ResetLinkOption checked={resetLink} onChange={setResetLink} />}
+            </>
           ) : phase === "done" ? (
             <div className="router-uninstall-sheet__done">
               <span className="router-uninstall-sheet__done-icon">{CHECK_ICON}</span>

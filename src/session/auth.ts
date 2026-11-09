@@ -1653,7 +1653,12 @@ function sanitizeLinkedDevices(value: unknown): LinkedDevicesDto {
   };
 }
 
-export async function unlinkOtherDevice(deviceId: string): Promise<void> {
+/**
+ * Takes another device off the account. With `resetSubscription` (the
+ * default, as before) the subscription link changes, so the removed device
+ * cannot keep using it; without it the link stays and nothing reconnects.
+ */
+export async function unlinkOtherDevice(deviceId: string, resetSubscription = true): Promise<void> {
   const { isLinked } = getSession();
   if (!isLinked) throw new Error("Not authenticated");
   const operationIdentity = captureSessionWorkIdentity();
@@ -1665,16 +1670,20 @@ export async function unlinkOtherDevice(deviceId: string): Promise<void> {
     throw new Error("The current device cannot be unlinked from this screen");
   }
   const reconnectServer = getActiveVpnReconnectServer();
-  const res = await unlinkDevice({ device_id: normalizedDeviceId });
+  const res = await unlinkDevice({
+    device_id: normalizedDeviceId,
+    reset_subscription: resetSubscription,
+  });
   if (!res.success) throw new Error(res.message ?? "Could not unlink device");
   if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
-  if (reconnectServer) {
+  const linkReset = res.data?.subscription_link_reset ?? resetSubscription;
+  if (reconnectServer && linkReset) {
     await disconnectVpn().catch(() => {});
     if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
   }
   await refreshAfterDeviceUnlink(res.data);
   if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
-  if (reconnectServer && getSession().userPlan !== "EXPIRED") {
+  if (reconnectServer && linkReset && getSession().userPlan !== "EXPIRED") {
     await reconnectVpnWithFreshSubscription(reconnectServer);
   }
 }

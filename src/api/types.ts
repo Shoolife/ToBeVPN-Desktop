@@ -67,6 +67,8 @@ export interface DeviceRegisterRequestDto {
 
 export interface DeviceUnlinkRequestDto {
   device_id: string;
+  /** false keeps the subscription link; missing or true resets it. */
+  reset_subscription?: boolean;
 }
 
 export interface DeviceUnlinkResponseDto extends CurrentPlanDto {
@@ -75,6 +77,8 @@ export interface DeviceUnlinkResponseDto extends CurrentPlanDto {
   bot_subscription_updated?: boolean | null;
   bot_subscription_changed?: boolean | null;
   linked_devices_updated?: number | null;
+  /** false when the link was kept (reset_subscription: false). */
+  subscription_link_reset?: boolean | null;
 }
 
 export interface LinkedDeviceDto {

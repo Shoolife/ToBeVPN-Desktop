@@ -1199,3 +1199,43 @@
   font-size: 13px;
   line-height: 1.4;
 }
+
+/* "Reset the subscription link" in the unlink and uninstall dialogs. */
+.reset-link-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+}
+
+.reset-link-option input {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.reset-link-option__text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.reset-link-option__title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.reset-link-option__hint {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}

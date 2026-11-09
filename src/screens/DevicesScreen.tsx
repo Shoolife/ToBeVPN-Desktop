@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { t } from "../i18n";
+import { t, tf } from "../i18n";
 import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../session/auth";
 import { formatEpochSecondsDateDots } from "../session/dateFormat";
 import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
+import CenterDialog from "../components/CenterDialog";
+import ResetLinkOption from "../components/ResetLinkOption";
 import type { LinkedDeviceDto } from "../api/types";
 import { usePersonalDataHidden } from "../session/profileDisplay";
 import {
@@ -139,6 +141,7 @@ export default function DevicesScreen({
   const [isRefreshing, setRefreshing] = useState(false);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<{ id: string; name: string } | null>(null);
   const loadGenerationRef = useRef(0);
   const unlinkGenerationRef = useRef(0);
   const unlinkingRef = useRef(false);
@@ -210,23 +213,25 @@ export default function DevicesScreen({
     };
   }, []);
 
-  const handleUnlink = async (deviceId: string) => {
-    if (unlinkingRef.current) return;
+  const handleUnlink = async (deviceId: string, resetSubscription: boolean): Promise<boolean> => {
+    if (unlinkingRef.current) return false;
     unlinkingRef.current = true;
     const generation = ++unlinkGenerationRef.current;
     setUnlinkingId(deviceId);
     setError(null);
     try {
-      await unlinkOtherDevice(deviceId);
-      if (!mountedRef.current || generation !== unlinkGenerationRef.current) return;
+      await unlinkOtherDevice(deviceId, resetSubscription);
+      if (!mountedRef.current || generation !== unlinkGenerationRef.current) return true;
       setDevices((prev) => prev.filter((d) => d.device_id !== deviceId));
       setCurrentCount((count) =>
         count === null ? null : Math.max(0, count - 1),
       );
+      return true;
     } catch {
       if (mountedRef.current && generation === unlinkGenerationRef.current) {
         setError(t("devices_unlink_error"));
       }
+      return false;
     } finally {
       if (generation === unlinkGenerationRef.current) {
         unlinkingRef.current = false;
@@ -352,7 +357,12 @@ export default function DevicesScreen({
                     </div>
                     <button
                       className="devices-card__disconnect"
-                      onClick={() => handleUnlink(d.device_id)}
+                      onClick={() =>
+                        setConfirming({
+                          id: d.device_id,
+                          name: routerNameFor(d.hwid) || d.device_model || t("router_title"),
+                        })
+                      }
                       disabled={unlinkingId !== null}
                     >
                       {t("devices_disconnect")}
@@ -394,7 +404,7 @@ export default function DevicesScreen({
                 </div>
                 <button
                   className="devices-card__disconnect"
-                  onClick={() => handleUnlink(d.device_id)}
+                  onClick={() => setConfirming({ id: d.device_id, name: deviceName(d, personalHidden) })}
                   disabled={unlinkingId !== null}
                 >
                   {t("devices_disconnect")}
@@ -404,6 +414,59 @@ export default function DevicesScreen({
           )}
         </ScrollEdgeAffordance>
       )}
+      {confirming && (
+        <UnlinkDeviceDialog
+          name={confirming.name}
+          onClose={() => setConfirming(null)}
+          onConfirm={(reset) => handleUnlink(confirming.id, reset)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Confirmation before a device leaves the account, with the choice to
+ * reset the subscription link (on by default).
+ */
+function UnlinkDeviceDialog({
+  name,
+  onClose,
+  onConfirm,
+}: {
+  name: string;
+  onClose: () => void;
+  onConfirm: (resetSubscription: boolean) => Promise<boolean>;
+}) {
+  const [resetLink, setResetLink] = useState(true);
+  const [working, setWorking] = useState(false);
+  return (
+    <CenterDialog label={t("devices_unlink_title")} locked={working} onClose={onClose}>
+      {(close) => (
+        <div className="router-uninstall-sheet">
+          <h2 className="whats-new-dialog__title">{t("devices_unlink_title")}</h2>
+          <p className="router-uninstall-sheet__text">{tf("devices_unlink_text", name)}</p>
+          <ResetLinkOption checked={resetLink} disabled={working} onChange={setResetLink} />
+          <div className="router-bottom__buttons">
+            <button type="button" className="router-button" disabled={working} onClick={() => close()}>
+              {t("cancel")}
+            </button>
+            <button
+              type="button"
+              className="router-button router-button--danger-solid"
+              disabled={working}
+              onClick={async () => {
+                setWorking(true);
+                await onConfirm(resetLink);
+                setWorking(false);
+                close();
+              }}
+            >
+              {working ? <Spinner size={16} /> : t("devices_unlink_confirm")}
+            </button>
+          </div>
+        </div>
+      )}
+    </CenterDialog>
   );
 }

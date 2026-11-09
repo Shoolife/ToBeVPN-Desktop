@@ -434,14 +434,17 @@ export async function routerStatus(link: RouterLink): Promise<RouterStatus> {
  * Takes the router's device off the account, so it no longer takes a device
  * of the subscription. Nothing to do when the account does not list it.
  */
-export async function unlinkRouterFromAccount(hwid: string | null | undefined): Promise<void> {
+export async function unlinkRouterFromAccount(
+  hwid: string | null | undefined,
+  resetSubscription = true,
+): Promise<void> {
   if (!hwid) return;
   const data = await fetchDevices();
   const wanted = hwid.toLowerCase();
   const device = data?.devices.find(
     (item) => (item.hwid ?? "").toLowerCase() === wanted || item.device_id.toLowerCase() === wanted,
   );
-  if (device) await unlinkOtherDevice(device.device_id);
+  if (device) await unlinkOtherDevice(device.device_id, resetSubscription);
 }
 
 export type RouterAction = "start" | "stop" | "restart" | "autostart-on" | "autostart-off" | "uninstall";
