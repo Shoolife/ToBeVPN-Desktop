@@ -1213,12 +1213,72 @@
 }
 
 .reset-link-option input {
+  margin-top: 1px;
+}
+
+/* The app's own checkbox: the system one in WebKitGTK looks foreign. */
+.reset-link-option input,
+.router-check input {
+  -webkit-appearance: none;
+  appearance: none;
+  display: grid;
+  place-content: center;
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  margin: 1px 0 0;
-  accent-color: var(--accent);
+  width: 20px;
+  height: 20px;
+  margin-left: 0;
+  margin-right: 0;
+  border: 2px solid color-mix(in srgb, var(--text-muted) 70%, transparent);
+  border-radius: 6px;
+  background: transparent;
   cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease;
+}
+
+.reset-link-option input::after,
+.router-check input::after {
+  content: "";
+  width: 10px;
+  height: 5px;
+  margin-top: -3px;
+  border-bottom: 2px solid #fff;
+  border-left: 2px solid #fff;
+  transform: rotate(-45deg) scale(0);
+  transition: transform 150ms cubic-bezier(0.2, 0, 0, 1.4);
+}
+
+.reset-link-option input:checked,
+.router-check input:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.reset-link-option input:checked::after,
+.router-check input:checked::after {
+  transform: rotate(-45deg) scale(1);
+}
+
+.reset-link-option input:focus-visible,
+.router-check input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
+
+.reset-link-option input:disabled,
+.router-check input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reset-link-option input,
+  .reset-link-option input::after,
+  .router-check input,
+  .router-check input::after {
+    transition: none;
+  }
 }
 
 .reset-link-option__text {
