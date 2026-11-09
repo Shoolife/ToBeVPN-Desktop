@@ -709,7 +709,7 @@ uninstall() {
     [ -x /etc/init.d/tobevpn ] && /etc/init.d/tobevpn disable 2>/dev/null
     rm -f /etc/init.d/tobevpn /etc/hotplug.d/dhcp/90-tobevpn
     rm -rf "$RUN"
-    sed -i '/tobevpn-desktop-router/d' /etc/dropbear/authorized_keys 2>/dev/null
+    sed -i '/ tobevpn-[a-z0-9-]*router/d' /etc/dropbear/authorized_keys ~/.ssh/authorized_keys 2>/dev/null
     rm -rf "$DIR"
     echo "uninstalled=1"
 }
