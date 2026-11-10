@@ -1590,12 +1590,25 @@ export async function fetchNodes(): Promise<PanelNodeDto[]> {
 export async function fetchDevices(): Promise<LinkedDevicesDto | null> {
   const { isLinked } = getSession();
   if (!isLinked) return null;
-  await pingHwidOnly().catch(() => false);
-  const res = await apiGetDevices();
-  if (!res.success || !res.data) {
-    throw new Error(res.message ?? "Could not load linked devices");
-  }
-  return sanitizeLinkedDevices(res.data);
+  // The access ping registers this computer's HWID; it can take seconds
+  // (a subscription request). The list does not wait for it unless this
+  // computer is missing from the list, then it is fetched once more.
+  const ping = pingHwidOnly().catch(() => false);
+  const load = async () => {
+    const res = await apiGetDevices();
+    if (!res.success || !res.data) {
+      throw new Error(res.message ?? "Could not load linked devices");
+    }
+    return sanitizeLinkedDevices(res.data);
+  };
+  const [first, aliases] = await Promise.all([load(), getCurrentDeviceAliases()]);
+  const wanted = new Set(aliases.map((alias) => alias.toLocaleLowerCase("en-US")));
+  const listed = first.devices.some((device) =>
+    [device.device_id, device.hwid].some((id) => id && wanted.has(id.toLocaleLowerCase("en-US"))),
+  );
+  if (listed) return first;
+  await ping;
+  return load();
 }
 
 function sanitizeLinkedDevices(value: unknown): LinkedDevicesDto {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { t, tf } from "../i18n";
 import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../session/auth";
+import { getSession } from "../session/store";
 import { formatEpochSecondsDateDots } from "../session/dateFormat";
 import Spinner from "../components/Spinner";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
@@ -123,6 +124,20 @@ function DeviceCardSkeleton({ action = false }: { action?: boolean }) {
   );
 }
 
+/** The last list, shown at once when the screen opens again; refreshed in the background. */
+let cachedDevices: {
+  account: string | null;
+  devices: LinkedDeviceDto[];
+  maxDevices: number;
+  currentCount: number | null;
+  aliases: string[];
+} | null = null;
+
+/** The cached list, only for the account it was loaded for. */
+function devicesCacheNow() {
+  return cachedDevices && cachedDevices.account === getSession().shortUuid ? cachedDevices : null;
+}
+
 export default function DevicesScreen({
   onBack,
   onOpenRouter,
@@ -133,11 +148,11 @@ export default function DevicesScreen({
   const [router, setRouter] = useState<RouterInfo | null>(() => getCachedRouter());
   const [routerLink, setRouterLink] = useState<RouterLink | null>(() => getRouterLink());
   const personalHidden = usePersonalDataHidden();
-  const [devices, setDevices] = useState<LinkedDeviceDto[]>([]);
-  const [maxDevices, setMaxDevices] = useState(0);
-  const [currentCount, setCurrentCount] = useState<number | null>(null);
-  const [currentAliases, setCurrentAliases] = useState<string[]>([]);
-  const [isInitialLoading, setInitialLoading] = useState(true);
+  const [devices, setDevices] = useState<LinkedDeviceDto[]>(() => devicesCacheNow()?.devices ?? []);
+  const [maxDevices, setMaxDevices] = useState(() => devicesCacheNow()?.maxDevices ?? 0);
+  const [currentCount, setCurrentCount] = useState<number | null>(() => devicesCacheNow()?.currentCount ?? null);
+  const [currentAliases, setCurrentAliases] = useState<string[]>(() => devicesCacheNow()?.aliases ?? []);
+  const [isInitialLoading, setInitialLoading] = useState(() => devicesCacheNow() === null);
   const [isRefreshing, setRefreshing] = useState(false);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -150,7 +165,7 @@ export default function DevicesScreen({
   const load = async (refresh = false) => {
     const generation = ++loadGenerationRef.current;
     const refreshStartedAt = refresh ? performance.now() : null;
-    setInitialLoading(!refresh);
+    setInitialLoading(!refresh && devicesCacheNow() === null);
     setRefreshing(refresh);
     setError(null);
     try {
@@ -172,6 +187,13 @@ export default function DevicesScreen({
         setDevices(data.devices);
         setMaxDevices(data.max_devices);
         setCurrentCount(data.current_count ?? null);
+        cachedDevices = {
+          account: getSession().shortUuid,
+          devices: data.devices,
+          maxDevices: data.max_devices,
+          currentCount: data.current_count ?? null,
+          aliases,
+        };
       }
     } catch {
       if (generation === loadGenerationRef.current) {
@@ -223,6 +245,9 @@ export default function DevicesScreen({
       await unlinkOtherDevice(deviceId, resetSubscription);
       if (!mountedRef.current || generation !== unlinkGenerationRef.current) return true;
       setDevices((prev) => prev.filter((d) => d.device_id !== deviceId));
+      if (cachedDevices) {
+        cachedDevices = { ...cachedDevices, devices: cachedDevices.devices.filter((d) => d.device_id !== deviceId) };
+      }
       setCurrentCount((count) =>
         count === null ? null : Math.max(0, count - 1),
       );
