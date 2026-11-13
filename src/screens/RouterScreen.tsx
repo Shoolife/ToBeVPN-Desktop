@@ -24,7 +24,6 @@ import {
   sameRouterModel,
   accountSubscriptionUrl,
   connectRouter,
-  defaultRouterUser,
   detectRouter,
   getCachedRouter,
   getRouterLink,
@@ -363,11 +362,12 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
 
   const selectedServer = installServer(servers, pings);
 
-  const loginUser = () => user.trim() || defaultRouterUser(info);
+  // As on the phone: the login is typed, never guessed.
+  const loginUser = () => user.trim();
 
   // Step 1: log in once and check the router; nothing is installed yet.
   const handleCheck = async (again = false) => {
-    if (!info?.gateway || (!again && !password)) return;
+    if (!info?.gateway || !loginUser() || (!again && !password)) return;
     setBusy(true);
     setError(null);
     try {
@@ -721,7 +721,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       <span>{t("router_login")}</span>
                       <input
                         value={user}
-                        placeholder={tf("router_login_placeholder", defaultRouterUser(info))}
+                        placeholder={t("router_login_placeholder")}
                         onChange={(event) => {
                           setUser(event.target.value);
                           setCheck(null);
@@ -799,7 +799,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                           {t("router_check_again")}
                         </button>
                       ) : (
-                        <button type="submit" className="router-button router-button--primary" disabled={busy || !password}>
+                        <button type="submit" className="router-button router-button--primary" disabled={busy || !password || !user.trim()}>
                           {t(reconnect ? "router_connect_button" : "router_check")}
                         </button>
                       )}
