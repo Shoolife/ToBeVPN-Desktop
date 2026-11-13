@@ -307,7 +307,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
         nextStatus = await routerStatus(currentLink);
       } catch (statusError) {
         accessLost = isAccessLost(statusError);
-        if (generation === generationRef.current) setError(routerErrorText(statusError));
+        // A lost key is not an error to show in red: the card below says
+        // what to do (connect again with the password).
+        if (!accessLost && generation === generationRef.current) setError(routerErrorText(statusError));
       }
     }
     if (refresh) {
@@ -564,7 +566,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               info.supported && <span className="devices-card__badge">{t("router_supported_badge")}</span>
             )}
           </div>
-          {!installed && <p className="router-status">{statusText}</p>}
+          {/* Nothing to say about installing on a router that already runs
+              ToBeVPN: its card asks to connect to it. */}
+          {!installed && !reconnect && <p className="router-status">{statusText}</p>}
           {installed && status?.failed && !status.running && <p className="router-error">{t("router_failed")}</p>}
           {installed &&
             status?.running &&
