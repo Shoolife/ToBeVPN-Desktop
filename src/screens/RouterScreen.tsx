@@ -18,7 +18,9 @@ import { getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, type Vp
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
 import {
+  accountRouterModels,
   accountSubscriptionUrl,
+  connectRouter,
   defaultRouterUser,
   detectRouter,
   getCachedRouter,
@@ -38,7 +40,6 @@ import {
   unlinkRouterFromAccount,
   routerUpdateCheck,
   updateRouter,
-  checkRouter,
   recheckRouter,
   type RouterCheck,
   cachedLanNames,
@@ -266,13 +267,22 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [updateOpen, setUpdateOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const generationRef = useRef(0);
+  // ToBeVPN already runs on this router, set up from another device (the
+  // phone): logging in then connects to it rather than installing again.
+  const [installedByAnother, setInstalledByAnother] = useState(false);
 
   const load = async (refresh: boolean) => {
     const generation = ++generationRef.current;
     const startedAt = performance.now();
     setRefreshing(refresh);
     setError(null);
+    const accountModels = accountRouterModels();
     const nextInfo = await detectRouter(refresh);
+    void accountModels.then((models) => {
+      if (generation !== generationRef.current) return;
+      const model = (nextInfo.model ?? "").toLowerCase();
+      setInstalledByAnother(!!model && models.some((item) => item.toLowerCase() === model));
+    });
     // The linked router is asked only from its own network: elsewhere this
     // screen is about the router here, and SSH to the home address would
     // only fail (the phone app does the same).
@@ -343,11 +353,19 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      setCheck(
-        again
-          ? await recheckRouter(info.gateway, loginUser())
-          : await checkRouter({ host: info.gateway, user: loginUser(), password }),
-      );
+      if (!again) {
+        // Already running ToBeVPN (installed from the phone): connected to
+        // it, the screen turns to its settings; nothing to install.
+        const current = await connectRouter({ host: info.gateway, user: loginUser(), password });
+        setPassword("");
+        setPasswordVisible(false);
+        if (current.installed) {
+          setFormOpen(false);
+          await load(false);
+          return;
+        }
+      }
+      setCheck(await recheckRouter(info.gateway, loginUser()));
       setPassword("");
       setPasswordVisible(false);
     } catch (checkError) {
@@ -661,7 +679,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
             <>
               <div className="devices-section-title">{t("router_vpn_section")}</div>
               <div className="router-panel">
-                <p className="router-panel__text">{t("router_vpn_description")}</p>
+                <p className="router-panel__text">
+                  {t(installedByAnother ? "router_connect_description" : "router_vpn_description")}
+                </p>
                 {formOpen ? (
                   <form
                     className="router-form"
@@ -750,7 +770,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                         </button>
                       ) : (
                         <button type="submit" className="router-button router-button--primary" disabled={busy || !password}>
-                          {t("router_check")}
+                          {t(installedByAnother ? "router_connect_button" : "router_check")}
                         </button>
                       )}
                       {busy && <Spinner size={18} />}
@@ -769,7 +789,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     disabled={!info.firmware || !accountSubscriptionUrl() || servers.length === 0}
                     onClick={() => setFormOpen(true)}
                   >
-                    {t("router_install")}
+                    {t(installedByAnother ? "router_connect_button" : "router_install")}
                   </button>
                 )}
                 {!info.firmware && <p className="router-panel__hint">{t("router_install_unsupported")}</p>}

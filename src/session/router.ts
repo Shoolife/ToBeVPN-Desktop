@@ -376,6 +376,40 @@ export async function checkRouter(options: { host: string; user: string; passwor
   return invoke<RouterCheck>("router_check", { host, user });
 }
 
+/**
+ * Logs in once and puts the app's key on the router. A router that already
+ * runs ToBeVPN (installed from another device) is then simply taken over:
+ * it is remembered as this app's router and its status returned, with no
+ * install. Otherwise the status says it is not installed.
+ */
+export async function connectRouter(options: { host: string; user: string; password: string }): Promise<RouterStatus> {
+  const { host, user, password } = options;
+  await invoke("router_pair", { host, user, password });
+  const status = await invoke<RouterStatus>("router_status", { host, user });
+  if (status.installed) {
+    const link: RouterLink = { host, user, serverId: null, serverName: null };
+    saveRouterLink(link);
+    remember(link, status);
+  }
+  return status;
+}
+
+/**
+ * Router models of the account's routers: one of them answering here means
+ * ToBeVPN already runs on this router, set up from another device.
+ */
+export async function accountRouterModels(): Promise<string[]> {
+  try {
+    const data = await fetchDevices();
+    return (data?.devices ?? [])
+      .filter(isRouterDevice)
+      .map((device) => (device.device_model ?? "").trim())
+      .filter((model) => model.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 /** The check again, with the app's key: no password needed. */
 export async function recheckRouter(host: string, user: string): Promise<RouterCheck> {
   return invoke<RouterCheck>("router_check", { host, user });

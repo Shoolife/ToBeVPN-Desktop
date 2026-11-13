@@ -274,8 +274,15 @@ export default function DevicesScreen({
     (d) => !deviceMatchesAliases(d, currentAliases) && !isRouterDevice(d),
   );
   const linkedHere = !!routerLink && !!router?.gateway && routerLink.host === router.gateway;
+  // The account's router that answers here: by its device id once linked,
+  // else by its model (ToBeVPN set up on it from another device).
+  const isRouterHere = (d: (typeof devices)[number]) =>
+    linkedHere
+      ? !!d.hwid && d.hwid === routerLink?.hwid
+      : !!router?.model && (d.device_model ?? "").toLowerCase() === router.model.toLowerCase();
+  const installedHere = !linkedHere && devices.some((d) => isRouterDevice(d) && isRouterHere(d));
   const otherRouters = ROUTER_SECTION_AVAILABLE
-    ? devices.filter((d) => isRouterDevice(d) && !(linkedHere && d.hwid && d.hwid === routerLink?.hwid))
+    ? devices.filter((d) => isRouterDevice(d) && !isRouterHere(d))
     : [];
   const showRouter = ROUTER_SECTION_AVAILABLE && (!!router?.gateway || otherRouters.length > 0);
   const hereName = (linkedHere && routerLink?.name) || router?.model || t("router_not_detected");
@@ -359,7 +366,11 @@ export default function DevicesScreen({
                       <div className="devices-card__name">{hereName}</div>
                       <div className="devices-card__meta">
                         {linkedHere && routerLink?.name && router.model ? `${router.model} · ` : ""}
-                        {router.supported ? t("router_card_protect_home") : routerMeta(router)}
+                        {installedHere
+                          ? t("router_card_installed")
+                          : router.supported
+                            ? t("router_card_protect_home")
+                            : routerMeta(router)}
                       </div>
                     </div>
                     <svg className="devices-card__chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
