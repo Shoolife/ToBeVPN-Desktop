@@ -16,6 +16,7 @@ import {
   isRouterDevice,
   getRouterLink,
   routerNameFor,
+  sameRouterModel,
   ROUTER_CHANGED_EVENT,
   type RouterLink,
   ROUTER_SECTION_AVAILABLE,
@@ -279,7 +280,7 @@ export default function DevicesScreen({
   const isRouterHere = (d: (typeof devices)[number]) =>
     linkedHere
       ? !!d.hwid && d.hwid === routerLink?.hwid
-      : !!router?.model && (d.device_model ?? "").toLowerCase() === router.model.toLowerCase();
+      : sameRouterModel(d.device_model ?? "", router?.model);
   const installedHere = !linkedHere && devices.some((d) => isRouterDevice(d) && isRouterHere(d));
   const otherRouters = ROUTER_SECTION_AVAILABLE
     ? devices.filter((d) => isRouterDevice(d) && !isRouterHere(d))

@@ -395,6 +395,18 @@ export async function connectRouter(options: { host: string; user: string; passw
 }
 
 /**
+ * The account lists a router by the model it reports itself, which can be
+ * written differently from its login page ("SNR SNR-CPE-AX2" against
+ * "SNR-CPE-AX2"): compared by letters and digits, one within the other.
+ */
+export function sameRouterModel(listed: string, here: string | null | undefined): boolean {
+  const norm = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const a = norm(listed);
+  const b = norm(here ?? "");
+  return a.length >= 3 && b.length >= 3 && (a.includes(b) || b.includes(a));
+}
+
+/**
  * Router models of the account's routers: one of them answering here means
  * ToBeVPN already runs on this router, set up from another device.
  */

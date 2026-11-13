@@ -20,6 +20,7 @@ import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
 import {
   accountRouterModels,
+  sameRouterModel,
   accountSubscriptionUrl,
   connectRouter,
   defaultRouterUser,
@@ -85,6 +86,12 @@ export function routerMeta(info: RouterInfo): string {
   return [routerFirmwareLabel(info.firmware), info.gateway].filter(Boolean).join(" · ");
 }
 
+/** The router no longer takes this app's key. */
+function isAccessLost(error: unknown): boolean {
+  const raw = String(error);
+  return raw.includes("not paired") || raw.includes("rejected the app key");
+}
+
 const INSTALL_STEPS: Record<string, StringKey> = {
   connect: "router_step_connect",
   check: "router_step_check",
@@ -113,7 +120,7 @@ function routerErrorText(error: unknown): string {
   const cpu = raw.match(/unsupported router CPU: (\S+)/);
   if (cpu) return tf("router_error_cpu", cpu[1]);
   if (raw.includes("no package manager") || raw.includes("could not install")) return t("router_error_packages");
-  if (raw.includes("not paired") || raw.includes("rejected the app key")) return t("router_error_not_paired");
+  if (isAccessLost(error)) return t("router_error_not_paired");
   return tf("router_error_generic", raw.replace(/^Error:\s*/, "").slice(0, 200));
 }
 
@@ -271,6 +278,11 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   // ToBeVPN already runs on this router, set up from another device (the
   // phone): logging in then connects to it rather than installing again.
   const [installedByAnother, setInstalledByAnother] = useState(false);
+  // This app's key is no longer on the router (removed when the VPN was
+  // reinstalled or removed from another device): the router is connected
+  // again with its password, and kept as it is if ToBeVPN runs on it.
+  const [lostAccess, setLostAccess] = useState(false);
+  const reconnect = installedByAnother || lostAccess;
 
   const load = async (refresh: boolean) => {
     const generation = ++generationRef.current;
@@ -281,8 +293,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     const nextInfo = await detectRouter(refresh);
     void accountModels.then((models) => {
       if (generation !== generationRef.current) return;
-      const model = (nextInfo.model ?? "").toLowerCase();
-      setInstalledByAnother(!!model && models.some((item) => item.toLowerCase() === model));
+      setInstalledByAnother(models.some((item) => sameRouterModel(item, nextInfo.model)));
     });
     // The linked router is asked only from its own network: elsewhere this
     // screen is about the router here, and SSH to the home address would
@@ -290,10 +301,12 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     const savedLink = getRouterLink();
     const currentLink = savedLink && savedLink.host === nextInfo.gateway ? savedLink : null;
     let nextStatus: RouterStatus | null = null;
+    let accessLost = false;
     if (currentLink) {
       try {
         nextStatus = await routerStatus(currentLink);
       } catch (statusError) {
+        accessLost = isAccessLost(statusError);
         if (generation === generationRef.current) setError(routerErrorText(statusError));
       }
     }
@@ -321,6 +334,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setInfo(nextInfo);
     setLink(currentLink);
     setStatus(nextStatus);
+    setLostAccess(accessLost);
     setLoading(false);
     setRefreshing(false);
   };
@@ -681,7 +695,13 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               <div className="devices-section-title">{t("router_vpn_section")}</div>
               <div className="router-panel">
                 <p className="router-panel__text">
-                  {t(installedByAnother ? "router_connect_description" : "router_vpn_description")}
+                  {t(
+                    installedByAnother
+                      ? "router_connect_description"
+                      : lostAccess
+                        ? "router_reconnect_description"
+                        : "router_vpn_description",
+                  )}
                 </p>
                 {formOpen ? (
                   <form
@@ -774,7 +794,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                         </button>
                       ) : (
                         <button type="submit" className="router-button router-button--primary" disabled={busy || !password}>
-                          {t(installedByAnother ? "router_connect_button" : "router_check")}
+                          {t(reconnect ? "router_connect_button" : "router_check")}
                         </button>
                       )}
                       {busy && (check || step) && <Spinner size={18} />}
@@ -793,7 +813,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     disabled={!info.firmware || !accountSubscriptionUrl() || servers.length === 0}
                     onClick={() => setFormOpen(true)}
                   >
-                    {t(installedByAnother ? "router_connect_button" : "router_install")}
+                    {t(reconnect ? "router_connect_button" : "router_install")}
                   </button>
                 )}
                 {!info.firmware && <p className="router-panel__hint">{t("router_install_unsupported")}</p>}
