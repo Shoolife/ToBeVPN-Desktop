@@ -8,6 +8,7 @@ import { findSameServer } from "../session/serverSelection";
 import { useRouterTraffic } from "../session/useRouterTraffic";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
+import BrandLoader from "../components/BrandLoader";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import CenterDialog from "../components/CenterDialog";
 import ResetLinkOption from "../components/ResetLinkOption";
@@ -481,8 +482,8 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       </div>
 
       {loading || !info ? (
-        <div className="spinner-center devices-spinner">
-          <Spinner size={32} />
+        <div className="spinner-center devices-spinner router-loading">
+          <BrandLoader label={t("router_step_check")} />
         </div>
       ) : refreshing ? (
         <ScrollEdgeAffordance className="router-content" overlayFade>
@@ -749,6 +750,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       </span>
                     </label>
                     <p className="router-panel__hint">{t("router_password_hint")}</p>
+                    {/* The first login and check run under the app's loader;
+                        the result fades in in its place. */}
+                    {busy && !check && !step && <BrandLoader label={t("router_step_check")} />}
                     {check && <CompatibilityCard check={check} />}
                     {check?.ok && (
                       <>
@@ -773,7 +777,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                           {t(installedByAnother ? "router_connect_button" : "router_check")}
                         </button>
                       )}
-                      {busy && <Spinner size={18} />}
+                      {busy && (check || step) && <Spinner size={18} />}
                       {busy && step && INSTALL_STEPS[step] && (
                         <span className="router-panel__hint">{t(INSTALL_STEPS[step])}</span>
                       )}

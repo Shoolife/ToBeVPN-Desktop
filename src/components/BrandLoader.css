@@ -1,0 +1,51 @@
+.brand-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  animation: brand-loader-in 320ms ease both;
+}
+.brand-loader__mark {
+  position: relative;
+  width: 84px;
+  height: 84px;
+}
+/* Explicit sizes: WebKitGTK gives an inset-only SVG a 300x150 default. */
+.brand-loader__ring {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 84px;
+  height: 84px;
+  display: block;
+  transform-origin: 50% 50%;
+  animation: brand-loader-spin 900ms linear infinite;
+}
+.brand-loader__shield {
+  position: absolute;
+  left: 19px;
+  top: 19px;
+  width: 46px;
+  height: 46px;
+  display: block;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 0 10px rgba(8, 192, 205, 0.45));
+  animation: brand-loader-pulse 1200ms ease-in-out infinite alternate;
+}
+.brand-loader__label {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+@keyframes brand-loader-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes brand-loader-pulse {
+  from { transform: scale(0.94); }
+  to { transform: scale(1.04); }
+}
+@keyframes brand-loader-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
