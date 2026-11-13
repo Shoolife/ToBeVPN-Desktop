@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { formatDecimal, t, tf, type StringKey } from "../i18n";
@@ -1168,10 +1169,13 @@ function pingColor(ping: number): string {
   return "var(--danger)";
 }
 
+const TRAFFIC_CHART_FLOOR = 10 * 1024 ** 2;
+
 function formatTrafficBytes(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${formatDecimal(bytes / 1024 ** 3, 1)} ${t("unit_gb")}`;
   if (bytes >= 1024 ** 2 || bytes === 0) return `${Math.round(bytes / 1024 ** 2)} ${t("unit_mb")}`;
-  return `${formatDecimal(bytes / 1024 ** 2, 1)} ${t("unit_mb")}`;
+  // Under a megabyte, kilobytes: "0,0 MB" next to visible bars read as nothing.
+  return `${Math.max(1, Math.round(bytes / 1024))} ${t("unit_kb")}`;
 }
 
 /** VPN traffic of the home network through the router: today, month, by hour. */
@@ -1182,7 +1186,9 @@ function RouterTraffic() {
   const hours = day.map(([start, end]) => routerTrafficBetween(traffic.hours, start, end));
   const today = hours.reduce((sum, bytes) => sum + bytes, 0);
   const monthTotal = routerTrafficBetween(traffic.hours, month[0][0], month[month.length - 1][1]);
-  const peak = Math.max(...hours, 1);
+  // Bars are measured against at least 10 MB: a few kilobytes in an
+  // otherwise empty day stay small instead of filling the chart.
+  const peak = Math.max(...hours, TRAFFIC_CHART_FLOOR);
   const currentHour = new Date().getHours();
   const [hovered, setHovered] = useState<number | null>(null);
   const hourLabel = (hour: number) => `${String(hour).padStart(2, "0")}:00`;
@@ -1390,7 +1396,10 @@ function BottomSheet({
     onPointerCancel: (event: React.PointerEvent<HTMLElement>) => finishDrag(event, false),
   };
 
-  return (
+  // Drawn over the whole window, not inside the screen: a parent with an
+  // animation or filter would otherwise hold the fixed overlay inside itself
+  // (WebKitGTK), and the sheet came out shifted and cut off.
+  return createPortal(
     <div
       className={`sub-sheet-overlay ${closing ? "sub-sheet-overlay--closing" : ""}`}
       onClick={(event) => {
@@ -1417,7 +1426,8 @@ function BottomSheet({
         </div>
         {children(close)}
       </div>
-    </div>
+    </div>,
+    document.getElementById("overlay-root") ?? document.body,
   );
 }
 

@@ -1304,7 +1304,7 @@
    rather than at once. */
 .router-content,
 .router-compat {
-  animation: router-fade-in 420ms ease both;
+  animation: router-fade-in 420ms ease backwards;
 }
 @keyframes router-fade-in {
   from { opacity: 0; }
@@ -1313,5 +1313,5 @@
 
 /* The login fields come in after the button, while the card grows. */
 .router-form {
-  animation: router-fade-in 380ms ease 120ms both;
+  animation: router-fade-in 380ms ease 120ms backwards;
 }
