@@ -9,6 +9,7 @@ import { useRouterTraffic } from "../session/useRouterTraffic";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import Spinner from "../components/Spinner";
 import BrandLoader from "../components/BrandLoader";
+import SmoothHeight from "../components/SmoothHeight";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import CenterDialog from "../components/CenterDialog";
 import ResetLinkOption from "../components/ResetLinkOption";
@@ -697,6 +698,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
           ) : (
             <>
               <div className="devices-section-title">{t("router_vpn_section")}</div>
+              <SmoothHeight>
               <div className="router-panel">
                 <p className="router-panel__text">
                   {t(
@@ -828,6 +830,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   <p className="router-panel__hint">{t("router_install_compatibility")}</p>
                 )}
               </div>
+              </SmoothHeight>
             </>
           )}
         </ScrollEdgeAffordance>

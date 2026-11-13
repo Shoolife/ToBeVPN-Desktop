@@ -1310,3 +1310,8 @@
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+/* The login fields come in after the button, while the card grows. */
+.router-form {
+  animation: router-fade-in 380ms ease 120ms both;
+}
