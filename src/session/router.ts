@@ -306,6 +306,10 @@ let trafficInFlight: Promise<void> | null = null;
 export function refreshRouterTraffic(maxAgeMs = 5 * 60_000): Promise<void> {
   const link = getRouterLink();
   if (!link || !ROUTER_SECTION_AVAILABLE || isBrowserPreviewRuntime()) return Promise.resolve();
+  // Only from the router's own network: elsewhere the home address is some
+  // other router (or nothing), and SSH to it would only fail or warn.
+  const here = getCachedRouter();
+  if (here?.gateway && here.gateway !== link.host) return Promise.resolve();
   try {
     const cache = JSON.parse(localStorage.getItem(TRAFFIC_KEY) ?? "null") as TrafficCache | null;
     if (cache && Date.now() - cache.fetchedAt < maxAgeMs && (!link.hwid || cache.hwid === link.hwid)) {

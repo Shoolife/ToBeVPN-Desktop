@@ -278,8 +278,9 @@ export default function DevicesScreen({
   // The account's router that answers here: by its device id once linked,
   // else by its model (ToBeVPN set up on it from another device).
   const isRouterHere = (d: (typeof devices)[number]) =>
-    linkedHere
-      ? !!d.hwid && d.hwid === routerLink?.hwid
+    linkedHere && routerLink?.hwid
+      ? !!d.hwid && d.hwid.toLowerCase() === routerLink.hwid.toLowerCase()
+      // Not linked, or linked before the router's id was read: by its model.
       : sameRouterModel(d.device_model ?? "", router?.model);
   const installedHere = !linkedHere && devices.some((d) => isRouterDevice(d) && isRouterHere(d));
   const otherRouters = ROUTER_SECTION_AVAILABLE

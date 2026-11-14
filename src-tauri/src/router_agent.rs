@@ -38,8 +38,10 @@ const DHCP_HOOK: &str = "#!/bin/sh\n\
 # ToBeVPN: per-device routes follow a device's new address.\n\
 [ -f /tmp/tobevpn/watch.pid ] && /opt/tobevpn/tobevpn-router.sh apply >/dev/null 2>&1\n";
 /// Marks our key in the router's authorized_keys, so uninstall removes it.
-const KEY_COMMENT: &str = "tobevpn-desktop-router";
+const KEY_COMMENT_PREFIX: &str = "tobevpn-desktop";
 const SSH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest a single router command may take.
+const COMMAND_DEADLINE: Duration = Duration::from_secs(300);
 /// Space the two binaries need on the router's flash, with margin.
 const REQUIRED_FREE_KB: u64 = 40 * 1024;
 const PRIVATE_RANGES: &[&str] = &[
@@ -599,6 +601,13 @@ struct Session {
 impl Session {
     /// Runs one command, feeding `stdin` to it; returns stdout and the exit code.
     async fn run(&self, command: &str, stdin: Option<&[u8]>) -> Result<(String, u32), String> {
+        // No command may hold the app forever (a hung restart on the router).
+        tokio::time::timeout(COMMAND_DEADLINE, self.run_inner(command, stdin))
+            .await
+            .map_err(|_| "router did not answer on SSH".to_string())?
+    }
+
+    async fn run_inner(&self, command: &str, stdin: Option<&[u8]>) -> Result<(String, u32), String> {
         let mut channel = self
             .handle
             .channel_open_session()
@@ -724,8 +733,13 @@ async fn connect(
         expected,
         seen: seen.clone(),
     };
+    // Keepalives keep a long silent command (a package install, a start that
+    // probes blocked servers) from looking like a dead link; a router that
+    // is really gone is noticed after a few missed ones.
     let config = Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(120)),
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(15)),
+        keepalive_max: 4,
         ..Default::default()
     });
     let handle = tokio::time::timeout(SSH_TIMEOUT, client::connect(config, (host, 22), handler))
@@ -791,22 +805,20 @@ async fn pair(app: &AppHandle, host: String, user: String, password: String) -> 
         .public_key()
         .to_openssh()
         .map_err(|error| format!("router key: {error}"))?;
-    let line = format!(
-        "{} {KEY_COMMENT}\n",
-        public
-            .split_whitespace()
-            .take(2)
-            .collect::<Vec<_>>()
-            .join(" ")
+    let mut parts = public.split_whitespace();
+    let kind = parts.next().unwrap_or("ssh-ed25519");
+    let blob = parts.next().ok_or("router key: empty public key")?;
+    // Each computer marks its key with its own id, and replaces only its own
+    // line (by its key): pairing a second computer does not lock the first
+    // one out. The agent's uninstall still finds every "tobevpn-…router" key.
+    let comment = format!("{KEY_COMMENT_PREFIX}-{}-router", &sha256_hex(blob.as_bytes())[..8]);
+    let line = format!("{kind} {blob} {comment}\n");
+    let command = format!(
+        "umask 077; if [ \"$(id -u)\" = 0 ] && [ -d /etc/dropbear ]; then f=/etc/dropbear/authorized_keys; \
+         else mkdir -p ~/.ssh; f=~/.ssh/authorized_keys; fi; \
+         {{ grep -vF '{blob}' \"$f\" 2>/dev/null | grep -v ' {comment}$'; cat; }} > \"$f.tobevpn\" && mv \"$f.tobevpn\" \"$f\""
     );
-    session
-        .run_ok(
-            "umask 077; if [ \"$(id -u)\" = 0 ] && [ -d /etc/dropbear ]; then f=/etc/dropbear/authorized_keys; \
-             else mkdir -p ~/.ssh; f=~/.ssh/authorized_keys; fi; \
-             grep -qF tobevpn-desktop-router \"$f\" 2>/dev/null && sed -i '/tobevpn-desktop-router/d' \"$f\"; cat >> \"$f\"",
-            Some(line.as_bytes()),
-        )
-        .await?;
+    session.run_ok(&command, Some(line.as_bytes())).await?;
     if let Some(fingerprint) = fingerprint {
         let mut hosts = known_hosts(&app);
         hosts.insert(host, fingerprint);
@@ -1204,6 +1216,14 @@ pub async fn router_update(
     let result = update(&app, &host, &user).await;
     if let Err(error) = &result {
         log(&app, "error", error.clone());
+        // The update stops the VPN before replacing files: a failure after
+        // that must not leave the home without it. The files it had not
+        // replaced yet are the working old ones.
+        if let Ok(session) = open(&app, &host, &user).await {
+            let _ = session
+                .run("[ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh start", None)
+                .await;
+        }
     }
     result
 }

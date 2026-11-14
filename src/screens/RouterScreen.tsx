@@ -185,13 +185,21 @@ function slotServer(slot: number, server: VpnServer): SlotServer {
 }
 
 
-/** Slots that devices other than `exceptMac` go through. */
-function usedSlots(network: RouterNetwork, exceptMac?: string): Set<number> {
-  return new Set(
+/**
+ * Slots that devices other than `exceptMac` go through. With the router's
+ * default mode on VPN, devices without their own choice ride slot 0, so it
+ * is in use too and never handed to another server.
+ */
+function usedSlots(network: RouterNetwork, exceptMac?: string, defaultVpn = false): Set<number> {
+  const used = new Set(
     network.devices
       .filter((device) => device.mac !== exceptMac && device.mode === "vpn")
       .map((device) => device.slot),
   );
+  if (defaultVpn && network.devices.some((device) => device.mac !== exceptMac && device.mode === "default")) {
+    used.add(0);
+  }
+  return used;
 }
 
 /**
@@ -206,12 +214,13 @@ function planSlots(
   exceptMac: string,
   serverId: string,
   limit: number,
+  defaultVpn = false,
 ): { list: SlotServer[] | null; slot: number } | "full" | null {
   const present = network.slots.find((item) => item.serverId === serverId);
   if (present) return { list: null, slot: present.slot };
   const server = servers.find((candidate) => candidate.id === serverId);
   if (!server) return null;
-  const used = usedSlots(network, exceptMac);
+  const used = usedSlots(network, exceptMac, defaultVpn);
   const list: SlotServer[] = [];
   for (const item of network.slots) {
     if (!used.has(item.slot)) continue;
@@ -227,8 +236,14 @@ function planSlots(
 }
 
 /** Whether a server not yet on the router still fits for this device. */
-function canAddServer(servers: VpnServer[], network: RouterNetwork, exceptMac: string, limit: number): boolean {
-  const used = usedSlots(network, exceptMac);
+function canAddServer(
+  servers: VpnServer[],
+  network: RouterNetwork,
+  exceptMac: string,
+  limit: number,
+  defaultVpn = false,
+): boolean {
+  const used = usedSlots(network, exceptMac, defaultVpn);
   const kept = network.slots.filter(
     (item) => used.has(item.slot) && servers.some((server) => server.id === item.serverId),
   );
@@ -371,6 +386,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     if (!info?.gateway || !loginUser() || (!again && !password)) return;
     setBusy(true);
     setError(null);
+    // The update dialog reports its steps on the same channel: a step left
+    // from it must not stand in for this check's loader.
+    setStep(null);
     try {
       if (!again) {
         // Already running ToBeVPN (installed from the phone): connected to
@@ -416,6 +434,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       setCheck(null);
     } catch (installError) {
       setError(routerErrorText(installError));
+      // What the router is left with after a failed install, not a stale view.
+      const linkNow = getRouterLink();
+      if (linkNow) void routerStatus(linkNow).then(setStatus).catch(() => undefined);
     } finally {
       setPassword("");
       setPasswordVisible(false);
@@ -613,6 +634,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               onUpdated={(next) => {
                 setStatus(next);
                 setUpdate(null);
+                setStep(null);
               }}
             />
           )}
@@ -970,7 +992,7 @@ function HomeNetwork({
   network: RouterNetwork | null;
   disabled: boolean;
   onBusy: (busy: boolean) => void;
-  onNetwork: (network: RouterNetwork) => void;
+  onNetwork: React.Dispatch<React.SetStateAction<RouterNetwork | null>>;
   onStatus: (status: RouterStatus) => void;
   onError: (message: string | null) => void;
 }) {
@@ -1015,21 +1037,30 @@ function HomeNetwork({
           await setRouterDevice(link, { mac: device.mac, mode: "vpn", slot: 0, name: device.name ?? "" });
         }
         onStatus(await setRouterDefaultMode(link, "direct"));
-        onNetwork({
-          ...network,
-          devices: network.devices.map((device) =>
-            device.mode === "default" ? { ...device, mode: "vpn", slot: 0 } : device,
-          ),
-        });
+        // Applied to the list as it is now: a choice saved meanwhile stays.
+        const moved = new Set(kept.map((device) => device.mac));
+        onNetwork((current) =>
+          current && {
+            ...current,
+            devices: current.devices.map((device) =>
+              moved.has(device.mac) && device.mode === "default" ? { ...device, mode: "vpn", slot: 0 } : device,
+            ),
+          },
+        );
       } catch (error) {
         onError(routerErrorText(error));
+      } finally {
+        // A failure part-way is tried again on the next read, not left half-done.
+        migratingRef.current = false;
       }
     })();
   }, [network, status.defaultMode]);
 
   /** Mode and slot for a choice; a server not yet on the router gets a free slot. */
   const save = async (device: RouterDevice, choice: string) => {
-    if (!network) return;
+    // One choice at a time: a second one planned against the list before the
+    // first is saved would drop the first one's new slot.
+    if (!network || savingMac) return;
     setSavingMac(device.mac);
     onError(null);
     setNotice(null);
@@ -1038,7 +1069,7 @@ function HomeNetwork({
       let slot = 0;
       let current = network;
       if (choice.startsWith("server:")) {
-        const plan = planSlots(servers, network, device.mac, choice.slice(7), limit);
+        const plan = planSlots(servers, network, device.mac, choice.slice(7), limit, status.defaultMode === "vpn");
         if (plan === "full") throw new Error("slots-full");
         if (!plan) throw new Error("server-missing");
         if (plan.list) {
@@ -1049,6 +1080,9 @@ function HomeNetwork({
             onBusy(false);
           }
           current = { ...network, slots: plan.list.map(toRouterSlot) };
+          // The router has the new servers now, whatever happens next: the
+          // screen must not keep describing the old ones.
+          onNetwork(current);
         }
         mode = "vpn";
         slot = plan.slot;
@@ -1104,7 +1138,7 @@ function HomeNetwork({
         <div className="router-devices">
           {devices.map((device) => {
             const isThis = !!device.ip && device.ip === status.clientIp;
-            const busy = disabled || savingMac === device.mac;
+            const busy = disabled || savingMac !== null;
             const choice = deviceChoice(device, network);
             const chosenId = choice.startsWith("server:") ? choice.slice(7) : null;
             const chosenSlot = chosenId ? network.slots.find((item) => item.serverId === chosenId) : null;
@@ -1147,7 +1181,7 @@ function HomeNetwork({
           servers={servers}
           pings={pings}
           onRouter={new Set(network.slots.map((item) => item.serverId))}
-          canAdd={canAddServer(servers, network, picking.mac, limit)}
+          canAdd={canAddServer(servers, network, picking.mac, limit, status.defaultMode === "vpn")}
           limit={limit}
           selected={deviceChoice(picking, network).replace(/^server:/, "")}
           onClose={() => setPickingMac(null)}
