@@ -294,7 +294,7 @@ export default function SettingsScreen({
     sectionTimerRef.current = window.setTimeout(() => {
       setPrevSection(null);
       sectionTimerRef.current = null;
-    }, 300);
+    }, 700);
   };
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getSavedTheme());
   const [pendingLang, setPendingLang] = useState<Lang | null>(null);

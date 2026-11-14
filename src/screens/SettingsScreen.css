@@ -789,22 +789,24 @@
   background: var(--bg);
 }
 
+/* Settings pages change as the app's screens do, as on the phone: a
+   700 ms crossfade, nothing moving or scaling. */
 .settings-layer--enter {
-  animation: settings-layer-in 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: settings-layer-in 700ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .settings-layer--exit {
-  animation: settings-layer-out 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: settings-layer-out 700ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 @keyframes settings-layer-in {
-  from { opacity: 0; transform: scale(0.96); }
-  to { opacity: 1; transform: scale(1); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes settings-layer-out {
-  from { opacity: 1; transform: scale(1); }
-  to { opacity: 0; transform: scale(1.04); }
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 /* Cards */
