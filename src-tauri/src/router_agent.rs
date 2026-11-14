@@ -733,8 +733,6 @@ fn known_hosts(app: &AppHandle) -> HashMap<String, Vec<String>> {
         .collect()
 }
 
-const MAX_KEYS_PER_HOST: usize = 4;
-
 async fn connect(
     app: &AppHandle,
     host: &str,
@@ -844,9 +842,6 @@ async fn pair(app: &AppHandle, host: String, user: String, password: String) -> 
         let keys = hosts.entry(host).or_default();
         keys.retain(|key| *key != fingerprint);
         keys.push(fingerprint);
-        if keys.len() > MAX_KEYS_PER_HOST {
-            keys.drain(..keys.len() - MAX_KEYS_PER_HOST);
-        }
         let path = known_hosts_path(&app)?;
         std::fs::write(&path, serde_json::to_vec_pretty(&hosts).unwrap_or_default())
             .map_err(|error| format!("write {}: {error}", path.display()))?;
