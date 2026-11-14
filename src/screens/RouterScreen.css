@@ -1315,3 +1315,21 @@
 .router-form {
   animation: router-fade-in 380ms ease 120ms backwards;
 }
+
+/* The update offer: unfolds from no height and fades in, folds away the same way. */
+.router-update-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 420ms cubic-bezier(0.4, 0, 0.2, 1), opacity 300ms ease;
+}
+
+.router-update-wrap--open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.router-update-wrap__inner {
+  min-height: 0;
+  overflow: hidden;
+}

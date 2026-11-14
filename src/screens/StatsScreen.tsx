@@ -93,6 +93,9 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   const [period, setPeriod] = useState<Period>("day");
   const [stats, setStats] = useState<StatSlot[]>([]);
   const [animated, setAnimated] = useState(false);
+  // The bar under the mouse: its traffic shows above the chart, as on the
+  // Router screen.
+  const [hovered, setHovered] = useState<number | null>(null);
 
   useEffect(() => {
     setAnimated(false);
@@ -247,14 +250,37 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
               <div className="stats-chart__gridline" />
               <div className="stats-chart__gridline" />
             </div>
-            <div className="stats-chart__bars">
+            <div className="stats-chart__bars" onMouseLeave={() => setHovered(null)}>
+              {hovered !== null && stats[hovered] && slotBytes[hovered] > 0 && (
+                <span
+                  className="stats-chart__tip"
+                  style={{
+                    left: `${((hovered + 0.5) / stats.length) * 100}%`,
+                    // Kept inside the chart at both ends.
+                    transform: `translateX(${hovered < 2 ? "-15%" : hovered > stats.length - 3 ? "-85%" : "-50%"})`,
+                  }}
+                  role="tooltip"
+                >
+                  <span className="stats-chart__tip-value">{formatBytes(slotBytes[hovered])}</span>
+                  {withRouter && routerAt(hovered) > 0 && stats[hovered].totalBytes > 0 && (
+                    <span className="stats-chart__tip-split">
+                      {`${t("stats_this_computer")} ${formatBytes(stats[hovered].totalBytes)} · ${t("stats_router_short")} ${formatBytes(routerAt(hovered))}`}
+                    </span>
+                  )}
+                  <span className="stats-chart__tip-time">{formatRowLabel(stats[hovered].period, period)}</span>
+                </span>
+              )}
               {stats.map((slot, i) => {
                 const frac = slot.totalBytes / maxBytes;
                 const routerFrac = routerAt(i) / maxBytes;
                 const label = formatSlotLabel(slot.period, period, i);
                 const isMax = i === maxIndex && maxBytes > 0;
                 return (
-                  <div key={i} className="stats-chart__bar-wrapper">
+                  <div
+                    key={i}
+                    className={`stats-chart__bar-wrapper ${hovered === i ? "stats-chart__bar-wrapper--hovered" : ""}`}
+                    onMouseEnter={() => setHovered(i)}
+                  >
                     {withRouter && (
                       <div
                         className={`stats-chart__bar stats-chart__bar--router ${frac > 0 ? "stats-chart__bar--stacked" : ""}`}

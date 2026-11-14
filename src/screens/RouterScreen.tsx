@@ -296,6 +296,11 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [renaming, setRenaming] = useState(false);
   const [update, setUpdate] = useState<RouterUpdate | null>(null);
   const updateAvailable = !!update?.available;
+  // The last offer, kept while the banner folds away after an update.
+  const [shownUpdate, setShownUpdate] = useState<RouterUpdate | null>(null);
+  useEffect(() => {
+    if (update?.available) setShownUpdate(update);
+  }, [update]);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const generationRef = useRef(0);
@@ -617,34 +622,40 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
             <p className="router-error">{t("router_server_down")}</p>
           )}
           {error && <p className="router-error">{error}</p>}
-          {installed && updateAvailable && (
-            <div className="router-update">
-              <span className="router-update__icon" aria-hidden="true">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 3v12" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <path d="M5 21h14" />
-                </svg>
-              </span>
-              <span className="router-update__text">
-                {t("router_update_available")}
-                {update?.components.includes("xray") && update.xrayTarget ? (
-                  <span className="router-update__versions">
-                    {update.xrayCurrent
-                      ? tf("router_update_xray_versions", update.xrayCurrent, update.xrayTarget)
-                      : tf("router_update_xray_version", update.xrayTarget)}
+          {/* The update offer unfolds and folds away smoothly (height and
+              fade), keeping its text while it leaves. */}
+          <div className={`router-update-wrap ${installed && updateAvailable ? "router-update-wrap--open" : ""}`}>
+            <div className="router-update-wrap__inner">
+              {shownUpdate && (
+                <div className="router-update">
+                  <span className="router-update__icon" aria-hidden="true">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 3v12" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <path d="M5 21h14" />
+                    </svg>
                   </span>
-                ) : (
-                  update?.components.includes("sites") && (
-                    <span className="router-update__versions">{t("router_update_sites")}</span>
-                  )
-                )}
-              </span>
-              <button type="button" className="router-update__button" disabled={busy} onClick={() => setUpdateOpen(true)}>
-                {t("router_update_button")}
-              </button>
+                  <span className="router-update__text">
+                    {t("router_update_available")}
+                    {shownUpdate?.components.includes("xray") && shownUpdate.xrayTarget ? (
+                      <span className="router-update__versions">
+                        {shownUpdate.xrayCurrent
+                          ? tf("router_update_xray_versions", shownUpdate.xrayCurrent, shownUpdate.xrayTarget)
+                          : tf("router_update_xray_version", shownUpdate.xrayTarget)}
+                      </span>
+                    ) : (
+                      shownUpdate?.components.includes("sites") && (
+                        <span className="router-update__versions">{t("router_update_sites")}</span>
+                      )
+                    )}
+                  </span>
+                  <button type="button" className="router-update__button" disabled={busy} onClick={() => setUpdateOpen(true)}>
+                    {t("router_update_button")}
+                  </button>
+                </div>
+              )}
             </div>
-          )}
+          </div>
           {updateOpen && link && (
             <UpdateDialog
               link={link}
