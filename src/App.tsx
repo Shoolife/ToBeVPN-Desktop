@@ -397,6 +397,9 @@ export default function App({
     // A tap during a crossfade is not lost (as on the phone); only a window
     // morph is waited for.
     if (animating && document.documentElement.dataset.windowMorph) return;
+    // Already there (a second Back during the fade): nothing to do, and two
+    // layers of one screen would share a key.
+    if (to === currentScreen) return;
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     // Going to or from the landscape sign-in window: fade the current screen
     // out first and only then switch, so the next screen never flashes at the

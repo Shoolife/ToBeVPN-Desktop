@@ -201,8 +201,11 @@ export interface RouterLink {
  * reaches this one or fails, never the other.
  */
 async function linkInvoke<T = void>(link: RouterLink, command: string, args: Record<string, unknown> = {}): Promise<T> {
-  await invoke("router_pin", { host: link.host, fingerprint: link.hostKey ?? null });
-  return invoke<T>(command, { host: link.host, user: link.user, ...args });
+  // The key travels with the command (no shared state another call could
+  // change in between), taken from the saved entry: a screen's older copy of
+  // the link may not know it yet.
+  const fingerprint = storedLink(link).hostKey ?? null;
+  return invoke<T>(command, { host: link.host, user: link.user, fingerprint, ...args });
 }
 
 // Every router this computer is connected to (home, a cottage…), most
@@ -279,9 +282,10 @@ export function getRouterLink(): RouterLink | null {
   if (!info?.gateway) return links[0] ?? null;
   const here = links.filter((link) => link.host === info.gateway);
   if (!info.mark) return here[0] ?? null;
-  // The most recent entry that is this router, or may be (its id or mark
-  // not known yet: just paired, e.g. again after a reset).
-  return here.find((link) => !link.hwid || !link.mark || link.mark === info.mark) ?? null;
+  // The entry that is this router; else the most recent one that may be
+  // (its id or mark not known yet: just paired, e.g. again after a reset —
+  // then its old entry is dropped once the id is read).
+  return here.find((link) => link.mark === info.mark) ?? here.find((link) => !link.hwid || !link.mark) ?? null;
 }
 
 export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
@@ -530,7 +534,7 @@ export interface RouterCheck {
 export async function checkRouter(options: { host: string; user: string; password: string }): Promise<RouterCheck> {
   const { host, user, password } = options;
   pairedKeys.set(host, await invoke<string | null>("router_pair", { host, user, password }));
-  return invoke<RouterCheck>("router_check", { host, user });
+  return invoke<RouterCheck>("router_check", { host, user, fingerprint: pairedKeys.get(host) ?? null });
 }
 
 /** The host key each router showed when paired, for the link the install creates. */
@@ -546,7 +550,7 @@ export async function connectRouter(options: { host: string; user: string; passw
   const { host, user, password } = options;
   const hostKey = await invoke<string | null>("router_pair", { host, user, password });
   pairedKeys.set(host, hostKey);
-  const status = await invoke<RouterStatus>("router_status", { host, user });
+  const status = await invoke<RouterStatus>("router_status", { host, user, fingerprint: hostKey });
   if (status.installed) {
     const link: RouterLink = { host, user, serverId: null, serverName: null, hostKey };
     saveRouterLink(link);
@@ -597,7 +601,7 @@ export async function accountHasRouterHere(info: RouterInfo): Promise<boolean> {
 
 /** The check again, with the app's key: no password needed. */
 export async function recheckRouter(host: string, user: string): Promise<RouterCheck> {
-  return invoke<RouterCheck>("router_check", { host, user });
+  return invoke<RouterCheck>("router_check", { host, user, fingerprint: pairedKeys.get(host) ?? null });
 }
 
 /** Installs ToBeVPN on a router checked (and so paired) before. */
@@ -613,6 +617,7 @@ export async function installRouter(options: {
   const status = await invoke<RouterStatus>("router_install", {
     host,
     user,
+    fingerprint: pairedKeys.get(host) ?? null,
     servers: [{ ...server, slot: 0 }],
     serverHosts,
     subscriptionUrl,
@@ -674,7 +679,8 @@ export async function routerSnapshot(link: RouterLink): Promise<RouterSnapshot> 
   if (snapshot.hostKey && !storedLink(link).hostKey && status.installed) {
     updateRouterLink(link, { hostKey: snapshot.hostKey });
   }
-  if (snapshot.traffic) storeRouterTraffic(link, snapshot.traffic);
+  // Kept under the id the router reported (a just-paired link has none yet).
+  if (snapshot.traffic) storeRouterTraffic({ ...link, hwid: status.hwid ?? link.hwid }, snapshot.traffic);
   return snapshot;
 }
 

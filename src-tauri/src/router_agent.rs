@@ -472,8 +472,9 @@ pub async fn router_check(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
 ) -> Result<RouterCheck, String> {
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     let facts = parse_key_values(&session.run_ok(&base_facts_command(), None).await?);
     Ok(assess(&facts))
 }
@@ -748,11 +749,14 @@ async fn connect(
     app: &AppHandle,
     host: &str,
     pairing: bool,
+    fingerprint: Option<&str>,
 ) -> Result<(Session, Option<String>), String> {
     let expected = if pairing {
         None
     } else {
-        match PINS.lock().unwrap().get(host).cloned() {
+        // The router the command is for (its host key), else the address's pin.
+        let wanted = fingerprint.map(str::to_string).or_else(|| PINS.lock().unwrap().get(host).cloned());
+        match wanted {
             // Only the pinned router, and only if it is still a paired one.
             Some(pinned) => known_hosts(app)
                 .get(host)
@@ -795,8 +799,8 @@ async fn connect(
     ))
 }
 
-async fn open(app: &AppHandle, host: &str, user: &str) -> Result<Session, String> {
-    let (mut session, _) = connect(app, host, false).await?;
+async fn open(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&str>) -> Result<Session, String> {
+    let (mut session, _) = connect(app, host, false, fingerprint).await?;
     let key = PrivateKeyWithHashAlg::new(Arc::new(app_key(app)?), None);
     // Keepalives start only after the login: until then a router that went
     // away would hold the call forever.
@@ -853,7 +857,7 @@ pub fn router_pin(host: String, fingerprint: Option<String>) {
 /// Returns the host key the router showed, to pin it for this link.
 async fn pair(app: &AppHandle, host: String, user: String, password: String) -> Result<Option<String>, String> {
     let app = app.clone();
-    let (mut session, fingerprint) = connect(&app, &host, true).await?;
+    let (mut session, fingerprint) = connect(&app, &host, true, None).await?;
     if let Some(fingerprint) = &fingerprint {
         log(&app, "info", format!("new router host key {fingerprint}"));
     }
@@ -923,6 +927,7 @@ pub async fn router_install(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     servers: Vec<SlotServer>,
     server_hosts: Vec<String>,
     subscription_url: String,
@@ -932,6 +937,7 @@ pub async fn router_install(
         &app,
         host,
         user,
+        fingerprint,
         servers,
         server_hosts,
         subscription_url,
@@ -948,6 +954,7 @@ async fn install(
     app: &AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     servers: Vec<SlotServer>,
     server_hosts: Vec<String>,
     subscription_url: String,
@@ -963,7 +970,7 @@ async fn install(
         );
     }
     progress(&app, "connect");
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
 
     progress(&app, "check");
     // The same checks as "Check the router": nothing is installed when the
@@ -1247,8 +1254,9 @@ pub async fn router_update_check(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
 ) -> Result<RouterUpdate, String> {
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     let (binaries, xray_current, agent, sites) = outdated_components(&app, &session).await?;
     let xray_target = binaries
         .iter()
@@ -1280,14 +1288,15 @@ pub async fn router_update(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
 ) -> Result<RouterStatus, String> {
-    let result = update(&app, &host, &user).await;
+    let result = update(&app, &host, &user, fingerprint.as_deref()).await;
     if let Err(error) = &result {
         log(&app, "error", error.clone());
         // The update stops the VPN before replacing files: a failure after
         // that must not leave the home without it. The files it had not
         // replaced yet are the working old ones.
-        if let Ok(session) = open(&app, &host, &user).await {
+        if let Ok(session) = open(&app, &host, &user, fingerprint.as_deref()).await {
             let _ = session
                 // Only when the VPN is down: a failure before the stop, or a
                 // start still running on the router, needs no second start.
@@ -1298,9 +1307,9 @@ pub async fn router_update(
     result
 }
 
-async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus, String> {
+async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&str>) -> Result<RouterStatus, String> {
     progress(app, "connect");
-    let session = open(app, host, user).await?;
+    let session = open(app, host, user, fingerprint).await?;
     progress(app, "check");
     let (needed, _, agent_outdated, sites) = outdated_components(app, &session).await?;
     if !needed.is_empty() {
@@ -1397,8 +1406,9 @@ pub async fn router_status(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
 ) -> Result<RouterStatus, String> {
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     let (output, _) = session
         .run(
             "[ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh status",
@@ -1414,9 +1424,10 @@ pub async fn router_control(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     action: String,
 ) -> Result<RouterStatus, String> {
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     let command = match action.as_str() {
         "start" | "stop" | "restart" => format!("/opt/tobevpn/tobevpn-router.sh {action}"),
         "autostart-on" => "/etc/init.d/tobevpn enable".into(),
@@ -1491,8 +1502,9 @@ pub async fn router_devices(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
 ) -> Result<RouterNetwork, String> {
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     let output = session
         .run_ok("/opt/tobevpn/tobevpn-router.sh devices", None)
         .await?;
@@ -1516,8 +1528,13 @@ pub struct RouterSnapshot {
 /// The router's status and, with ToBeVPN on it, its home devices and
 /// traffic: one login instead of one per question.
 #[tauri::command]
-pub async fn router_snapshot(app: AppHandle, host: String, user: String) -> Result<RouterSnapshot, String> {
-    let session = open(&app, &host, &user).await?;
+pub async fn router_snapshot(
+    app: AppHandle,
+    host: String,
+    user: String,
+    fingerprint: Option<String>,
+) -> Result<RouterSnapshot, String> {
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     let (output, _) = session
         .run(
             "[ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh status",
@@ -1551,6 +1568,7 @@ pub async fn router_migrate_defaults(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     devices: Vec<(String, String)>,
 ) -> Result<RouterStatus, String> {
     let mut command = String::new();
@@ -1575,7 +1593,7 @@ pub async fn router_migrate_defaults(
         ));
     }
     command.push_str("/opt/tobevpn/tobevpn-router.sh set-default direct");
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     session.run_ok(&command, None).await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -1589,6 +1607,7 @@ pub async fn router_set_device(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     mac: String,
     mode: String,
     slot: u8,
@@ -1611,7 +1630,7 @@ pub async fn router_set_device(
         .filter(|character| !character.is_control() && *character != '|')
         .take(40)
         .collect();
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     session
         .run_ok(
             &format!(
@@ -1632,6 +1651,7 @@ pub async fn router_kick(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     mac: String,
 ) -> Result<bool, String> {
     let mac = mac.trim().to_ascii_lowercase();
@@ -1643,7 +1663,7 @@ pub async fn router_kick(
     if !valid {
         return Err("invalid MAC address".into());
     }
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     let (output, _) = session
         .run(
             &format!("/opt/tobevpn/tobevpn-router.sh kick '{mac}'"),
@@ -1660,10 +1680,11 @@ pub async fn router_set_name(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     name: String,
 ) -> Result<RouterStatus, String> {
     let name = clean_router_name(&name);
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     session
         .run_ok(
             &format!(
@@ -1694,8 +1715,9 @@ pub async fn router_traffic(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
 ) -> Result<Vec<TrafficHour>, String> {
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh traffic", None)
         .await?;
@@ -1719,12 +1741,13 @@ pub async fn router_set_default_mode(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     mode: String,
 ) -> Result<RouterStatus, String> {
     if !matches!(mode.as_str(), "vpn" | "direct") {
         return Err("invalid mode".into());
     }
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     session
         .run_ok(
             &format!("/opt/tobevpn/tobevpn-router.sh set-default {mode}"),
@@ -1793,11 +1816,12 @@ pub async fn router_set_servers(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     servers: Vec<SlotServer>,
     server_hosts: Vec<String>,
 ) -> Result<RouterStatus, String> {
     validate_slots(&servers)?;
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     session
         .write_file(
             "/opt/tobevpn/servers",
@@ -2112,9 +2136,10 @@ pub async fn router_set_ru_direct(
     app: AppHandle,
     host: String,
     user: String,
+    fingerprint: Option<String>,
     enabled: bool,
 ) -> Result<RouterStatus, String> {
-    let session = open(&app, &host, &user).await?;
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     if enabled {
         write_ru_sites(&session, ru_sites(&app)?).await?;
     }

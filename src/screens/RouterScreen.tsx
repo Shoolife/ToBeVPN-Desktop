@@ -1031,6 +1031,8 @@ function HomeNetwork({
   const [pickingMac, setPickingMac] = useState<string | null>(null);
   const [lanNames, setLanNames] = useState<Record<string, string>>(cachedLanNames);
   const migratingRef = useRef(false);
+  const currentLinkRef = useRef(link);
+  currentLinkRef.current = link;
   // The empty list put in when the read failed: the home is not empty, the
   // list is unknown. A real list later clears it.
   const devicesReadFailedRef = useRef<RouterNetwork | null>(null);
@@ -1082,15 +1084,19 @@ function HomeNetwork({
   useEffect(() => {
     if (!network || status.defaultMode !== "vpn" || migratingRef.current || devicesReadFailedRef.current !== null) return;
     migratingRef.current = true;
+    // Its results only for this screen's router (load may switch routers).
+    const forHost = link.host;
+    const forId = link.id;
+    const alive = () => currentLinkRef.current.host === forHost && currentLinkRef.current.id === forId;
     void (async () => {
       try {
         const kept = network.devices.filter((device) => device.mode === "default");
-        onStatus(
-          await migrateRouterDefaults(
-            link,
-            kept.map((device) => ({ mac: device.mac, name: device.name ?? "" })),
-          ),
+        const migrated = await migrateRouterDefaults(
+          link,
+          kept.map((device) => ({ mac: device.mac, name: device.name ?? "" })),
         );
+        if (!alive()) return;
+        onStatus(migrated);
         // Applied to the list as it is now: a choice saved meanwhile stays.
         const moved = new Set(kept.map((device) => device.mac));
         onNetwork((current) =>
