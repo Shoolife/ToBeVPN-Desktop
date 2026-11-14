@@ -596,6 +596,8 @@ impl client::Handler for RouterHandler {
 
 struct Session {
     handle: client::Handle<RouterHandler>,
+    /// The host key this router showed, to forget only it on uninstall.
+    fingerprint: Option<String>,
 }
 
 impl Session {
@@ -733,6 +735,15 @@ fn known_hosts(app: &AppHandle) -> HashMap<String, Vec<String>> {
         .collect()
 }
 
+/// Written to a new file and renamed: a crash mid-write keeps the old keys.
+fn save_known_hosts(app: &AppHandle, hosts: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    let path = known_hosts_path(app)?;
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, serde_json::to_vec_pretty(hosts).unwrap_or_default())
+        .map_err(|error| format!("write {}: {error}", temp.display()))?;
+    std::fs::rename(&temp, &path).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
 async fn connect(
     app: &AppHandle,
     host: &str,
@@ -768,16 +779,23 @@ async fn connect(
             other => format!("ssh connect: {other}"),
         })?;
     let fingerprint = seen.lock().unwrap().clone();
-    Ok((Session { handle }, fingerprint))
+    Ok((
+        Session {
+            handle,
+            fingerprint: fingerprint.clone(),
+        },
+        fingerprint,
+    ))
 }
 
 async fn open(app: &AppHandle, host: &str, user: &str) -> Result<Session, String> {
     let (mut session, _) = connect(app, host, false).await?;
     let key = PrivateKeyWithHashAlg::new(Arc::new(app_key(app)?), None);
-    let auth = session
-        .handle
-        .authenticate_publickey(user, key)
+    // Keepalives start only after the login: until then a router that went
+    // away would hold the call forever.
+    let auth = tokio::time::timeout(SSH_TIMEOUT, session.handle.authenticate_publickey(user, key))
         .await
+        .map_err(|_| "router did not answer on SSH".to_string())?
         .map_err(|error| format!("ssh auth: {error}"))?;
     if !auth.success() {
         return Err("router rejected the app key".into());
@@ -810,10 +828,9 @@ async fn pair(app: &AppHandle, host: String, user: String, password: String) -> 
     if let Some(fingerprint) = &fingerprint {
         log(&app, "info", format!("new router host key {fingerprint}"));
     }
-    let auth = session
-        .handle
-        .authenticate_password(&user, password)
+    let auth = tokio::time::timeout(SSH_TIMEOUT, session.handle.authenticate_password(&user, password))
         .await
+        .map_err(|_| "router did not answer on SSH".to_string())?
         .map_err(|error| format!("ssh auth: {error}"))?;
     if !auth.success() {
         return Err("wrong router login or password".into());
@@ -842,9 +859,7 @@ async fn pair(app: &AppHandle, host: String, user: String, password: String) -> 
         let keys = hosts.entry(host).or_default();
         keys.retain(|key| *key != fingerprint);
         keys.push(fingerprint);
-        let path = known_hosts_path(&app)?;
-        std::fs::write(&path, serde_json::to_vec_pretty(&hosts).unwrap_or_default())
-            .map_err(|error| format!("write {}: {error}", path.display()))?;
+        save_known_hosts(&app, &hosts)?;
     }
     Ok(())
 }
@@ -1189,7 +1204,9 @@ async fn outdated_components(
     } else {
         None
     };
-    Ok((needed, current, agent != AGENT_SCRIPT, sites))
+    // By version, not by content: a newer agent put there by the phone app
+    // is not "updated" back to this app's older one.
+    Ok((needed, current, agent_version(&agent) < agent_version(AGENT_SCRIPT), sites))
 }
 
 /// Whether the router runs older components than this app carries. Uses
@@ -1241,7 +1258,9 @@ pub async fn router_update(
         // replaced yet are the working old ones.
         if let Ok(session) = open(&app, &host, &user).await {
             let _ = session
-                .run("[ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh start", None)
+                // Only when the VPN is down: a failure before the stop, or a
+                // start still running on the router, needs no second start.
+                .run("[ -x /opt/tobevpn/tobevpn-router.sh ] && ! pidof xray >/dev/null && /opt/tobevpn/tobevpn-router.sh start", None)
                 .await;
         }
     }
@@ -1377,11 +1396,21 @@ pub async fn router_control(
     };
     session.run_ok(&command, None).await?;
     if action == "uninstall" {
+        // Only this router's key: another router paired at the same
+        // address (elsewhere) keeps working.
         let mut hosts = known_hosts(&app);
-        hosts.remove(&host);
-        if let Ok(path) = known_hosts_path(&app) {
-            let _ = std::fs::write(path, serde_json::to_vec_pretty(&hosts).unwrap_or_default());
+        match &session.fingerprint {
+            Some(fingerprint) => {
+                if let Some(keys) = hosts.get_mut(&host) {
+                    keys.retain(|key| key != fingerprint);
+                }
+                hosts.retain(|_, keys| !keys.is_empty());
+            }
+            None => {
+                hosts.remove(&host);
+            }
         }
+        let _ = save_known_hosts(&app, &hosts);
         return Ok(RouterStatus::default());
     }
     let (output, _) = session
@@ -2206,6 +2235,15 @@ fn log_output(app: &AppHandle, output: &str) {
             log(app, "info", line.to_string());
         }
     }
+}
+
+/// AGENT_VERSION from the agent script; 0 for agents from before it had one.
+fn agent_version(script: &str) -> u64 {
+    script
+        .lines()
+        .find_map(|line| line.strip_prefix("AGENT_VERSION="))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 fn sha256_hex(data: &[u8]) -> String {

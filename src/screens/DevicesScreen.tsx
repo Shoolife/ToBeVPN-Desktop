@@ -16,7 +16,6 @@ import {
   isRouterDevice,
   getRouterLink,
   routerNameFor,
-  sameRouterModel,
   routerMarks,
   ROUTER_CHANGED_EVENT,
   type RouterLink,
@@ -306,10 +305,9 @@ export default function DevicesScreen({
     linkedHere && routerLink?.hwid
       ? !!d.hwid && d.hwid.toLowerCase() === routerLink.hwid.toLowerCase()
       // The router's own mark tells two routers of one model apart.
-      : router?.mark && markedHere
-        ? markedHere.has(d.hwid || d.device_id)
-        // Not linked and no mark (an older agent): by its model.
-        : sameRouterModel(d.device_model ?? "", router?.model);
+      // Without a mark the router has no current ToBeVPN: not one of the
+      // account's routers.
+      : !!router?.mark && !!markedHere && markedHere.has(d.hwid || d.device_id);
   const installedHere = !linkedHere && devices.some((d) => isRouterDevice(d) && isRouterHere(d));
   const otherRouters = ROUTER_SECTION_AVAILABLE
     ? devices.filter((d) => isRouterDevice(d) && !isRouterHere(d))

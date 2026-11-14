@@ -90,7 +90,9 @@ export function routerMeta(info: RouterInfo): string {
 /** The router no longer takes this app's key. */
 function isAccessLost(error: unknown): boolean {
   const raw = String(error);
-  return raw.includes("not paired") || raw.includes("rejected the app key");
+  // A new host key (the router was reset or reflashed) is the same case:
+  // connecting again with the password records the new one.
+  return raw.includes("not paired") || raw.includes("rejected the app key") || raw.includes("host key changed");
 }
 
 const INSTALL_STEPS: Record<string, StringKey> = {
@@ -225,10 +227,15 @@ function planSlots(
   for (const item of network.slots) {
     if (!used.has(item.slot)) continue;
     const kept = servers.find((candidate) => candidate.id === item.serverId);
-    if (kept) list.push(slotServer(item.slot, kept));
+    // A slot other devices use must be written back as it is. Its server
+    // missing from this app's list (renamed, removed, put there by another
+    // app): the list cannot be rewritten without moving those devices to a
+    // server nobody chose for them.
+    if (!kept) return null;
+    list.push(slotServer(item.slot, kept));
   }
   if (list.length >= limit) return "full";
-  const taken = new Set(list.map((item) => item.slot));
+  const taken = new Set([...list.map((item) => item.slot), ...used]);
   const free = Array.from({ length: ROUTER_MAX_SERVERS }, (_, slot) => slot).find((slot) => !taken.has(slot));
   if (free === undefined) return "full";
   list.push(slotServer(free, server));
@@ -313,17 +320,23 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     // screen is about the router here, and SSH to the home address would
     // only fail (the phone app does the same).
     const savedLink = getRouterLink();
-    const currentLink = savedLink && (await isLinkedRouterHere(savedLink, nextInfo)) ? savedLink : null;
+    let currentLink = savedLink && (await isLinkedRouterHere(savedLink, nextInfo)) ? savedLink : null;
     let nextStatus: RouterStatus | null = null;
     let accessLost = false;
     if (currentLink) {
       try {
         nextStatus = await routerStatus(currentLink);
       } catch (statusError) {
-        accessLost = isAccessLost(statusError);
-        // A lost key is not an error to show in red: the card below says
-        // what to do (connect again with the password).
-        if (!accessLost && generation === generationRef.current) setError(routerErrorText(statusError));
+        if (String(statusError).includes("another router at this address")) {
+          // This network's router is not the linked one: shown as a router
+          // to connect to, with no error.
+          currentLink = null;
+        } else {
+          accessLost = isAccessLost(statusError);
+          // A lost key is not an error to show in red: the card below says
+          // what to do (connect again with the password).
+          if (!accessLost && generation === generationRef.current) setError(routerErrorText(statusError));
+        }
       }
     }
     if (refresh) {
@@ -999,12 +1012,14 @@ function HomeNetwork({
   const [pickingMac, setPickingMac] = useState<string | null>(null);
   const [lanNames, setLanNames] = useState<Record<string, string>>(cachedLanNames);
   const migratingRef = useRef(false);
+  const devicesReadFailedRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
     routerDevices(link)
       .then((next) => {
         if (!alive) return;
+        devicesReadFailedRef.current = false;
         onNetwork(next);
         if (status.clientIp) {
           void discoverLanNames(status.clientIp, next.devices).then((names) => {
@@ -1015,6 +1030,9 @@ function HomeNetwork({
       .catch((error) => {
         if (!alive) return;
         onError(routerErrorText(error));
+        // Not an empty home: the list is unknown. Nothing may act on it
+        // (the migration below would switch every device off the VPN).
+        devicesReadFailedRef.current = true;
         onNetwork({ devices: [], slots: [] });
       });
     return () => {
@@ -1026,7 +1044,7 @@ function HomeNetwork({
   // server. Each such device now gets that server as its own choice, and new
   // devices start without VPN; nothing changes for the devices already there.
   useEffect(() => {
-    if (!network || status.defaultMode !== "vpn" || migratingRef.current) return;
+    if (!network || status.defaultMode !== "vpn" || migratingRef.current || devicesReadFailedRef.current) return;
     migratingRef.current = true;
     void (async () => {
       try {
@@ -1086,10 +1104,16 @@ function HomeNetwork({
         slot = plan.slot;
       }
       await setRouterDevice(link, { mac: device.mac, mode, slot, name: device.name ?? "" });
-      onNetwork({
-        ...current,
-        devices: current.devices.map((item) => (item.mac === device.mac ? { ...item, mode, slot } : item)),
-      });
+      // Onto the list as it is now: a change made meanwhile (the migration)
+      // stays.
+      const slots = current.slots;
+      onNetwork((now) =>
+        now && {
+          ...now,
+          slots,
+          devices: now.devices.map((item) => (item.mac === device.mac ? { ...item, mode, slot } : item)),
+        },
+      );
       // The device still holds DNS answers from before: reconnecting it to
       // Wi-Fi makes it ask again, so blocked sites open at once.
       // This computer is not dropped from Wi-Fi (the app would lose the

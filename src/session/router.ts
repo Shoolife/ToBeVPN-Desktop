@@ -463,12 +463,12 @@ export async function accountRouters(): Promise<Array<{ id: string; model: strin
  * it publishes one (exact, even for two routers of one model), else by model.
  */
 export async function accountHasRouterHere(info: RouterInfo): Promise<boolean> {
+  // Without a mark the router has no current ToBeVPN; a model match would
+  // only confuse two routers of one model.
+  if (!info.mark) return false;
   const routers = await accountRouters();
-  if (info.mark) {
-    const marks = await routerMarks(routers.map((router) => router.id));
-    return marks.includes(info.mark);
-  }
-  return routers.some((router) => sameRouterModel(router.model, info.model));
+  const marks = await routerMarks(routers.map((router) => router.id));
+  return marks.includes(info.mark);
 }
 
 /** The check again, with the app's key: no password needed. */
@@ -521,6 +521,12 @@ export async function updateRouter(link: RouterLink): Promise<RouterStatus> {
 
 export async function routerStatus(link: RouterLink): Promise<RouterStatus> {
   const status = await invoke<RouterStatus>("router_status", { host: link.host, user: link.user });
+  // Another router at the linked address (paired elsewhere, no mark to tell
+  // them apart before logging in): not the linked one, and its id must not
+  // replace the linked router's.
+  if (link.hwid && status.hwid && link.hwid.toLowerCase() !== status.hwid.toLowerCase()) {
+    throw new Error("another router at this address");
+  }
   if (status.installed) remember(link, status);
   return status;
 }
