@@ -1302,7 +1302,7 @@ async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus,
     progress(app, "connect");
     let session = open(app, host, user).await?;
     progress(app, "check");
-    let (needed, _, _, sites) = outdated_components(app, &session).await?;
+    let (needed, _, agent_outdated, sites) = outdated_components(app, &session).await?;
     if !needed.is_empty() {
         let free_kb: u64 = session
             .run_ok("df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'", None)
@@ -1348,24 +1348,28 @@ async fn update(app: &AppHandle, host: &str, user: &str) -> Result<RouterStatus,
                 .await?;
         }
     }
-    session
-        .write_file(
-            "/opt/tobevpn/tobevpn-router.sh",
-            AGENT_SCRIPT.as_bytes(),
-            "755",
-        )
-        .await?;
-    session
-        .write_file(
-            "/etc/hotplug.d/dhcp/90-tobevpn",
-            DHCP_HOOK.as_bytes(),
-            "755",
-        )
-        .await?;
-    // Rewriting the init script keeps its enabled/disabled state (rc.d link).
-    session
-        .write_file("/etc/init.d/tobevpn", INIT_SCRIPT.as_bytes(), "755")
-        .await?;
+    // The agent and its hooks only when this app's are newer: a newer agent
+    // from the phone app is not replaced with an older one.
+    if agent_outdated {
+        session
+            .write_file(
+                "/opt/tobevpn/tobevpn-router.sh",
+                AGENT_SCRIPT.as_bytes(),
+                "755",
+            )
+            .await?;
+        session
+            .write_file(
+                "/etc/hotplug.d/dhcp/90-tobevpn",
+                DHCP_HOOK.as_bytes(),
+                "755",
+            )
+            .await?;
+        // Rewriting the init script keeps its enabled/disabled state (rc.d link).
+        session
+            .write_file("/etc/init.d/tobevpn", INIT_SCRIPT.as_bytes(), "755")
+            .await?;
+    }
     if let Some(sites) = sites {
         progress(app, "upload:sites");
         write_ru_sites(&session, sites).await?;

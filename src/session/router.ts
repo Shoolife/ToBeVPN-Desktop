@@ -279,12 +279,9 @@ export function getRouterLink(): RouterLink | null {
   if (!info?.gateway) return links[0] ?? null;
   const here = links.filter((link) => link.host === info.gateway);
   if (!info.mark) return here[0] ?? null;
-  return (
-    here.find((link) => link.mark === info.mark) ??
-    // Connected, its id or mark not known yet (just paired, older entry).
-    here.find((link) => !link.hwid || !link.mark) ??
-    null
-  );
+  // The most recent entry that is this router, or may be (its id or mark
+  // not known yet: just paired, e.g. again after a reset).
+  return here.find((link) => !link.hwid || !link.mark || link.mark === info.mark) ?? null;
 }
 
 export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
