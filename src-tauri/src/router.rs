@@ -28,6 +28,29 @@ pub struct RouterInfo {
     /// "easywrt" (SNR's OpenWrt), "openwrt", or None when not recognised.
     pub firmware: Option<String>,
     pub supported: bool,
+    /// ToBeVPN's mark on the router (a hash of its device id in the
+    /// account), read without logging in; None without ToBeVPN.
+    pub mark: Option<String>,
+}
+
+/// The mark a ToBeVPN router with this device id publishes (the agent's
+/// publish_id): the first 16 hex digits of SHA-256 of the lowercase id.
+pub fn router_mark(hwid: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(hwid.trim().to_lowercase().as_bytes());
+    digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Marks for the account's router ids, to compare with a router's mark.
+#[tauri::command]
+pub fn router_marks(ids: Vec<String>) -> Vec<String> {
+    ids.iter().map(|id| router_mark(id)).collect()
+}
+
+fn parse_mark(body: &str) -> Option<String> {
+    let rest = &body[body.find("tobevpn-router ")? + "tobevpn-router ".len()..];
+    let mark: String = rest.chars().take(16).collect();
+    (mark.len() == 16 && mark.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())).then_some(mark)
 }
 
 #[tauri::command]
@@ -56,6 +79,9 @@ pub async fn detect_router() -> RouterInfo {
         .is_some_and(|model| SUPPORTED_MODELS.contains(&model));
     info.model = model;
     info.firmware = firmware;
+    info.mark = http_get(gateway, interface.as_deref(), "/tobevpn-id")
+        .await
+        .and_then(|body| parse_mark(&body));
     info
 }
 
@@ -351,6 +377,18 @@ fn parse_proc_net_route(table: &str) -> Option<(Ipv4Addr, String)> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn router_mark_matches_the_agent() {
+        // Router shell: printf '%s' "befe0dc8-..." | sha256sum | cut -c1-16
+        assert_eq!(router_mark("BEFE0DC8-F668-5434-847A-1D108CE7D224"), "b5eda37d94f713a3");
+        assert_eq!(
+            parse_mark("HTTP/1.0 200 OK\r\n\r\ntobevpn-router b5eda37d94f713a3\n"),
+            Some("b5eda37d94f713a3".to_string())
+        );
+        assert_eq!(parse_mark("<html>404</html>"), None);
+    }
+
     use super::*;
 
     #[test]

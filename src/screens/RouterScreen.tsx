@@ -21,8 +21,8 @@ import { getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, type Vp
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
 import {
-  accountRouterModels,
-  sameRouterModel,
+  accountHasRouterHere,
+  isLinkedRouterHere,
   accountSubscriptionUrl,
   connectRouter,
   detectRouter,
@@ -305,17 +305,15 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     const startedAt = performance.now();
     setRefreshing(refresh);
     setError(null);
-    const accountModels = accountRouterModels();
     const nextInfo = await detectRouter(refresh);
-    void accountModels.then((models) => {
-      if (generation !== generationRef.current) return;
-      setInstalledByAnother(models.some((item) => sameRouterModel(item, nextInfo.model)));
+    void accountHasRouterHere(nextInfo).then((found) => {
+      if (generation === generationRef.current) setInstalledByAnother(found);
     });
     // The linked router is asked only from its own network: elsewhere this
     // screen is about the router here, and SSH to the home address would
     // only fail (the phone app does the same).
     const savedLink = getRouterLink();
-    const currentLink = savedLink && savedLink.host === nextInfo.gateway ? savedLink : null;
+    const currentLink = savedLink && (await isLinkedRouterHere(savedLink, nextInfo)) ? savedLink : null;
     let nextStatus: RouterStatus | null = null;
     let accessLost = false;
     if (currentLink) {

@@ -568,8 +568,8 @@ pub struct TrafficHour {
 // ---------------------------------------------------------------- SSH ---
 
 struct RouterHandler {
-    /// Remembered host key fingerprint; None accepts and records it (pairing).
-    expected: Option<String>,
+    /// Remembered host key fingerprints; None accepts and records it (pairing).
+    expected: Option<Vec<String>>,
     seen: Arc<std::sync::Mutex<Option<String>>>,
 }
 
@@ -590,7 +590,7 @@ impl client::Handler for RouterHandler {
         Ok(self
             .expected
             .as_ref()
-            .is_none_or(|expected| *expected == fingerprint))
+            .is_none_or(|expected| expected.contains(&fingerprint)))
     }
 }
 
@@ -707,13 +707,33 @@ fn known_hosts_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(router_dir(app)?.join("known_hosts.json"))
 }
 
-fn known_hosts(app: &AppHandle) -> HashMap<String, String> {
-    known_hosts_path(app)
+/// Host keys of the routers paired at each address. Pairing with another
+/// router at the same address (elsewhere) adds its key instead of replacing
+/// the home router's, so home still works on return. Older files hold one
+/// key per address as a plain string.
+fn known_hosts(app: &AppHandle) -> HashMap<String, Vec<String>> {
+    let raw: HashMap<String, serde_json::Value> = known_hosts_path(app)
         .ok()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    raw.into_iter()
+        .map(|(host, value)| {
+            let keys = match value {
+                serde_json::Value::String(key) => vec![key],
+                serde_json::Value::Array(items) => items
+                    .into_iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            (host, keys)
+        })
+        .filter(|(_, keys)| !keys.is_empty())
+        .collect()
 }
+
+const MAX_KEYS_PER_HOST: usize = 4;
 
 async fn connect(
     app: &AppHandle,
@@ -723,7 +743,7 @@ async fn connect(
     let expected = if pairing {
         None
     } else {
-        known_hosts(app).get(host).cloned()
+        known_hosts(app).get(host).cloned().filter(|keys| !keys.is_empty())
     };
     if !pairing && expected.is_none() {
         return Err("router is not paired".into());
@@ -821,7 +841,12 @@ async fn pair(app: &AppHandle, host: String, user: String, password: String) -> 
     session.run_ok(&command, Some(line.as_bytes())).await?;
     if let Some(fingerprint) = fingerprint {
         let mut hosts = known_hosts(&app);
-        hosts.insert(host, fingerprint);
+        let keys = hosts.entry(host).or_default();
+        keys.retain(|key| *key != fingerprint);
+        keys.push(fingerprint);
+        if keys.len() > MAX_KEYS_PER_HOST {
+            keys.drain(..keys.len() - MAX_KEYS_PER_HOST);
+        }
         let path = known_hosts_path(&app)?;
         std::fs::write(&path, serde_json::to_vec_pretty(&hosts).unwrap_or_default())
             .map_err(|error| format!("write {}: {error}", path.display()))?;

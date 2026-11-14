@@ -1178,6 +1178,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             notifications::show_system_notification,
             router::detect_router,
+            router::router_marks,
             router_agent::router_pair,
             router_agent::router_install,
             router_agent::router_status,

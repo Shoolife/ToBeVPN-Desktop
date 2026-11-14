@@ -20,6 +20,29 @@ export interface RouterInfo {
   firmware: string | null;
   /** The installer has been verified on this model. */
   supported: boolean;
+  /**
+   * ToBeVPN's mark on the router (a hash of its device id in the account),
+   * read without logging in; null without ToBeVPN or with an older agent.
+   */
+  mark?: string | null;
+}
+
+/** The marks ToBeVPN routers with these device ids publish. */
+export async function routerMarks(ids: string[]): Promise<string[]> {
+  if (ids.length === 0) return [];
+  return invoke<string[]>("router_marks", { ids }).catch(() => ids.map(() => ""));
+}
+
+/**
+ * Whether the linked router is the router of this network: the same address,
+ * and, when the router publishes its mark, the same router (a cottage on
+ * 192.168.1.1 too is another one).
+ */
+export async function isLinkedRouterHere(link: RouterLink, info: RouterInfo | null): Promise<boolean> {
+  if (!info?.gateway || info.gateway !== link.host) return false;
+  if (!info.mark || !link.hwid) return true;
+  const [mark] = await routerMarks([link.hwid]);
+  return mark === info.mark;
 }
 
 export const ROUTER_SECTION_AVAILABLE = !import.meta.env.VITE_STORE_BUILD;
@@ -310,6 +333,16 @@ export function refreshRouterTraffic(maxAgeMs = 5 * 60_000): Promise<void> {
   // other router (or nothing), and SSH to it would only fail or warn.
   const here = getCachedRouter();
   if (here?.gateway && here.gateway !== link.host) return Promise.resolve();
+  if (here?.mark && link.hwid) {
+    // Same address, but maybe another router: read only from the linked one.
+    return isLinkedRouterHere(link, here).then((same) => (same ? readRouterTraffic(maxAgeMs) : undefined));
+  }
+  return readRouterTraffic(maxAgeMs);
+}
+
+function readRouterTraffic(maxAgeMs: number): Promise<void> {
+  const link = getRouterLink();
+  if (!link) return Promise.resolve();
   try {
     const cache = JSON.parse(localStorage.getItem(TRAFFIC_KEY) ?? "null") as TrafficCache | null;
     if (cache && Date.now() - cache.fetchedAt < maxAgeMs && (!link.hwid || cache.hwid === link.hwid)) {
@@ -414,16 +447,28 @@ export function sameRouterModel(listed: string, here: string | null | undefined)
  * Router models of the account's routers: one of them answering here means
  * ToBeVPN already runs on this router, set up from another device.
  */
-export async function accountRouterModels(): Promise<string[]> {
+export async function accountRouters(): Promise<Array<{ id: string; model: string }>> {
   try {
     const data = await fetchDevices();
     return (data?.devices ?? [])
       .filter(isRouterDevice)
-      .map((device) => (device.device_model ?? "").trim())
-      .filter((model) => model.length > 0);
+      .map((device) => ({ id: device.hwid || device.device_id, model: (device.device_model ?? "").trim() }));
   } catch {
     return [];
   }
+}
+
+/**
+ * Whether the account already has this network's router: by its mark when
+ * it publishes one (exact, even for two routers of one model), else by model.
+ */
+export async function accountHasRouterHere(info: RouterInfo): Promise<boolean> {
+  const routers = await accountRouters();
+  if (info.mark) {
+    const marks = await routerMarks(routers.map((router) => router.id));
+    return marks.includes(info.mark);
+  }
+  return routers.some((router) => sameRouterModel(router.model, info.model));
 }
 
 /** The check again, with the app's key: no password needed. */

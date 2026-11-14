@@ -4,6 +4,7 @@ import { isBrowserPreviewRuntime } from "./browserPreview";
 import {
   detectRouter,
   getRouterLink,
+  isLinkedRouterHere,
   ROUTER_CHANGED_EVENT,
   ROUTER_SECTION_AVAILABLE,
   routerDevices,
@@ -31,7 +32,7 @@ export async function checkRouterProtection(): Promise<RouterProtection> {
   if (!link || !ROUTER_SECTION_AVAILABLE || isBrowserPreviewRuntime()) return NONE;
   try {
     const info = await detectRouter(true);
-    if (info.gateway !== link.host) return NONE;
+    if (!(await isLinkedRouterHere(link, info))) return NONE;
     const status = await routerStatus(link);
     if (!status.installed || !status.running || !status.clientIp) return NONE;
     const network = await routerDevices(link);

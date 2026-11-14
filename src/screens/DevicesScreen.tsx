@@ -17,6 +17,7 @@ import {
   getRouterLink,
   routerNameFor,
   sameRouterModel,
+  routerMarks,
   ROUTER_CHANGED_EVENT,
   type RouterLink,
   ROUTER_SECTION_AVAILABLE,
@@ -274,14 +275,41 @@ export default function DevicesScreen({
   const otherDevices = devices.filter(
     (d) => !deviceMatchesAliases(d, currentAliases) && !isRouterDevice(d),
   );
-  const linkedHere = !!routerLink && !!router?.gateway && routerLink.host === router.gateway;
+  // With the router's mark: which of the account's routers is this one, and
+  // whether the linked one is (not merely a router at the same address).
+  const [markedHere, setMarkedHere] = useState<Set<string> | null>(null);
+  const [linkedMarkMatches, setLinkedMarkMatches] = useState(true);
+  useEffect(() => {
+    const mark = router?.mark;
+    if (!mark) {
+      setMarkedHere(null);
+      setLinkedMarkMatches(true);
+      return;
+    }
+    let alive = true;
+    const ids = devices.filter(isRouterDevice).map((d) => d.hwid || d.device_id);
+    const linkedId = routerLink?.hwid ?? null;
+    void routerMarks(linkedId ? [...ids, linkedId] : ids).then((marks) => {
+      if (!alive) return;
+      setMarkedHere(new Set(ids.filter((_, index) => marks[index] === mark)));
+      setLinkedMarkMatches(!linkedId || marks[marks.length - 1] === mark);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [router?.mark, devices, routerLink?.hwid]);
+  const linkedHere = !!routerLink && !!router?.gateway && routerLink.host === router.gateway &&
+    linkedMarkMatches;
   // The account's router that answers here: by its device id once linked,
   // else by its model (ToBeVPN set up on it from another device).
   const isRouterHere = (d: (typeof devices)[number]) =>
     linkedHere && routerLink?.hwid
       ? !!d.hwid && d.hwid.toLowerCase() === routerLink.hwid.toLowerCase()
-      // Not linked, or linked before the router's id was read: by its model.
-      : sameRouterModel(d.device_model ?? "", router?.model);
+      // The router's own mark tells two routers of one model apart.
+      : router?.mark && markedHere
+        ? markedHere.has(d.hwid || d.device_id)
+        // Not linked and no mark (an older agent): by its model.
+        : sameRouterModel(d.device_model ?? "", router?.model);
   const installedHere = !linkedHere && devices.some((d) => isRouterDevice(d) && isRouterHere(d));
   const otherRouters = ROUTER_SECTION_AVAILABLE
     ? devices.filter((d) => isRouterDevice(d) && !isRouterHere(d))
