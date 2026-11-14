@@ -66,6 +66,9 @@ struct Binary {
     /// app (the router's busybox has md5sum, not sha256sum). A newer GitHub
     /// release is checked by its download digest and compared by version.
     sha256: Option<&'static str>,
+    /// The pinned build's MD5, kept for reference: a different build on the
+    /// router is no longer replaced (it may be newer).
+    #[allow(dead_code)]
     md5: Option<&'static str>,
     /// Version, for binaries compared by version (Xray).
     version: Option<String>,
@@ -517,12 +520,12 @@ fn binary_outdated(binary: &Binary, facts: &HashMap<String, String>) -> bool {
             let current = version_tuple(current);
             current.is_empty() || current < version_tuple(target)
         }
-        None => {
-            facts
-                .get(&format!("md5_{}", binary.name))
-                .map(String::as_str)
-                != binary.md5
-        }
+        // Without a version to compare, only a missing binary is replaced: a
+        // different one may be newer (put there by the phone app), and the two
+        // apps must not keep swapping each other's build.
+        None => facts
+            .get(&format!("md5_{}", binary.name))
+            .is_none_or(|md5| md5.is_empty()),
     }
 }
 
@@ -2614,6 +2617,10 @@ mod tests {
             "7720e92733082f4920c511205bb115da".to_string(),
         );
         assert!(!binary_outdated(&hev_tunnel(Arch::Arm64), &facts));
+        // Another build (maybe newer, from the phone app) is kept; only a
+        // missing one is installed.
+        assert!(!binary_outdated(&hev_tunnel(Arch::Armv7), &facts));
+        facts.insert("md5_hev-socks5-tunnel".to_string(), String::new());
         assert!(binary_outdated(&hev_tunnel(Arch::Armv7), &facts));
         assert_eq!(Arch::from_uname("aarch64\n"), Some(Arch::Arm64));
         assert_eq!(Arch::from_uname("armv7l"), Some(Arch::Armv7));

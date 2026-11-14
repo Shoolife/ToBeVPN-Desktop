@@ -337,7 +337,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
         nextStatus = snapshot.status;
         nextNetwork = snapshot.network;
       } catch (statusError) {
-        if (String(statusError).includes("another router at this address")) {
+        const raw = String(statusError);
+        // Another host key at the address: another router (or this one
+        // reset). Shown as a router to connect to, with no error.
+        if (raw.includes("another router at this address") || raw.includes("host key changed")) {
           // This network's router is not the linked one: shown as a router
           // to connect to, with no error.
           currentLink = null;
