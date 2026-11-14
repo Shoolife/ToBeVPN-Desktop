@@ -1187,6 +1187,7 @@ pub fn run() {
             router_agent::router_set_ru_direct,
             router_agent::router_devices,
             router_agent::router_snapshot,
+            router_agent::router_pin,
             router_agent::router_migrate_defaults,
             router_agent::router_set_device,
             router_agent::router_set_default_mode,

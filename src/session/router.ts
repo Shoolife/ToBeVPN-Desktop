@@ -191,6 +191,18 @@ export interface RouterLink {
   id?: string;
   /** The mark the router publishes (from its device id), to tell it apart. */
   mark?: string | null;
+  /** The router's SSH host key: commands for this link reach only this router. */
+  hostKey?: string | null;
+}
+
+/**
+ * A command for one connected router. Its host key is pinned first, so with
+ * several routers paired at one address (home and a cottage) the command
+ * reaches this one or fails, never the other.
+ */
+async function linkInvoke<T = void>(link: RouterLink, command: string, args: Record<string, unknown> = {}): Promise<T> {
+  await invoke("router_pin", { host: link.host, fingerprint: link.hostKey ?? null });
+  return invoke<T>(command, { host: link.host, user: link.user, ...args });
 }
 
 // Every router this computer is connected to (home, a cottage…), most
@@ -212,6 +224,7 @@ function parseLink(value: unknown): RouterLink | null {
     name: typeof parsed.name === "string" ? parsed.name : null,
     id: typeof parsed.id === "string" ? parsed.id : newLinkId(),
     mark: typeof parsed.mark === "string" ? parsed.mark : null,
+    hostKey: typeof parsed.hostKey === "string" ? parsed.hostKey : null,
   };
 }
 
@@ -222,12 +235,24 @@ function newLinkId(): string {
 function readLinks(): RouterLink[] {
   try {
     const raw = localStorage.getItem(LINKS_KEY);
+    let links: RouterLink[];
+    let fresh = false;
     if (raw) {
       const list = JSON.parse(raw) as unknown;
-      return Array.isArray(list) ? list.map(parseLink).filter((link): link is RouterLink => !!link) : [];
+      links = Array.isArray(list) ? list.map(parseLink).filter((link): link is RouterLink => !!link) : [];
+      fresh = Array.isArray(list) && list.some((item) => typeof (item as { id?: unknown })?.id !== "string");
+    } else {
+      const single = parseLink(JSON.parse(localStorage.getItem(LINK_KEY) ?? "null"));
+      links = single ? [single] : [];
+      fresh = links.length > 0;
     }
-    const single = parseLink(JSON.parse(localStorage.getItem(LINK_KEY) ?? "null"));
-    return single ? [single] : [];
+    // Ids given just now are kept, so an entry is the same one on every read
+    // (and the old single link moves to the list once).
+    if (fresh) {
+      localStorage.setItem(LINKS_KEY, JSON.stringify(links));
+      localStorage.removeItem(LINK_KEY);
+    }
+    return links;
   } catch {
     return [];
   }
@@ -293,6 +318,20 @@ function saveRouterLink(link: RouterLink): void {
   }
 }
 
+/** The saved entry of a link (a screen may hold an older copy of it). */
+function storedLink(link: RouterLink): RouterLink {
+  return readLinks().find((item) => item.id && item.id === link.id) ?? link;
+}
+
+/**
+ * Changes some fields of a connected router, on its saved entry: what a
+ * screen's older copy of the link does not know (a name set from the phone,
+ * a mark, a host key) is kept.
+ */
+function updateRouterLink(link: RouterLink, patch: Partial<RouterLink>): void {
+  saveRouterLink({ ...storedLink(link), ...patch });
+}
+
 /** Forgets one connected router; the others stay. */
 function removeRouterLink(link: RouterLink): void {
   writeLinks(readLinks().filter((item) => item.id !== link.id));
@@ -330,8 +369,9 @@ function remember(link: RouterLink, status: RouterStatus): void {
       // The name is shown again after the next status.
     }
   }
-  if (link.hwid !== status.hwid || link.name !== status.name) {
-    saveRouterLink({ ...link, hwid: status.hwid, name: status.name, mark: link.hwid === status.hwid ? link.mark : null });
+  const stored = storedLink(link);
+  if (stored.hwid !== status.hwid || stored.name !== status.name) {
+    updateRouterLink(link, { hwid: status.hwid, name: status.name, mark: stored.hwid === status.hwid ? stored.mark : null });
   }
 }
 
@@ -342,13 +382,13 @@ export function routerDisplayName(link: RouterLink | null, info: RouterInfo | nu
 
 /** Russian sites around the VPN on the router, for every device on VPN; restarts the VPN. */
 export async function setRouterRuDirect(link: RouterLink, enabled: boolean): Promise<RouterStatus> {
-  const status = await invoke<RouterStatus>("router_set_ru_direct", { host: link.host, user: link.user, enabled });
+  const status = await linkInvoke<RouterStatus>(link, "router_set_ru_direct", { enabled });
   remember(getRouterLink() ?? link, status);
   return status;
 }
 
 export async function setRouterName(link: RouterLink, name: string): Promise<RouterStatus> {
-  const status = await invoke<RouterStatus>("router_set_name", { host: link.host, user: link.user, name });
+  const status = await linkInvoke<RouterStatus>(link, "router_set_name", { name });
   remember(getRouterLink() ?? link, status);
   return status;
 }
@@ -384,12 +424,22 @@ interface TrafficCache {
   hours: RouterTrafficHour[];
 }
 
+/** Whether this computer is connected to any router (wherever it is now). */
+export function hasRouterLinks(): boolean {
+  return readLinks().length > 0;
+}
+
+/**
+ * The traffic read last, of a router still connected: shown on any network
+ * (the totals do not change with where the computer is), read only at home.
+ */
 export function getCachedRouterTraffic(): RouterTrafficHour[] {
-  const link = getRouterLink();
-  if (!link) return [];
+  const links = readLinks();
+  if (links.length === 0) return [];
   try {
     const cache = JSON.parse(localStorage.getItem(TRAFFIC_KEY) ?? "null") as TrafficCache | null;
-    if (!cache || !Array.isArray(cache.hours) || (cache.hwid && link.hwid && cache.hwid !== link.hwid)) return [];
+    if (!cache || !Array.isArray(cache.hours)) return [];
+    if (cache.hwid && !links.some((link) => (link.hwid ?? "").toLowerCase() === cache.hwid?.toLowerCase())) return [];
     return cache.hours;
   } catch {
     return [];
@@ -402,23 +452,17 @@ let trafficInFlight: Promise<void> | null = null;
  * Reads the router's traffic when the cached copy is older than `maxAgeMs`.
  * Silent on failure (another network, router off): the cache stays.
  */
-export function refreshRouterTraffic(maxAgeMs = 5 * 60_000): Promise<void> {
+export async function refreshRouterTraffic(maxAgeMs = 5 * 60_000): Promise<void> {
+  if (!ROUTER_SECTION_AVAILABLE || isBrowserPreviewRuntime()) return;
+  // Only from a connected router's own network, and only that router: the
+  // network is known first (not guessed from the last connected router).
+  const here = getCachedRouter() ?? (await detectRouter());
   const link = getRouterLink();
-  if (!link || !ROUTER_SECTION_AVAILABLE || isBrowserPreviewRuntime()) return Promise.resolve();
-  // Only from the router's own network: elsewhere the home address is some
-  // other router (or nothing), and SSH to it would only fail or warn.
-  const here = getCachedRouter();
-  if (here?.gateway && here.gateway !== link.host) return Promise.resolve();
-  if (here?.mark && link.hwid) {
-    // Same address, but maybe another router: read only from the linked one.
-    return isLinkedRouterHere(link, here).then((same) => (same ? readRouterTraffic(maxAgeMs) : undefined));
-  }
-  return readRouterTraffic(maxAgeMs);
+  if (!link || !(await isLinkedRouterHere(link, here))) return;
+  return readRouterTraffic(link, maxAgeMs);
 }
 
-function readRouterTraffic(maxAgeMs: number): Promise<void> {
-  const link = getRouterLink();
-  if (!link) return Promise.resolve();
+function readRouterTraffic(link: RouterLink, maxAgeMs: number): Promise<void> {
   try {
     const cache = JSON.parse(localStorage.getItem(TRAFFIC_KEY) ?? "null") as TrafficCache | null;
     if (cache && Date.now() - cache.fetchedAt < maxAgeMs && (!link.hwid || cache.hwid === link.hwid)) {
@@ -429,7 +473,7 @@ function readRouterTraffic(maxAgeMs: number): Promise<void> {
   }
   if (trafficInFlight) return trafficInFlight;
   setTrafficLoading(true);
-  trafficInFlight = invoke<RouterTrafficHour[]>("router_traffic", { host: link.host, user: link.user })
+  trafficInFlight = linkInvoke<RouterTrafficHour[]>(link, "router_traffic", {})
     .then((hours) => storeRouterTraffic(link, hours))
     .catch(() => undefined)
     .finally(() => {
@@ -488,9 +532,12 @@ export interface RouterCheck {
  */
 export async function checkRouter(options: { host: string; user: string; password: string }): Promise<RouterCheck> {
   const { host, user, password } = options;
-  await invoke("router_pair", { host, user, password });
+  pairedKeys.set(host, await invoke<string | null>("router_pair", { host, user, password }));
   return invoke<RouterCheck>("router_check", { host, user });
 }
+
+/** The host key each router showed when paired, for the link the install creates. */
+const pairedKeys = new Map<string, string | null>();
 
 /**
  * Logs in once and puts the app's key on the router. A router that already
@@ -500,10 +547,11 @@ export async function checkRouter(options: { host: string; user: string; passwor
  */
 export async function connectRouter(options: { host: string; user: string; password: string }): Promise<RouterStatus> {
   const { host, user, password } = options;
-  await invoke("router_pair", { host, user, password });
+  const hostKey = await invoke<string | null>("router_pair", { host, user, password });
+  pairedKeys.set(host, hostKey);
   const status = await invoke<RouterStatus>("router_status", { host, user });
   if (status.installed) {
-    const link: RouterLink = { host, user, serverId: null, serverName: null };
+    const link: RouterLink = { host, user, serverId: null, serverName: null, hostKey };
     saveRouterLink(link);
     remember(link, status);
   }
@@ -573,7 +621,13 @@ export async function installRouter(options: {
     subscriptionUrl,
     autostart,
   });
-  const link = { host, user, serverId: server.id, serverName: server.name };
+  const link: RouterLink = {
+    host,
+    user,
+    serverId: server.id,
+    serverName: server.name,
+    hostKey: pairedKeys.get(host) ?? null,
+  };
   saveRouterLink(link);
   remember(link, status);
   return status;
@@ -590,17 +644,18 @@ export interface RouterUpdate {
 
 /** Whether the router runs older components than this app carries. */
 export async function routerUpdateCheck(link: RouterLink): Promise<RouterUpdate> {
-  return invoke<RouterUpdate>("router_update_check", { host: link.host, user: link.user });
+  return linkInvoke<RouterUpdate>(link, "router_update_check", {});
 }
 
 /** Brings the router's components up to date; servers and device choices stay. */
 export async function updateRouter(link: RouterLink): Promise<RouterStatus> {
-  return invoke<RouterStatus>("router_update", { host: link.host, user: link.user });
+  return linkInvoke<RouterStatus>(link, "router_update", {});
 }
 
 /** Everything the Router screen shows, read in one login. */
 export interface RouterSnapshot {
   status: RouterStatus;
+  hostKey: string | null;
   network: RouterNetwork | null;
   traffic: RouterTrafficHour[] | null;
 }
@@ -611,12 +666,17 @@ export interface RouterSnapshot {
  * kept as a separate read would keep it.
  */
 export async function routerSnapshot(link: RouterLink): Promise<RouterSnapshot> {
-  const snapshot = await invoke<RouterSnapshot>("router_snapshot", { host: link.host, user: link.user });
+  const snapshot = await linkInvoke<RouterSnapshot>(link, "router_snapshot", {});
   const status = snapshot.status;
   if (link.hwid && status.hwid && link.hwid.toLowerCase() !== status.hwid.toLowerCase()) {
     throw new Error("another router at this address");
   }
   if (status.installed) remember(link, status);
+  // A link from before host keys were pinned learns its router's key now
+  // (its id was just checked above).
+  if (snapshot.hostKey && !storedLink(link).hostKey && status.installed) {
+    updateRouterLink(link, { hostKey: snapshot.hostKey });
+  }
   if (snapshot.traffic) storeRouterTraffic(link, snapshot.traffic);
   return snapshot;
 }
@@ -626,9 +686,7 @@ export async function migrateRouterDefaults(
   link: RouterLink,
   devices: Array<{ mac: string; name: string }>,
 ): Promise<RouterStatus> {
-  return invoke<RouterStatus>("router_migrate_defaults", {
-    host: link.host,
-    user: link.user,
+  return linkInvoke<RouterStatus>(link, "router_migrate_defaults", {
     devices: devices.map((device) => [device.mac, device.name]),
   });
 }
@@ -655,7 +713,7 @@ export function forgetRouterUpdateCheck(link: RouterLink): void {
 }
 
 export async function routerStatus(link: RouterLink): Promise<RouterStatus> {
-  const status = await invoke<RouterStatus>("router_status", { host: link.host, user: link.user });
+  const status = await linkInvoke<RouterStatus>(link, "router_status", {});
   // Another router at the linked address (paired elsewhere, no mark to tell
   // them apart before logging in): not the linked one, and its id must not
   // replace the linked router's.
@@ -686,9 +744,7 @@ export async function unlinkRouterFromAccount(
 export type RouterAction = "start" | "stop" | "restart" | "autostart-on" | "autostart-off" | "uninstall";
 
 export async function routerControl(link: RouterLink, action: RouterAction): Promise<RouterStatus> {
-  const status = await invoke<RouterStatus>("router_control", {
-    host: link.host,
-    user: link.user,
+  const status = await linkInvoke<RouterStatus>(link, "router_control", {
     action,
   });
   if (action === "uninstall") removeRouterLink(link);
@@ -699,25 +755,23 @@ export async function routerControl(link: RouterLink, action: RouterAction): Pro
 export async function setRouterServers(link: RouterLink, servers: SlotServer[]): Promise<RouterStatus> {
   const main = servers.find((server) => server.slot === 0);
   if (!main) throw new Error("the router server is missing");
-  const status = await invoke<RouterStatus>("router_set_servers", {
-    host: link.host,
-    user: link.user,
+  const status = await linkInvoke<RouterStatus>(link, "router_set_servers", {
     servers,
     serverHosts: accountServerHosts(),
   });
-  saveRouterLink({ ...link, serverId: main.id, serverName: main.name });
+  updateRouterLink(link, { serverId: main.id, serverName: main.name });
   return status;
 }
 
 export async function routerDevices(link: RouterLink): Promise<RouterNetwork> {
-  return invoke<RouterNetwork>("router_devices", { host: link.host, user: link.user });
+  return linkInvoke<RouterNetwork>(link, "router_devices", {});
 }
 
 export async function setRouterDevice(
   link: RouterLink,
   device: { mac: string; mode: RouterDevice["mode"]; slot: number; name: string },
 ): Promise<void> {
-  await invoke("router_set_device", { host: link.host, user: link.user, ...device });
+  await linkInvoke(link, "router_set_device", { ...device });
 }
 
 /**
@@ -725,7 +779,7 @@ export async function setRouterDevice(
  * cached before its VPN changed. False when it is wired or cannot be.
  */
 export async function reconnectRouterDevice(link: RouterLink, mac: string): Promise<boolean> {
-  return invoke<boolean>("router_kick", { host: link.host, user: link.user, mac });
+  return linkInvoke<boolean>(link, "router_kick", { mac });
 }
 
 /** Drops this computer's own cached DNS answers. */
@@ -737,7 +791,7 @@ export async function setRouterDefaultMode(
   link: RouterLink,
   mode: RouterDeviceMode,
 ): Promise<RouterStatus> {
-  return invoke<RouterStatus>("router_set_default_mode", { host: link.host, user: link.user, mode });
+  return linkInvoke<RouterStatus>(link, "router_set_default_mode", { mode });
 }
 
 // Names home devices announce over UPnP ("[LG] webOS TV UJ630V" where DHCP

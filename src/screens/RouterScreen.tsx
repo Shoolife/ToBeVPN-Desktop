@@ -323,13 +323,14 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     const savedLink = getRouterLink();
     let currentLink = savedLink && (await isLinkedRouterHere(savedLink, nextInfo)) ? savedLink : null;
     let nextStatus: RouterStatus | null = null;
+    let nextNetwork: RouterNetwork | null = null;
     let accessLost = false;
     if (currentLink) {
       try {
         // Status, devices and traffic in one login.
         const snapshot = await routerSnapshot(currentLink);
         nextStatus = snapshot.status;
-        if (generation === generationRef.current && snapshot.network) setNetwork(snapshot.network);
+        nextNetwork = snapshot.network;
       } catch (statusError) {
         if (String(statusError).includes("another router at this address")) {
           // This network's router is not the linked one: shown as a router
@@ -364,8 +365,11 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       })
       .catch(() => undefined);
     setInfo(nextInfo);
+    // The router, its status and its devices change together: nothing acts
+    // on one router's devices with another's status.
     setLink(currentLink);
     setStatus(nextStatus);
+    setNetwork(nextNetwork);
     setLostAccess(accessLost);
     setLoading(false);
     setRefreshing(false);
@@ -1016,13 +1020,17 @@ function HomeNetwork({
   const [pickingMac, setPickingMac] = useState<string | null>(null);
   const [lanNames, setLanNames] = useState<Record<string, string>>(cachedLanNames);
   const migratingRef = useRef(false);
-  const devicesReadFailedRef = useRef(false);
+  // The empty list put in when the read failed: the home is not empty, the
+  // list is unknown. A real list later clears it.
+  const devicesReadFailedRef = useRef<RouterNetwork | null>(null);
+  useEffect(() => {
+    if (network && network !== devicesReadFailedRef.current) devicesReadFailedRef.current = null;
+  }, [network]);
 
   useEffect(() => {
     let alive = true;
     // Normally read with the status (one login); read here only when not.
     if (network) {
-      devicesReadFailedRef.current = false;
       if (status.clientIp) {
         void discoverLanNames(status.clientIp, network.devices).then((names) => {
           if (alive) setLanNames(names);
@@ -1035,7 +1043,6 @@ function HomeNetwork({
     routerDevices(link)
       .then((next) => {
         if (!alive) return;
-        devicesReadFailedRef.current = false;
         onNetwork(next);
         if (status.clientIp) {
           void discoverLanNames(status.clientIp, next.devices).then((names) => {
@@ -1048,19 +1055,21 @@ function HomeNetwork({
         onError(routerErrorText(error));
         // Not an empty home: the list is unknown. Nothing may act on it
         // (the migration below would switch every device off the VPN).
-        devicesReadFailedRef.current = true;
-        onNetwork({ devices: [], slots: [] });
+        const failed = { devices: [], slots: [] };
+        devicesReadFailedRef.current = failed;
+        onNetwork(failed);
       });
     return () => {
       alive = false;
     };
-  }, [link.host]);
+    // Again when the list is gone (another router, a refresh without it).
+  }, [link.host, network === null]);
 
   // Earlier versions sent every device without a choice through the router's
   // server. Each such device now gets that server as its own choice, and new
   // devices start without VPN; nothing changes for the devices already there.
   useEffect(() => {
-    if (!network || status.defaultMode !== "vpn" || migratingRef.current || devicesReadFailedRef.current) return;
+    if (!network || status.defaultMode !== "vpn" || migratingRef.current || devicesReadFailedRef.current !== null) return;
     migratingRef.current = true;
     void (async () => {
       try {

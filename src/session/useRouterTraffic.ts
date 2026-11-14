@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   getCachedRouterTraffic,
-  getRouterLink,
+  hasRouterLinks,
   isRouterTrafficLoading,
   refreshRouterTraffic,
   ROUTER_CHANGED_EVENT,
@@ -26,7 +26,7 @@ export function useRouterTraffic(maxAgeMs = REFRESH_MS): {
   /** A read from the router is running. */
   loading: boolean;
 } {
-  const [linked, setLinked] = useState(() => ROUTER_SECTION_AVAILABLE && !!getRouterLink());
+  const [linked, setLinked] = useState(() => ROUTER_SECTION_AVAILABLE && hasRouterLinks());
   const [hours, setHours] = useState<RouterTrafficHour[]>(getCachedRouterTraffic);
   const [loading, setLoading] = useState(isRouterTrafficLoading);
 
@@ -53,7 +53,7 @@ export function useRouterTraffic(maxAgeMs = REFRESH_MS): {
   useEffect(() => {
     if (!ROUTER_SECTION_AVAILABLE) return;
     const update = () => {
-      setLinked(!!getRouterLink());
+      setLinked(hasRouterLinks());
       setHours(getCachedRouterTraffic());
     };
     window.addEventListener(ROUTER_CHANGED_EVENT, update);

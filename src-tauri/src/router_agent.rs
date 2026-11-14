@@ -752,7 +752,14 @@ async fn connect(
     let expected = if pairing {
         None
     } else {
-        known_hosts(app).get(host).cloned().filter(|keys| !keys.is_empty())
+        match PINS.lock().unwrap().get(host).cloned() {
+            // Only the pinned router, and only if it is still a paired one.
+            Some(pinned) => known_hosts(app)
+                .get(host)
+                .filter(|keys| keys.contains(&pinned))
+                .map(|_| vec![pinned]),
+            None => known_hosts(app).get(host).cloned().filter(|keys| !keys.is_empty()),
+        }
     };
     if !pairing && expected.is_none() {
         return Err("router is not paired".into());
@@ -812,17 +819,39 @@ pub async fn router_pair(
     host: String,
     user: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     log(&app, "info", format!("SSH {user}@{host}:22"));
     let result = pair(&app, host, user, password).await;
     match &result {
-        Ok(()) => log(&app, "info", "app key installed on the router"),
+        Ok(_) => log(&app, "info", "app key installed on the router"),
         Err(error) => log(&app, "error", error.clone()),
     }
     result
 }
 
-async fn pair(app: &AppHandle, host: String, user: String, password: String) -> Result<(), String> {
+/// Which router the next commands at an address must reach: its host key.
+/// Several routers can be paired at one address (home and a cottage both on
+/// 192.168.1.1); without a pin any of them would be accepted, and a command
+/// meant for one could change the other.
+static PINS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Pins (or, with None, unpins) the router expected at an address.
+#[tauri::command]
+pub fn router_pin(host: String, fingerprint: Option<String>) {
+    let mut pins = PINS.lock().unwrap();
+    match fingerprint {
+        Some(fingerprint) if !fingerprint.is_empty() => {
+            pins.insert(host, fingerprint);
+        }
+        _ => {
+            pins.remove(&host);
+        }
+    }
+}
+
+/// Returns the host key the router showed, to pin it for this link.
+async fn pair(app: &AppHandle, host: String, user: String, password: String) -> Result<Option<String>, String> {
     let app = app.clone();
     let (mut session, fingerprint) = connect(&app, &host, true).await?;
     if let Some(fingerprint) = &fingerprint {
@@ -854,14 +883,16 @@ async fn pair(app: &AppHandle, host: String, user: String, password: String) -> 
          {{ grep -vF '{blob}' \"$f\" 2>/dev/null | grep -v ' {comment}$'; cat; }} > \"$f.tobevpn\" && mv \"$f.tobevpn\" \"$f\""
     );
     session.run_ok(&command, Some(line.as_bytes())).await?;
-    if let Some(fingerprint) = fingerprint {
+    if let Some(fingerprint) = &fingerprint {
         let mut hosts = known_hosts(&app);
-        let keys = hosts.entry(host).or_default();
-        keys.retain(|key| *key != fingerprint);
-        keys.push(fingerprint);
+        let keys = hosts.entry(host.clone()).or_default();
+        keys.retain(|key| key != fingerprint);
+        keys.push(fingerprint.clone());
         save_known_hosts(&app, &hosts)?;
+        // The commands that follow (check, status, install) reach this router.
+        PINS.lock().unwrap().insert(host, fingerprint.clone());
     }
-    Ok(())
+    Ok(fingerprint)
 }
 
 fn progress(app: &AppHandle, step: &str) {
@@ -1472,6 +1503,8 @@ pub async fn router_devices(
 #[serde(rename_all = "camelCase")]
 pub struct RouterSnapshot {
     pub status: RouterStatus,
+    /// The host key this router showed, for the link to pin.
+    pub host_key: Option<String>,
     pub network: Option<RouterNetwork>,
     pub traffic: Option<Vec<TrafficHour>>,
 }
@@ -1489,7 +1522,7 @@ pub async fn router_snapshot(app: AppHandle, host: String, user: String) -> Resu
         .await?;
     let status = parse_status(&output);
     if !status.installed {
-        return Ok(RouterSnapshot { status, network: None, traffic: None });
+        return Ok(RouterSnapshot { status, host_key: session.fingerprint.clone(), network: None, traffic: None });
     }
     let devices = session
         .run_ok("/opt/tobevpn/tobevpn-router.sh devices", None)
@@ -1502,7 +1535,7 @@ pub async fn router_snapshot(app: AppHandle, host: String, user: String) -> Resu
         Ok((text, 0)) => Some(parse_traffic(&text)),
         _ => None,
     };
-    Ok(RouterSnapshot { status, network: Some(network), traffic })
+    Ok(RouterSnapshot { status, host_key: session.fingerprint.clone(), network: Some(network), traffic })
 }
 
 /// Earlier versions sent every device without a choice through the router's
