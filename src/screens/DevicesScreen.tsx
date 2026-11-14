@@ -4,6 +4,7 @@ import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../ses
 import { getSession } from "../session/store";
 import { formatEpochSecondsDateDots } from "../session/dateFormat";
 import Spinner from "../components/Spinner";
+import BrandLoader from "../components/BrandLoader";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import CenterDialog from "../components/CenterDialog";
@@ -446,7 +447,7 @@ export default function DevicesScreen({
 
       {isInitialLoading ? (
         <div className="spinner-center devices-spinner">
-          <Spinner size={32} />
+          <BrandLoader />
         </div>
       ) : (
         <ScrollEdgeAffordance className="devices-list" overlayFade>

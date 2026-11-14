@@ -31,7 +31,7 @@ import {
   serverProfileKey,
   type ServerProbeProgress,
 } from "../session/serverProbe";
-import Spinner from "../components/Spinner";
+import BrandLoader from "../components/BrandLoader";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import { applyEdgeFade } from "../components/ScrollEdgeAffordance";
 import type { SelectedServer } from "../App";
@@ -708,7 +708,9 @@ export default function ServersScreen({
           onScroll={updateListFades}
         >
         {loading && servers.length === 0 ? (
-          <Spinner size={36} />
+          <div className="spinner-center">
+            <BrandLoader />
+          </div>
         ) : error ? (
           <div className="server-item" style={{ justifyContent: "center" }}>
             <div className="server-item__info">

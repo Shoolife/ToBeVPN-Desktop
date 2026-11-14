@@ -268,7 +268,8 @@ export default function App({
   const useDesktopFrame = shouldUseDesktopFrame(browserPreview);
   const timeoutRef = useRef<number | null>(null);
 
-  const DURATION = 300;
+  // The phone's screen crossfade (navigation-compose default).
+  const DURATION = 700;
 
   const requestInterfaceScale = useCallback((value: number, centerAfterResize = false) => {
     const normalized = saveInterfaceScale(value);
@@ -393,7 +394,9 @@ export default function App({
   }, [browserPreview]);
 
   const navigate = useCallback((to: Screen, dir: Direction) => {
-    if (animating) return;
+    // A tap during a crossfade is not lost (as on the phone); only a window
+    // morph is waited for.
+    if (animating && document.documentElement.dataset.windowMorph) return;
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     // Going to or from the landscape sign-in window: fade the current screen
     // out first and only then switch, so the next screen never flashes at the

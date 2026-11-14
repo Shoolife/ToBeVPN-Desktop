@@ -27,6 +27,7 @@ import CopyNotification, {
 } from "../components/CopyNotification";
 import MaterialIcon from "../components/MaterialIcon";
 import Spinner from "../components/Spinner";
+import BrandLoader from "../components/BrandLoader";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
@@ -588,7 +589,7 @@ export default function ReferralsScreen({
           />
         ) : isInitialLoading && data === null ? (
           <div className="referrals-loading" aria-label={t("referrals_loading")}>
-            <Spinner size={30} thickness={3} className="spinner--accent" />
+            <BrandLoader />
           </div>
         ) : data === null ? (
           <ReferralCenteredState
