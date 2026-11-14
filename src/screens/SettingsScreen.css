@@ -1929,12 +1929,12 @@
   justify-content: center;
   z-index: 100;
   backdrop-filter: blur(4px);
-  animation: settings-dialog-overlay-in 180ms ease-out;
+  animation: settings-dialog-overlay-in 220ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 .dialog-overlay--closing {
   pointer-events: none;
-  animation: settings-dialog-overlay-out 180ms ease-in forwards;
+  animation: settings-dialog-overlay-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 .dialog {
@@ -1946,11 +1946,11 @@
   width: calc(100% - 48px);
   box-shadow: var(--modal-shadow);
   transform-origin: center;
-  animation: settings-dialog-in 220ms cubic-bezier(0.2, 0.9, 0.2, 1);
+  animation: settings-dialog-in 220ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 .dialog-overlay--closing .dialog {
-  animation: settings-dialog-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  animation: settings-dialog-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 @keyframes settings-dialog-overlay-in {
@@ -1964,25 +1964,13 @@
 }
 
 @keyframes settings-dialog-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 @keyframes settings-dialog-out {
-  from {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(8px) scale(0.96);
-  }
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 .dialog__title {

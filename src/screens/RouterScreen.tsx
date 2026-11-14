@@ -67,7 +67,7 @@ import "./RouterScreen.css";
 
 const MIN_REFRESH_FEEDBACK_MS = 800;
 /** As on the subscription sheet: its slide-down and drag threshold. */
-const SHEET_CLOSE_MS = 300;
+const SHEET_CLOSE_MS = 420;
 const SHEET_DRAG_ACTIVATION_PX = 9;
 
 export function RouterIcon({ size = 20 }: { size?: number }) {

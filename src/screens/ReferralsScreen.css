@@ -684,11 +684,11 @@
   justify-content: flex-end;
   background: var(--overlay);
   backdrop-filter: blur(4px);
-  animation: referrals-overlay-in 200ms ease;
+  animation: referrals-overlay-in 420ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .referrals-sheet-overlay--closing {
-  animation: referrals-overlay-out 200ms ease forwards;
+  animation: referrals-overlay-out 420ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 .referrals-sheet {
@@ -702,7 +702,7 @@
   color: var(--text);
   box-shadow: var(--modal-shadow);
   outline: none;
-  animation: referrals-sheet-in 450ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: referrals-sheet-in 420ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .referrals-sheet--dragging {
@@ -717,12 +717,12 @@
 
 .referrals-sheet--snapping {
   animation: none;
-  transition: transform var(--referrals-sheet-snap-duration, 240ms) cubic-bezier(0.34, 1.35, 0.64, 1);
+  transition: transform var(--referrals-sheet-snap-duration, 420ms) cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
 }
 
 .referrals-sheet--closing {
-  animation: referrals-sheet-out 300ms cubic-bezier(0.4, 0, 0.8, 0.3) forwards;
+  animation: referrals-sheet-out 420ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 .referrals-sheet__handle {
@@ -926,12 +926,12 @@
   padding: 22px;
   background: var(--overlay);
   backdrop-filter: blur(4px);
-  animation: referrals-overlay-in 180ms ease-out;
+  animation: referrals-overlay-in 220ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 .referrals-confirm-overlay--closing {
   pointer-events: none;
-  animation: referrals-overlay-out 180ms ease-in forwards;
+  animation: referrals-overlay-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 .referrals-confirm {

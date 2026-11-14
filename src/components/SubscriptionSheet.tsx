@@ -1158,7 +1158,7 @@ export default function SubscriptionSheet({
     purchaseAttemptRef.current += 1;
     purchaseOpeningRef.current = false;
     setClosing(true);
-    dismissTimerRef.current = window.setTimeout(() => onDismiss(), 300);
+    dismissTimerRef.current = window.setTimeout(() => onDismiss(), 420);
   };
 
   useEffect(() => {

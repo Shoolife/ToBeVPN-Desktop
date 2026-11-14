@@ -38,7 +38,7 @@ import "./ReferralsScreen.css";
 
 const PAGE_SIZE = 20;
 const MIN_REFRESH_FEEDBACK_MS = 900;
-const SHEET_EXIT_MS = 300;
+const SHEET_EXIT_MS = 420;
 const SHEET_DRAG_ACTIVATION_PX = 9;
 const MAX_TELEGRAM_ID_DIGITS = 19;
 

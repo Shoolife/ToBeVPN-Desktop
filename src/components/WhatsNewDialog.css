@@ -10,7 +10,7 @@
   background: var(--overlay);
   backdrop-filter: blur(4px);
   pointer-events: auto;
-  animation: whats-new-overlay-in 180ms ease-out;
+  animation: whats-new-overlay-in 220ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 html[data-window-frame="windows"] .whats-new-overlay {
@@ -19,7 +19,7 @@ html[data-window-frame="windows"] .whats-new-overlay {
 
 .whats-new-overlay--closing {
   pointer-events: none;
-  animation: whats-new-overlay-out 180ms ease-in forwards;
+  animation: whats-new-overlay-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 .whats-new-dialog {
@@ -37,7 +37,7 @@ html[data-window-frame="windows"] .whats-new-overlay {
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--modal-shadow);
-  animation: whats-new-dialog-in 220ms cubic-bezier(0.2, 0.9, 0.2, 1);
+  animation: whats-new-dialog-in 220ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 .whats-new-dialog:focus {
@@ -45,7 +45,7 @@ html[data-window-frame="windows"] .whats-new-overlay {
 }
 
 .whats-new-overlay--closing .whats-new-dialog {
-  animation: whats-new-dialog-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  animation: whats-new-dialog-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 .whats-new-dialog__close {
@@ -244,25 +244,13 @@ html[data-window-frame="windows"] .whats-new-overlay {
 }
 
 @keyframes whats-new-dialog-in {
-  from {
-    opacity: 0;
-    transform: translateY(12px) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 @keyframes whats-new-dialog-out {
-  from {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(8px) scale(0.97);
-  }
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

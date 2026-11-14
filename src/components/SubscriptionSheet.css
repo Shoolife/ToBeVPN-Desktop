@@ -7,11 +7,11 @@
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  animation: sub-sheet-backdrop-in 200ms ease;
+  animation: sub-sheet-backdrop-in 420ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .sub-sheet-overlay--closing {
-  animation: sub-sheet-backdrop-out 200ms ease forwards;
+  animation: sub-sheet-backdrop-out 420ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 @keyframes sub-sheet-backdrop-in {
@@ -35,7 +35,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: sub-sheet-slide-up 450ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: sub-sheet-slide-up 420ms cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--modal-shadow);
 }
 
@@ -51,12 +51,12 @@
 
 .sub-sheet--snapping {
   animation: none;
-  transition: transform var(--sub-sheet-snap-duration, 240ms) cubic-bezier(0.34, 1.35, 0.64, 1);
+  transition: transform var(--sub-sheet-snap-duration, 420ms) cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
 }
 
 .sub-sheet--closing {
-  animation: sub-sheet-slide-down 300ms cubic-bezier(0.4, 0, 0.8, 0.3) forwards;
+  animation: sub-sheet-slide-down 420ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 @keyframes sub-sheet-slide-up {

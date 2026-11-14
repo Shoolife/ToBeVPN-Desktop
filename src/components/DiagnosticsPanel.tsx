@@ -134,7 +134,7 @@ function ModalFrame({
     clearSheetSnapTimer();
     sheetDragRef.current = null;
     setClosing(true);
-    closeTimerRef.current = window.setTimeout(onClose, isBottomSheet ? 300 : 180);
+    closeTimerRef.current = window.setTimeout(onClose, isBottomSheet ? 420 : 150);
   }, [canClose, clearSheetSnapTimer, isBottomSheet, onClose]);
 
   const startSheetDrag = (event: React.PointerEvent<HTMLDivElement>) => {

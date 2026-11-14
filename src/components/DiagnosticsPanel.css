@@ -133,7 +133,7 @@
   padding: 24px;
   background: var(--overlay);
   backdrop-filter: blur(4px);
-  animation: diagnostics-overlay-in 180ms ease-out both;
+  animation: diagnostics-overlay-in 220ms cubic-bezier(0, 0, 0.2, 1) both;
 }
 
 .diagnostics-modal {
@@ -166,7 +166,7 @@
 
 .diagnostics-overlay--closing:not(.diagnostics-overlay--bottom) {
   pointer-events: none;
-  animation: diagnostics-overlay-out 180ms ease-in forwards;
+  animation: diagnostics-overlay-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 .diagnostics-overlay--closing:not(.diagnostics-overlay--bottom) .diagnostics-modal {
@@ -251,10 +251,10 @@
   align-items: stretch;
   justify-content: flex-end;
   padding: 0;
-  animation: diagnostics-sheet-backdrop-in 200ms ease;
+  animation: diagnostics-sheet-backdrop-in 420ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 .diagnostics-overlay--bottom .diagnostics-modal {
-  animation: diagnostics-sheet-in 450ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: diagnostics-sheet-in 420ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .diagnostics-overlay--bottom .diagnostics-modal--dragging {
@@ -269,17 +269,17 @@
 
 .diagnostics-overlay--bottom .diagnostics-modal--snapping {
   animation: none;
-  transition: transform var(--diagnostics-sheet-snap-duration, 240ms) cubic-bezier(0.34, 1.35, 0.64, 1);
+  transition: transform var(--diagnostics-sheet-snap-duration, 420ms) cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
 }
 
 .diagnostics-overlay--bottom.diagnostics-overlay--closing {
   pointer-events: none;
-  animation: diagnostics-sheet-backdrop-out 200ms ease forwards;
+  animation: diagnostics-sheet-backdrop-out 420ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 .diagnostics-overlay--bottom .diagnostics-modal.diagnostics-modal--closing {
-  animation: diagnostics-sheet-out 300ms cubic-bezier(0.4, 0, 0.8, 0.3) forwards;
+  animation: diagnostics-sheet-out 420ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 .diagnostics-modal--history {

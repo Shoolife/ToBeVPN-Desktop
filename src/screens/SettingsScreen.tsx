@@ -231,7 +231,7 @@ function routingModeLabel(mode: RoutingMode): string {
   }
 }
 
-const DIALOG_EXIT_MS = 180;
+const DIALOG_EXIT_MS = 150;
 
 export default function SettingsScreen({
   onBack,

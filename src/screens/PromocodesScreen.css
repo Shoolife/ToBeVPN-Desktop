@@ -588,12 +588,12 @@
   padding: 22px;
   background: var(--overlay);
   backdrop-filter: blur(4px);
-  animation: promocodes-overlay-in 180ms ease-out;
+  animation: promocodes-overlay-in 220ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 .promocodes-dialog-overlay--closing {
   pointer-events: none;
-  animation: promocodes-overlay-out 180ms ease-in forwards;
+  animation: promocodes-overlay-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 .promocodes-success-dialog {
@@ -607,11 +607,11 @@
   color: var(--text);
   text-align: center;
   box-shadow: var(--modal-shadow);
-  animation: promocodes-dialog-in 220ms cubic-bezier(0.2, 0.9, 0.2, 1);
+  animation: promocodes-dialog-in 220ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 .promocodes-success-dialog--closing {
-  animation: promocodes-dialog-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  animation: promocodes-dialog-out 150ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 .promocodes-success-dialog__icon {
@@ -676,13 +676,13 @@
 }
 
 @keyframes promocodes-dialog-in {
-  from { opacity: 0; transform: translateY(10px) scale(0.96); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 @keyframes promocodes-dialog-out {
-  from { opacity: 1; transform: translateY(0) scale(1); }
-  to { opacity: 0; transform: translateY(8px) scale(0.96); }
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 :root[data-theme="light"] .promocodes-activation-card,

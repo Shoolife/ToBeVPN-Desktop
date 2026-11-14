@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export const DIALOG_EXIT_ANIMATION_MS = 180;
+export const DIALOG_EXIT_ANIMATION_MS = 150;
 
 export function useAnimatedDialogClose(
   onDismiss: () => void,
