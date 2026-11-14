@@ -187,39 +187,115 @@ export interface RouterLink {
   /** Device id of the router in the account, once its status was read. */
   hwid?: string | null;
   name?: string | null;
+  /** This entry in the list of connected routers. */
+  id?: string;
+  /** The mark the router publishes (from its device id), to tell it apart. */
+  mark?: string | null;
 }
 
+// Every router this computer is connected to (home, a cottage…), most
+// recently connected first. Each keeps its own key on the router and its
+// own pinned host key here, so moving between them needs no password.
+const LINKS_KEY = "tobevpn_router_links_v1";
+/** The single link earlier versions kept. */
 const LINK_KEY = "tobevpn_router_v1";
 
-export function getRouterLink(): RouterLink | null {
+function parseLink(value: unknown): RouterLink | null {
+  const parsed = value as Partial<RouterLink> | null;
+  if (!parsed || typeof parsed.host !== "string" || typeof parsed.user !== "string") return null;
+  return {
+    host: parsed.host,
+    user: parsed.user,
+    serverId: typeof parsed.serverId === "string" ? parsed.serverId : null,
+    serverName: typeof parsed.serverName === "string" ? parsed.serverName : null,
+    hwid: typeof parsed.hwid === "string" ? parsed.hwid : null,
+    name: typeof parsed.name === "string" ? parsed.name : null,
+    id: typeof parsed.id === "string" ? parsed.id : newLinkId(),
+    mark: typeof parsed.mark === "string" ? parsed.mark : null,
+  };
+}
+
+function newLinkId(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function readLinks(): RouterLink[] {
   try {
-    const raw = localStorage.getItem(LINK_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<RouterLink>;
-    if (typeof parsed.host !== "string" || typeof parsed.user !== "string") return null;
-    return {
-      host: parsed.host,
-      user: parsed.user,
-      serverId: typeof parsed.serverId === "string" ? parsed.serverId : null,
-      serverName: typeof parsed.serverName === "string" ? parsed.serverName : null,
-      hwid: typeof parsed.hwid === "string" ? parsed.hwid : null,
-      name: typeof parsed.name === "string" ? parsed.name : null,
-    };
+    const raw = localStorage.getItem(LINKS_KEY);
+    if (raw) {
+      const list = JSON.parse(raw) as unknown;
+      return Array.isArray(list) ? list.map(parseLink).filter((link): link is RouterLink => !!link) : [];
+    }
+    const single = parseLink(JSON.parse(localStorage.getItem(LINK_KEY) ?? "null"));
+    return single ? [single] : [];
   } catch {
-    return null;
+    return [];
   }
 }
 
-export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
-
-function saveRouterLink(link: RouterLink | null): void {
+function writeLinks(links: RouterLink[]): void {
   try {
-    if (link) localStorage.setItem(LINK_KEY, JSON.stringify(link));
-    else localStorage.removeItem(LINK_KEY);
+    localStorage.setItem(LINKS_KEY, JSON.stringify(links));
+    localStorage.removeItem(LINK_KEY);
   } catch {
     // Without storage the router is paired again next time.
   }
   window.dispatchEvent(new Event(ROUTER_CHANGED_EVENT));
+}
+
+/**
+ * The connected router of the current network: at this address and, when
+ * the router shows its mark, that very router (home and a cottage can both
+ * be 192.168.1.1); without a mark, the one connected last at the address.
+ */
+export function getRouterLink(): RouterLink | null {
+  const links = readLinks();
+  const info = cached;
+  if (!info?.gateway) return links[0] ?? null;
+  const here = links.filter((link) => link.host === info.gateway);
+  if (!info.mark) return here[0] ?? null;
+  return (
+    here.find((link) => link.mark === info.mark) ??
+    // Connected, its id or mark not known yet (just paired, older entry).
+    here.find((link) => !link.hwid || !link.mark) ??
+    null
+  );
+}
+
+export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
+
+/**
+ * Saves a connected router: its entry is replaced (or added first), and an
+ * older entry of the same router (connected again) is dropped.
+ */
+function saveRouterLink(link: RouterLink): void {
+  const entry: RouterLink = { ...link, id: link.id ?? newLinkId() };
+  let links = readLinks().filter((item) => item.id !== entry.id);
+  if (!entry.hwid) links = links.filter((item) => !(item.host === entry.host && !item.hwid));
+  if (entry.hwid) {
+    const hwid = entry.hwid.toLowerCase();
+    // The same router, or its entry from before its id was read.
+    links = links.filter(
+      (item) =>
+        (item.hwid ?? "").toLowerCase() !== hwid && !(item.host === entry.host && item.user === entry.user && !item.hwid),
+    );
+  }
+  writeLinks([entry, ...links]);
+  if (entry.hwid && !entry.mark) {
+    void routerMarks([entry.hwid]).then(([mark]) => {
+      if (!mark) return;
+      const list = readLinks();
+      const index = list.findIndex((item) => item.id === entry.id);
+      if (index < 0) return;
+      list[index] = { ...list[index], mark };
+      writeLinks(list);
+    });
+  }
+}
+
+/** Forgets one connected router; the others stay. */
+function removeRouterLink(link: RouterLink): void {
+  writeLinks(readLinks().filter((item) => item.id !== link.id));
 }
 
 // Names of every router this app has talked to, by device id: other routers
@@ -255,7 +331,7 @@ function remember(link: RouterLink, status: RouterStatus): void {
     }
   }
   if (link.hwid !== status.hwid || link.name !== status.name) {
-    saveRouterLink({ ...link, hwid: status.hwid, name: status.name });
+    saveRouterLink({ ...link, hwid: status.hwid, name: status.name, mark: link.hwid === status.hwid ? link.mark : null });
   }
 }
 
@@ -354,21 +430,24 @@ function readRouterTraffic(maxAgeMs: number): Promise<void> {
   if (trafficInFlight) return trafficInFlight;
   setTrafficLoading(true);
   trafficInFlight = invoke<RouterTrafficHour[]>("router_traffic", { host: link.host, user: link.user })
-    .then((hours) => {
-      const cache: TrafficCache = { hwid: link.hwid ?? null, fetchedAt: Date.now(), hours };
-      try {
-        localStorage.setItem(TRAFFIC_KEY, JSON.stringify(cache));
-      } catch {
-        // Shown until the screen closes.
-      }
-      window.dispatchEvent(new Event(ROUTER_TRAFFIC_EVENT));
-    })
+    .then((hours) => storeRouterTraffic(link, hours))
     .catch(() => undefined)
     .finally(() => {
       trafficInFlight = null;
       setTrafficLoading(false);
     });
   return trafficInFlight;
+}
+
+/** Keeps a fresh read of the router's traffic and tells the screens. */
+function storeRouterTraffic(link: RouterLink, hours: RouterTrafficHour[]): void {
+  const cache: TrafficCache = { hwid: link.hwid ?? null, fetchedAt: Date.now(), hours };
+  try {
+    localStorage.setItem(TRAFFIC_KEY, JSON.stringify(cache));
+  } catch {
+    // Shown until the screen closes.
+  }
+  window.dispatchEvent(new Event(ROUTER_TRAFFIC_EVENT));
 }
 
 /** Bytes through the router between two epoch-second bounds. */
@@ -519,6 +598,62 @@ export async function updateRouter(link: RouterLink): Promise<RouterStatus> {
   return invoke<RouterStatus>("router_update", { host: link.host, user: link.user });
 }
 
+/** Everything the Router screen shows, read in one login. */
+export interface RouterSnapshot {
+  status: RouterStatus;
+  network: RouterNetwork | null;
+  traffic: RouterTrafficHour[] | null;
+}
+
+/**
+ * The router's status and, with ToBeVPN on it, its home devices and traffic
+ * in one SSH session (instead of one login per question). The traffic is
+ * kept as a separate read would keep it.
+ */
+export async function routerSnapshot(link: RouterLink): Promise<RouterSnapshot> {
+  const snapshot = await invoke<RouterSnapshot>("router_snapshot", { host: link.host, user: link.user });
+  const status = snapshot.status;
+  if (link.hwid && status.hwid && link.hwid.toLowerCase() !== status.hwid.toLowerCase()) {
+    throw new Error("another router at this address");
+  }
+  if (status.installed) remember(link, status);
+  if (snapshot.traffic) storeRouterTraffic(link, snapshot.traffic);
+  return snapshot;
+}
+
+/** Earlier versions' "default" devices keep the router's server, in one login; the default becomes direct. */
+export async function migrateRouterDefaults(
+  link: RouterLink,
+  devices: Array<{ mac: string; name: string }>,
+): Promise<RouterStatus> {
+  return invoke<RouterStatus>("router_migrate_defaults", {
+    host: link.host,
+    user: link.user,
+    devices: devices.map((device) => [device.mac, device.name]),
+  });
+}
+
+const UPDATE_CHECK_EVERY_MS = 30 * 60_000;
+const updateChecks = new Map<string, { at: number; result: RouterUpdate }>();
+
+/**
+ * The update check at most every half hour per router: it logs in and may
+ * ask GitHub. The last answer is given meanwhile.
+ */
+export async function routerUpdateCheckCached(link: RouterLink): Promise<RouterUpdate> {
+  const key = link.id ?? link.host;
+  const last = updateChecks.get(key);
+  if (last && Date.now() - last.at < UPDATE_CHECK_EVERY_MS) return last.result;
+  const result = await routerUpdateCheck(link);
+  updateChecks.set(key, { at: Date.now(), result });
+  return result;
+}
+
+/** After an update the next check is a fresh one. */
+export function forgetRouterUpdateCheck(link: RouterLink): void {
+  updateChecks.delete(link.id ?? link.host);
+}
+
 export async function routerStatus(link: RouterLink): Promise<RouterStatus> {
   const status = await invoke<RouterStatus>("router_status", { host: link.host, user: link.user });
   // Another router at the linked address (paired elsewhere, no mark to tell
@@ -556,7 +691,7 @@ export async function routerControl(link: RouterLink, action: RouterAction): Pro
     user: link.user,
     action,
   });
-  if (action === "uninstall") saveRouterLink(null);
+  if (action === "uninstall") removeRouterLink(link);
   return status;
 }
 

@@ -35,13 +35,15 @@ import {
   setRouterServers,
   setRouterName,
   setRouterRuDirect,
-  refreshRouterTraffic,
   routerTrafficBetween,
   routerDeviceLabel,
   reconnectRouterDevice,
   flushThisComputerDns,
   unlinkRouterFromAccount,
-  routerUpdateCheck,
+  routerUpdateCheckCached,
+  forgetRouterUpdateCheck,
+  routerSnapshot,
+  migrateRouterDefaults,
   updateRouter,
   recheckRouter,
   type RouterCheck,
@@ -50,7 +52,6 @@ import {
   ROUTER_MAX_SERVERS,
   routerServerLimit,
   routerDevices,
-  setRouterDefaultMode,
   setRouterDevice,
   type RouterAction,
   type RouterDevice,
@@ -325,7 +326,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     let accessLost = false;
     if (currentLink) {
       try {
-        nextStatus = await routerStatus(currentLink);
+        // Status, devices and traffic in one login.
+        const snapshot = await routerSnapshot(currentLink);
+        nextStatus = snapshot.status;
+        if (generation === generationRef.current && snapshot.network) setNetwork(snapshot.network);
       } catch (statusError) {
         if (String(statusError).includes("another router at this address")) {
           // This network's router is not the linked one: shown as a router
@@ -344,10 +348,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
       if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
     }
     if (generation !== generationRef.current) return;
-    if (refresh && currentLink) void refreshRouterTraffic(0);
     // Newer components in this app than on the router: offered with a button.
     if (currentLink && nextStatus?.installed) {
-      void routerUpdateCheck(currentLink)
+      void routerUpdateCheckCached(currentLink)
         .then((update) => {
           if (generation === generationRef.current) setUpdate(update);
         })
@@ -645,6 +648,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               onUpdated={(next) => {
                 setStatus(next);
                 setUpdate(null);
+                forgetRouterUpdateCheck(link);
                 setStep(null);
               }}
             />
@@ -1016,6 +1020,18 @@ function HomeNetwork({
 
   useEffect(() => {
     let alive = true;
+    // Normally read with the status (one login); read here only when not.
+    if (network) {
+      devicesReadFailedRef.current = false;
+      if (status.clientIp) {
+        void discoverLanNames(status.clientIp, network.devices).then((names) => {
+          if (alive) setLanNames(names);
+        });
+      }
+      return () => {
+        alive = false;
+      };
+    }
     routerDevices(link)
       .then((next) => {
         if (!alive) return;
@@ -1049,10 +1065,12 @@ function HomeNetwork({
     void (async () => {
       try {
         const kept = network.devices.filter((device) => device.mode === "default");
-        for (const device of kept) {
-          await setRouterDevice(link, { mac: device.mac, mode: "vpn", slot: 0, name: device.name ?? "" });
-        }
-        onStatus(await setRouterDefaultMode(link, "direct"));
+        onStatus(
+          await migrateRouterDefaults(
+            link,
+            kept.map((device) => ({ mac: device.mac, name: device.name ?? "" })),
+          ),
+        );
         // Applied to the list as it is now: a choice saved meanwhile stays.
         const moved = new Set(kept.map((device) => device.mac));
         onNetwork((current) =>

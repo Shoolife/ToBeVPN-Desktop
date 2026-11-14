@@ -7,8 +7,7 @@ import {
   isLinkedRouterHere,
   ROUTER_CHANGED_EVENT,
   ROUTER_SECTION_AVAILABLE,
-  routerDevices,
-  routerStatus,
+  routerSnapshot,
 } from "./router";
 
 /** Whether the home router already sends this computer through the VPN. */
@@ -28,14 +27,16 @@ const CHECK_EVERY_MS = 3 * 60_000;
  * is "not protected", so the app never claims a VPN that is not there.
  */
 export async function checkRouterProtection(): Promise<RouterProtection> {
-  const link = getRouterLink();
-  if (!link || !ROUTER_SECTION_AVAILABLE || isBrowserPreviewRuntime()) return NONE;
+  if (!ROUTER_SECTION_AVAILABLE || isBrowserPreviewRuntime()) return NONE;
   try {
+    // This network's router first: of several connected routers, the link
+    // is the one of the network the computer is on now.
     const info = await detectRouter(true);
-    if (!(await isLinkedRouterHere(link, info))) return NONE;
-    const status = await routerStatus(link);
-    if (!status.installed || !status.running || !status.clientIp) return NONE;
-    const network = await routerDevices(link);
+    const link = getRouterLink();
+    if (!link || !(await isLinkedRouterHere(link, info))) return NONE;
+    // Status and devices in one login.
+    const { status, network } = await routerSnapshot(link);
+    if (!status.installed || !status.running || !status.clientIp || !network) return NONE;
     const me = network.devices.find((device) => device.ip === status.clientIp);
     if (!me) return NONE;
     const mode = me.mode === "default" ? status.defaultMode : me.mode;

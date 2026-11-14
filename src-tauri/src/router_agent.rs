@@ -1467,6 +1467,85 @@ pub async fn router_devices(
     })
 }
 
+/// Everything the Router screen shows, read in one SSH session.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterSnapshot {
+    pub status: RouterStatus,
+    pub network: Option<RouterNetwork>,
+    pub traffic: Option<Vec<TrafficHour>>,
+}
+
+/// The router's status and, with ToBeVPN on it, its home devices and
+/// traffic: one login instead of one per question.
+#[tauri::command]
+pub async fn router_snapshot(app: AppHandle, host: String, user: String) -> Result<RouterSnapshot, String> {
+    let session = open(&app, &host, &user).await?;
+    let (output, _) = session
+        .run(
+            "[ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh status",
+            None,
+        )
+        .await?;
+    let status = parse_status(&output);
+    if !status.installed {
+        return Ok(RouterSnapshot { status, network: None, traffic: None });
+    }
+    let devices = session
+        .run_ok("/opt/tobevpn/tobevpn-router.sh devices", None)
+        .await?;
+    let network = RouterNetwork {
+        devices: parse_devices(&devices),
+        slots: parse_slots(&devices),
+    };
+    let traffic = match session.run("/opt/tobevpn/tobevpn-router.sh traffic", None).await {
+        Ok((text, 0)) => Some(parse_traffic(&text)),
+        _ => None,
+    };
+    Ok(RouterSnapshot { status, network: Some(network), traffic })
+}
+
+/// Earlier versions sent every device without a choice through the router's
+/// server: each keeps that server as its own choice and the default becomes
+/// direct. One session, and the routes are rebuilt once at the end (older
+/// agents rebuild after each device; still right).
+#[tauri::command]
+pub async fn router_migrate_defaults(
+    app: AppHandle,
+    host: String,
+    user: String,
+    devices: Vec<(String, String)>,
+) -> Result<RouterStatus, String> {
+    let mut command = String::new();
+    for (mac, name) in devices {
+        let mac = mac.trim().to_ascii_lowercase();
+        let valid_mac = mac.len() == 17
+            && mac.split(':').count() == 6
+            && mac
+                .split(':')
+                .all(|part| part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if !valid_mac {
+            continue;
+        }
+        let name: String = name
+            .chars()
+            .filter(|character| !character.is_control() && *character != '|')
+            .take(40)
+            .collect();
+        command.push_str(&format!(
+            "TOBEVPN_NO_APPLY=1 /opt/tobevpn/tobevpn-router.sh set-device '{mac}' vpn 0 '{}' && ",
+            shell_quote_inner(&name)
+        ));
+    }
+    command.push_str("/opt/tobevpn/tobevpn-router.sh set-default direct");
+    let session = open(&app, &host, &user).await?;
+    session.run_ok(&command, None).await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh status", None)
+        .await?;
+    Ok(parse_status(&output))
+}
+
 /// Sets one device to "vpn", "direct" or back to "default", with a name.
 #[tauri::command]
 pub async fn router_set_device(
