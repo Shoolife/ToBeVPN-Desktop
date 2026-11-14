@@ -218,7 +218,10 @@ export default function DevicesScreen({
     if (!ROUTER_SECTION_AVAILABLE) return;
     let alive = true;
     void detectRouter().then((info) => {
-      if (alive) setRouter(info);
+      if (!alive) return;
+      setRouter(info);
+      // Of several connected routers, the one of this network.
+      setRouterLink(getRouterLink());
     });
     return () => {
       alive = false;
