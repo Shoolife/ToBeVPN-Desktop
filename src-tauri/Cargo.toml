@@ -40,6 +40,7 @@ os_info = { version = "3", default-features = false }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 dirs = "6"
 sha2 = "0.10"
+md5 = "0.8.1"
 base64 = "0.22"
 infer = "0.19"
 minisign-verify = "0.2"

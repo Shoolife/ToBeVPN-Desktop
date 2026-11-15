@@ -5698,6 +5698,7 @@ dependencies = [
  "libc",
  "log",
  "machine-uid",
+ "md5",
  "minisign-verify",
  "notify-rust",
  "os_info",
