@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { t } from "../i18n";
 import { useVpnRuntime } from "../session/vpnState";
+import { useRouterProtection } from "../session/useRouterProtection";
 import {
   downloadColor,
   pingColor,
@@ -37,8 +38,13 @@ export default function SpeedTestScreen({
   // On desktop the OS routes the Rust process through the tunnel when the VPN
   // is up, so the badge only tells the user which path the result reflects.
   const { connected: vpnConnected } = useVpnRuntime();
+  // With the app's VPN off, the home router's VPN may carry this computer:
+  // that is a VPN too, not a direct line.
+  const routerVpn = useRouterProtection();
+  const viaRouter = !vpnConnected && routerVpn.active;
+  const protectedRoute = vpnConnected || viaRouter;
 
-  const startTest = () => void startSpeedTestRun(vpnConnected);
+  const startTest = () => void startSpeedTestRun(vpnConnected, viaRouter);
   const resetTest = resetSpeedTestRun;
 
   const running = isSpeedTestRunning(state);
@@ -66,8 +72,8 @@ export default function SpeedTestScreen({
           </svg>
         </button>
         <span className="speed-topbar__title">{t("speed_test_title")}</span>
-        <span className={`speed-vpn-badge ${vpnConnected ? "speed-vpn-badge--on" : "speed-vpn-badge--off"}`}>
-          {vpnConnected ? t("speed_via_vpn") : t("speed_direct")}
+        <span className={`speed-vpn-badge ${protectedRoute ? "speed-vpn-badge--on" : "speed-vpn-badge--off"}`}>
+          {vpnConnected ? t("speed_via_vpn") : viaRouter ? t("speed_via_router_vpn") : t("speed_direct")}
         </span>
       </div>
 

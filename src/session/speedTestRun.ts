@@ -57,12 +57,13 @@ export function isSpeedTestRunning(value: SpeedTestRunState = state): boolean {
   return value.phase === "checking" || value.phase === "ping" || value.phase === "download";
 }
 
-export async function startSpeedTestRun(viaVpn: boolean): Promise<void> {
+export async function startSpeedTestRun(viaVpn: boolean, viaRouter = false): Promise<void> {
+  const path = viaVpn ? "vpn" : viaRouter ? "router_vpn" : "direct";
   ensureProgressListener();
   const runId = nextSpeedTestRunId();
   activeRunId = runId;
   setState({ ...IDLE_STATE, phase: "checking" });
-  recordDiagnosticEvent("SpeedTest", `Manual speed test started; path=${viaVpn ? "vpn" : "direct"}`);
+  recordDiagnosticEvent("SpeedTest", `Manual speed test started; path=${path}`);
   try {
     const result = await startSpeedTest(runId);
     if (activeRunId !== runId) return;
@@ -89,11 +90,12 @@ export async function startSpeedTestRun(viaVpn: boolean): Promise<void> {
       downloadMbps: result.downloadMbps,
       pingMs: result.pingMs,
       viaVpn,
+      viaRouter: !viaVpn && viaRouter,
     });
     recordDiagnosticEvent(
       "SpeedTest",
       `Manual speed test completed; provider=${result.provider}, ping_ms=${result.pingMs}, ` +
-        `download_mbps=${result.downloadMbps.toFixed(2)}, path=${viaVpn ? "vpn" : "direct"}`,
+        `download_mbps=${result.downloadMbps.toFixed(2)}, path=${path}`,
     );
   } catch (error) {
     if (activeRunId !== runId) return;

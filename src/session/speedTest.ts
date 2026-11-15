@@ -29,6 +29,8 @@ export interface SpeedTestHistoryEntry {
   downloadMbps: number;
   pingMs: number;
   viaVpn: boolean;
+  /** Measured through the home router's VPN, the app's own VPN off. */
+  viaRouter?: boolean;
 }
 
 const HISTORY_KEY = "tobevpn_speed_test_history_v1";
@@ -72,6 +74,7 @@ function decodeHistory(raw: string | null): SpeedTestHistoryEntry[] {
         downloadMbps: item.downloadMbps,
         pingMs: item.pingMs,
         viaVpn: item.viaVpn === true,
+        viaRouter: item.viaVpn !== true && item.viaRouter === true,
       }))
       .sort((a, b) => b.timestampMillis - a.timestampMillis)
       .slice(0, MAX_HISTORY_ENTRIES);

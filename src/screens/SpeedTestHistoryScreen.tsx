@@ -146,16 +146,17 @@ function HistoryEntryCard({ entry, isLatest }: { entry: SpeedTestHistoryEntry; i
   const date = new Date(entry.timestampMillis);
   const day = date.toLocaleDateString(locale, { day: "2-digit", month: "short" }).replace(".", "");
   const time = date.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
-  const routeLabel = entry.viaVpn ? t("speed_via_vpn") : t("speed_direct");
+  const viaRouter = !entry.viaVpn && entry.viaRouter === true;
+  const routeLabel = entry.viaVpn ? t("speed_via_vpn") : viaRouter ? t("speed_via_router_vpn") : t("speed_direct");
 
   return (
     <div
       className={`speed-history-card ${isLatest ? "speed-history-card--latest" : ""} ${
-        entry.viaVpn ? "speed-history-card--vpn" : "speed-history-card--direct"
+        entry.viaVpn || viaRouter ? "speed-history-card--vpn" : "speed-history-card--direct"
       }`}
     >
       <span className="speed-history-card__icon">
-        <MaterialIcon name={entry.viaVpn ? "lock" : "public"} size={23} />
+        <MaterialIcon name={entry.viaVpn ? "lock" : viaRouter ? "router" : "public"} size={23} />
       </span>
       <div className="speed-history-card__main">
         <div className="speed-history-card__speed">
