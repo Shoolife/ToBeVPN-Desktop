@@ -819,18 +819,6 @@ impl VpnManager {
             .collect())
     }
 
-    /// IPv4 and IPv6 addresses of a direct-access host: the IPv6 ones get a
-    /// "throw" route out of the tunnel table (the VPN servers carry no IPv6,
-    /// so the app's own requests there would hang instead of using IPv4).
-    async fn lookup_bypass_ips(host: String, port: u16, timeout_dur: Duration) -> Result<Vec<String>, String> {
-        let lookup = timeout(timeout_dur, tokio::net::lookup_host(format!("{}:{}", host, port)));
-        let addrs = lookup
-            .await
-            .map_err(|_| "DNS resolve timed out".to_string())?
-            .map_err(|e| format!("DNS resolve failed: {}", e))?;
-        Ok(addrs.map(|addr| addr.ip().to_string()).collect())
-    }
-
     async fn resolve_bypass_ips(
         hosts: &[String],
         attempt: &ConnectAttempt,
@@ -849,7 +837,7 @@ impl VpnManager {
             }
             let host = trimmed.to_string();
             tasks.push(tokio::spawn(async move {
-                Self::lookup_bypass_ips(host, 443, BYPASS_DNS_RESOLVE_TIMEOUT).await
+                Self::lookup_ipv4s(host, 443, BYPASS_DNS_RESOLVE_TIMEOUT).await
             }));
         }
         for task in tasks {
@@ -1174,12 +1162,6 @@ echo "[TUN-SCRIPT] TUN is UP"
 
 # 4. Bypass routes for the VPN server and configured direct-access endpoints.
 for BYPASS_IP in {route_ip_args}; do
-    case "$BYPASS_IP" in
-    *:*)
-        ip -6 route add throw "${{BYPASS_IP}}/128" table {table} 2>/dev/null || true
-        continue
-        ;;
-    esac
     if [ -n "$DEFAULT_GW" ]; then
         ip route add "${{BYPASS_IP}}/32" via "$DEFAULT_GW" dev "$DEFAULT_DEV" table {table}
     else
