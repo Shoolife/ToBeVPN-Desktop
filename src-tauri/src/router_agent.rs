@@ -1099,35 +1099,7 @@ async fn install(
             .await?;
         log(&app, "info", format!("installed {}", packages.join(", ")));
     }
-    for (binary, content) in downloads {
-        progress(&app, &format!("upload:{}", binary.name));
-        session
-            .write_file(&format!("/opt/tobevpn/{}", binary.name), &content, "755")
-            .await?;
-        log(
-            &app,
-            "info",
-            format!("{}: uploaded {} KB", binary.name, content.len() / 1024),
-        );
-        if let (Some(version), "xray") = (&binary.version, binary.name) {
-            session
-                .write_file(
-                    "/opt/tobevpn/xray.version",
-                    format!("{version}\n").as_bytes(),
-                    "644",
-                )
-                .await?;
-        }
-        if binary.name == "hev-socks5-tunnel" {
-            session
-                .write_file(
-                    "/opt/tobevpn/hev.version",
-                    format!("{HEV_VERSION}\n").as_bytes(),
-                    "644",
-                )
-                .await?;
-        }
-    }
+    upload_binaries(&app, &session, downloads).await?;
 
     progress(&app, "configure");
     let mac = facts
@@ -1334,32 +1306,14 @@ pub async fn router_update(
     result
 }
 
-async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&str>) -> Result<RouterStatus, String> {
-    progress(app, "connect");
-    let session = open(app, host, user, fingerprint).await?;
-    progress(app, "check");
-    let (needed, _, agent_outdated, sites) = outdated_components(app, &session).await?;
-    if !needed.is_empty() {
-        let free_kb: u64 = session
-            .run_ok("df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'", None)
-            .await?
-            .trim()
-            .parse()
-            .unwrap_or(0);
-        if free_kb < REQUIRED_FREE_KB {
-            return Err(format!(
-                "not enough space on the router: {} MB free",
-                free_kb / 1024
-            ));
-        }
-    }
-    let mut downloads = Vec::new();
-    for binary in &needed {
-        progress(app, &format!("download:{}", binary.name));
-        downloads.push((binary, fetch_binary(app, binary).await?));
-    }
-
-    progress(app, "configure");
+/// The new binaries, each replaced in one step next to the running ones, with
+/// the versions the next update compares against. Shared by the install and
+/// the update.
+async fn upload_binaries(
+    app: &AppHandle,
+    session: &Session,
+    downloads: Vec<(&Binary, Vec<u8>)>,
+) -> Result<(), String> {
     for (binary, content) in downloads {
         progress(app, &format!("upload:{}", binary.name));
         session
@@ -1389,6 +1343,36 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
                 .await?;
         }
     }
+    Ok(())
+}
+
+async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&str>) -> Result<RouterStatus, String> {
+    progress(app, "connect");
+    let session = open(app, host, user, fingerprint).await?;
+    progress(app, "check");
+    let (needed, _, agent_outdated, sites) = outdated_components(app, &session).await?;
+    if !needed.is_empty() {
+        let free_kb: u64 = session
+            .run_ok("df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'", None)
+            .await?
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        if free_kb < REQUIRED_FREE_KB {
+            return Err(format!(
+                "not enough space on the router: {} MB free",
+                free_kb / 1024
+            ));
+        }
+    }
+    let mut downloads = Vec::new();
+    for binary in &needed {
+        progress(app, &format!("download:{}", binary.name));
+        downloads.push((binary, fetch_binary(app, binary).await?));
+    }
+
+    progress(app, "configure");
+    upload_binaries(app, &session, downloads).await?;
     // The agent and its hooks only when this app's are newer: a newer agent
     // from the phone app is not replaced with an older one.
     if agent_outdated {
