@@ -63,6 +63,7 @@ import {
   type RouterUpdate,
   type RouterStatus,
   type SlotServer,
+  routerDeviceSlot,
 } from "../session/router";
 import "./DevicesScreen.css";
 import "./RouterScreen.css";
@@ -633,7 +634,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
             network?.devices.some(
               (device) =>
                 (device.mode === "vpn" || (device.mode === "default" && status.defaultMode === "vpn")) &&
-                status.downSlots.includes(device.slot),
+                status.downSlots.includes(routerDeviceSlot(device, network)),
             ) && (
             <p className="router-error">{t("router_server_down")}</p>
           )}
@@ -1224,7 +1225,7 @@ function HomeNetwork({
             const choice = deviceChoice(device, network);
             const chosenId = choice.startsWith("server:") ? choice.slice(7) : null;
             const chosenSlot = chosenId ? network.slots.find((item) => item.serverId === chosenId) : null;
-            const serverDown = device.mode === "vpn" && status.downSlots.includes(chosenSlot?.slot ?? device.slot);
+            const serverDown = device.mode === "vpn" && status.downSlots.includes(chosenSlot?.slot ?? routerDeviceSlot(device, network));
             return (
               <div
                 key={device.mac}

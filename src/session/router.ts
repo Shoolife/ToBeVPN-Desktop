@@ -43,10 +43,8 @@ export async function isLinkedRouterHere(link: RouterLink, info: RouterInfo | nu
   if (!info.mark || !link.hwid) return true;
   // The router itself just showed this link's host key: it is this one,
   // whatever kind of mark it publishes (an older agent: SHA-256).
-  const scan = scannedKey;
-  if (scan && scan.host === link.host && link.hostKey && scan.key === link.hostKey && Date.now() - scan.at < SCAN_VALID_MS) {
-    return true;
-  }
+  const scan = freshScan(link.host, info);
+  if (scan && link.hostKey && scan.key === link.hostKey) return true;
   const [mark] = await routerMarks([link.hwid]);
   return mark === info.mark;
 }
@@ -153,6 +151,14 @@ export interface RouterSlot {
 export interface RouterNetwork {
   devices: RouterDevice[];
   slots: RouterSlot[];
+}
+
+/**
+ * The slot a device really rides, as the router agent reads it: its own when
+ * that slot has a server on the router, otherwise slot 0.
+ */
+export function routerDeviceSlot(device: RouterDevice, network: RouterNetwork): number {
+  return network.slots.some((item) => item.slot === device.slot) ? device.slot : 0;
 }
 
 /** Tunnels the router agent has: at most this many different servers. */
@@ -301,8 +307,8 @@ export function getRouterLink(): RouterLink | null {
     const byMark = here.find((link) => link.mark === info.mark);
     if (byMark) return byMark;
   }
-  const scan = scannedKey;
-  if (scan && scan.host === info.gateway && Date.now() - scan.at < SCAN_VALID_MS) {
+  const scan = freshScan(info.gateway, info);
+  if (scan) {
     const byKey = here.find((link) => link.hostKey === scan.key);
     if (byKey) return byKey;
   }
@@ -315,9 +321,21 @@ export function getRouterLink(): RouterLink | null {
 
 export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
 
-let scannedKey: { host: string; key: string; at: number } | null = null;
+/** The host key the address showed, with the mark the router published then. */
+let scannedKey: { host: string; mark: string | null; key: string; at: number } | null = null;
 /** A scanned host key speaks for the address this long. */
 const SCAN_VALID_MS = 5 * 60_000;
+
+/**
+ * The scan that still speaks for this address: recent, and taken while the
+ * router there published the same mark (another router answering since, e.g.
+ * after a switch of network, makes it stale).
+ */
+function freshScan(host: string, info: RouterInfo | null) {
+  const scan = scannedKey;
+  if (!scan || scan.host !== host || Date.now() - scan.at >= SCAN_VALID_MS) return null;
+  return scan.mark === (info?.mark ?? null) ? scan : null;
+}
 
 /**
  * With several routers connected at this network's address, asks the router
@@ -347,9 +365,9 @@ export async function identifyRouterHere(info: RouterInfo | null): Promise<void>
     return;
   }
   // A fresh answer for this address is reused (no key exchange each minute).
-  if (scannedKey && scannedKey.host === gateway && Date.now() - scannedKey.at < SCAN_VALID_MS) return;
+  if (freshScan(gateway, info)) return;
   const key = await invoke<string | null>("router_host_key", { host: gateway }).catch(() => null);
-  scannedKey = key ? { host: gateway, key, at: Date.now() } : null;
+  scannedKey = key ? { host: gateway, mark: info?.mark ?? null, key, at: Date.now() } : null;
 }
 
 /**

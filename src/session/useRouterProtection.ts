@@ -9,6 +9,7 @@ import {
   ROUTER_CHANGED_EVENT,
   ROUTER_SECTION_AVAILABLE,
   routerSnapshot,
+  routerDeviceSlot,
 } from "./router";
 
 /** Whether the home router already sends this computer through the VPN. */
@@ -43,8 +44,9 @@ export async function checkRouterProtection(): Promise<RouterProtection> {
     if (!me) return NONE;
     const mode = me.mode === "default" ? status.defaultMode : me.mode;
     if (mode !== "vpn") return NONE;
-    // A "default" device rides the slot its entry names, like a chosen one.
-    const slot = me.slot;
+    // A "default" device rides the slot its entry names, like a chosen one
+    // (slot 0 when that slot has no server on the router, as the agent reads it).
+    const slot = routerDeviceSlot(me, network);
     if (status.downSlots.includes(slot)) return NONE;
     const server =
       network.slots.find((item) => item.slot === slot) ?? network.slots.find((item) => item.slot === 0);

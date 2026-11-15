@@ -131,6 +131,10 @@ fn pinned_xray(arch: Arch) -> Binary {
 /// hev-socks5-tunnel; both builds are static, the ARMv7 one soft-float so
 /// it runs on any ARMv7 core.
 /// The hev-socks5-tunnel build this app installs (also in its download URL).
+/// The VPN counts as on while its core runs or its watchdog waits to bring it
+/// back (the failed state): an update restarts it either way.
+const AGENT_RUNNING: &str =
+    "{ pidof xray >/dev/null || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
 const HEV_VERSION: &str = "2.19.2";
 
 fn hev_tunnel(arch: Arch) -> Binary {
@@ -1363,7 +1367,7 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     progress(app, "configure");
     // Whether it ran, so the update leaves it as it found it.
     session
-        .run("if pidof xray >/dev/null; then touch /tmp/tobevpn-update-running; else rm -f /tmp/tobevpn-update-running; fi", None)
+        .run(&format!("if {AGENT_RUNNING}; then touch /tmp/tobevpn-update-running; else rm -f /tmp/tobevpn-update-running; fi"), None)
         .await?;
     let (stopped, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh stop", None)
@@ -1443,7 +1447,7 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     progress(app, "start");
     // Started again only if it ran before the update.
     let started = session
-        .run_ok("if [ -f /tmp/tobevpn-update-running ]; then /opt/tobevpn/tobevpn-router.sh start; fi; rm -f /tmp/tobevpn-update-running; true", None)
+        .run_ok("if [ -f /tmp/tobevpn-update-running ]; then rm -f /tmp/tobevpn-update-running; /opt/tobevpn/tobevpn-router.sh start; else echo kept=1; fi", None)
         .await?;
     log_output(app, &started);
     let status = session
@@ -2743,15 +2747,15 @@ mod tests {
     #[test]
     fn server_list_keeps_plain_hosts_only() {
         let hosts = vec![
-            "germany2.tobevpn.help".to_string(),
-            " 149.33.40.130 ".to_string(),
-            "germany2.tobevpn.help".to_string(),
+            "de.example.com".to_string(),
+            " 192.0.2.10 ".to_string(),
+            "de.example.com".to_string(),
             "bad host; rm -rf /".to_string(),
             String::new(),
         ];
         assert_eq!(
             server_list(&hosts),
-            "149.33.40.130\ngermany2.tobevpn.help\n"
+            "192.0.2.10\nde.example.com\n"
         );
     }
 
