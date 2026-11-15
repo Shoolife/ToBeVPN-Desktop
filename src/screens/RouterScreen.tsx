@@ -19,12 +19,11 @@ import ResetLinkOption from "../components/ResetLinkOption";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import "../components/SubscriptionSheet.css";
 import "../components/WhatsNewDialog.css";
-import { fetchVpnServers, getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, subscriptionIsLive, syncSubscription, type VpnServer } from "../session/auth";
+import { getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
 import {
   accountHasRouterHere,
-  accountRouters,
   isLinkedRouterHere,
   identifyRouterHere,
   reconnectWithAppKey,
@@ -67,7 +66,6 @@ import {
   type RouterStatus,
   type SlotServer,
   routerDeviceSlot,
-  refreshRouterCredentials,
 } from "../session/router";
 import "./DevicesScreen.css";
 import "./RouterScreen.css";
@@ -305,7 +303,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const refreshSwap = useRefreshSwap(refreshing);
   const [busy, setBusy] = useState(false);
-  const credentialsCheckedRef = useRef<string | null>(null);
   const busyRef = useRef(false);
   busyRef.current = busy;
   const statusRef = useRef<RouterStatus | null>(null);
@@ -346,65 +343,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   // again with its password, and kept as it is if ToBeVPN runs on it.
   const [lostAccess, setLostAccess] = useState(false);
   const reconnect = installedByAnother || lostAccess;
-
-  /**
-   * The router's servers written again when it logs in differently from this
-   * app (another subscription link, a moved server). This app may be the
-   * stale side (the link was reset on another device), so its own
-   * subscription and servers are read anew first, and only this account's
-   * router is written to. Quiet, but the screen is busy while it writes.
-   */
-  const refreshCredentialsIfStale = async (
-    link: RouterLink,
-    network: RouterNetwork,
-    hwid: string | null,
-    generation: number,
-  ) => {
-    if (!hwid) return;
-    // Once per router while the screen is open: a router that stays
-    // different (another account's) is not asked again and again.
-    const routerKey = `${link.host}|${hwid.toLowerCase()}`;
-    if (credentialsCheckedRef.current === routerKey) return;
-    credentialsCheckedRef.current = routerKey;
-    const slotsWith = (servers: VpnServer[]) => {
-      const list = network.slots.map((slot) => {
-        const server = servers.find((candidate) => candidate.id === slot.serverId);
-        return server ? slotServer(slot.slot, server) : null;
-      });
-      return list.every((item): item is SlotServer => item !== null) ? list : null;
-    };
-    try {
-      const first = slotsWith(routableServers());
-      if (!first || !(await refreshRouterCredentials(link, network, first, false))) return;
-      // Only this account's router gets this account's credentials (an
-      // account list that cannot be read stops here too).
-      const routers = await accountRouters();
-      if (!routers.some((router) => router.id.toLowerCase() === hwid.toLowerCase())) return;
-      // This app may be the stale side (the link was reset on another
-      // device): its own link is synced and must answer live with servers,
-      // or nothing is written.
-      await syncSubscription({ force: true });
-      if (!(await subscriptionIsLive())) return;
-      await fetchVpnServers();
-      const fresh = slotsWith(routableServers());
-      if (!fresh) return;
-      if (generation !== generationRef.current || busyRef.current) return;
-      setBusy(true);
-      try {
-        const next = await refreshRouterCredentials(link, network, fresh, true);
-        if (next && generation === generationRef.current) {
-          setStatus(next);
-          // The slots and their new keys as the router has them now.
-          const now = await routerDevices(link).catch(() => null);
-          if (now && generation === generationRef.current) setNetwork(now);
-        }
-      } finally {
-        setBusy(false);
-      }
-    } catch {
-      // Nothing written; asked again on the next visit.
-    }
-  };
 
   const load = async (refresh: boolean) => {
     const generation = ++generationRef.current;
@@ -482,11 +420,6 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setLostAccess(accessLost);
     setLoading(false);
     setRefreshing(false);
-    // After the account's link was reset the router still logs in with the
-    // old credentials: its servers are written again, quietly, once seen.
-    if (currentLink && nextStatus?.installed && nextNetwork) {
-      void refreshCredentialsIfStale(currentLink, nextNetwork, nextStatus.hwid ?? null, generation);
-    }
   };
 
   // The server list can arrive (or change, after the subscription link was

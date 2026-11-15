@@ -874,29 +874,6 @@ export async function setRouterServers(link: RouterLink, servers: SlotServer[]):
   return status;
 }
 
-/**
- * After the account's link was reset (or a server moved) the router still
- * logs in with the old credentials: its servers (the same slots, this app's
- * current profiles) and the subscription link are written again. Null when
- * nothing changed, or when a slot's server is not in this app's list.
- */
-export async function refreshRouterCredentials(
-  link: RouterLink,
-  network: RouterNetwork,
-  servers: SlotServer[],
-  write: boolean,
-): Promise<RouterStatus | null> {
-  if (!network.slots.some((slot) => slot.slot === 0)) return null;
-  if (servers.length !== network.slots.length) return null;
-  return linkInvoke<RouterStatus | null>(link, "router_refresh_credentials", {
-    servers,
-    serverHosts: accountServerHosts(),
-    subscriptionUrl: accountSubscriptionUrl(),
-    subscriptionKey: getSession().shortUuid ?? null,
-    write,
-  });
-}
-
 export async function routerDevices(link: RouterLink): Promise<RouterNetwork> {
   return linkInvoke<RouterNetwork>(link, "router_devices", {});
 }

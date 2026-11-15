@@ -2377,22 +2377,6 @@ async function enrichVpnServersWithNodes(servers: VpnServer[]): Promise<VpnServe
 }
 
 /**
- * Whether the account's current subscription link answers with servers right
- * now, from the network (never from a cache): proof that this app's
- * credentials are the live ones before it writes them anywhere else.
- */
-export async function subscriptionIsLive(): Promise<boolean> {
-  const { shortUuid } = getSession();
-  if (!shortUuid) return false;
-  try {
-    const profile = await fetchSubscriptionProfile(await readSubscriptionUrl(shortUuid), shortUuid);
-    return !!profile && profile.isSuccessful && profile.links.length > 0 && !profile.isUsageBlocked;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Fetch VPN servers from subscription links (VLESS URLs).
  * Mirrors TV's VpnRepository.refreshServers().
  */

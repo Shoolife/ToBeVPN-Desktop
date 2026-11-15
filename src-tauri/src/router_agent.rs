@@ -135,7 +135,7 @@ fn pinned_xray(arch: Arch) -> Binary {
 /// xray: matched by the binary it runs) or its watchdog waits to bring it
 /// back (the failed state): a restart then keeps it on.
 const AGENT_RUNNING: &str =
-    "{ [ -n \"$(r=$(readlink -f /opt/tobevpn/xray 2>/dev/null); r=${r:-/opt/tobevpn/xray}; for p in $(pidof xray); do case \"$(readlink /proc/$p/exe 2>/dev/null)\" in /opt/tobevpn/xray | \"/opt/tobevpn/xray (deleted)\" | \"$r\" | \"$r (deleted)\") echo $p; break ;; esac; done)\" ] || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
+    "{ [ -n \"$(for p in $(pidof xray); do [ \"$(tr '\\0' '\\n' </proc/$p/cmdline 2>/dev/null | head -n 1)\" = /opt/tobevpn/xray ] && { echo $p; break; }; done)\" ] || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
 /// Stop and start on the router, carried to its end there even if the
 /// connection drops (HUP ignored, output to a file): the home is never left
 /// with the VPN stopped halfway. Its output and exit code are the start's.
@@ -366,7 +366,7 @@ fn base_facts_command() -> String {
      echo installed=$([ -x /opt/tobevpn/xray ] && echo 1 || echo 0); \
      echo mem_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); \
      echo mem_available_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo); \
-     echo own_xray_kb=$(p=$(r=$(readlink -f /opt/tobevpn/xray 2>/dev/null); r=${r:-/opt/tobevpn/xray}; for p in $(pidof xray); do case \"$(readlink /proc/$p/exe 2>/dev/null)\" in /opt/tobevpn/xray | \"/opt/tobevpn/xray (deleted)\" | \"$r\" | \"$r (deleted)\") echo $p; break ;; esac; done); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
+     echo own_xray_kb=$(p=$(for p in $(pidof xray); do [ \"$(tr '\\0' '\\n' </proc/$p/cmdline 2>/dev/null | head -n 1)\" = /opt/tobevpn/xray ] && { echo $p; break; }; done); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
      echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
      . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_ID $DISTRIB_RELEASE\"; echo release=\"$DISTRIB_RELEASE\"; \
      echo model=$(cat /tmp/sysinfo/model 2>/dev/null | tr ' ' '-')"
@@ -1907,117 +1907,6 @@ pub struct SlotServer {
 /// slots that its servers must be written again.
 fn credential_key(server: &ServerConfig) -> String {
     sha256_hex(format!("{}|{}|{}", server.uuid, server.address, server.port).as_bytes())[..16].to_string()
-}
-
-/// The router's servers written again when the account's credentials for
-/// them changed (its link was reset, a server moved): the router would
-/// otherwise keep logging in with the old ones and quietly send the home
-/// direct. `servers` are the router's own slots with this app's current
-/// profiles; None when every slot is up to date.
-#[tauri::command]
-pub async fn router_refresh_credentials(
-    app: AppHandle,
-    host: String,
-    user: String,
-    fingerprint: Option<String>,
-    servers: Vec<SlotServer>,
-    server_hosts: Vec<String>,
-    subscription_url: Option<String>,
-    subscription_key: Option<String>,
-    write: bool,
-) -> Result<Option<RouterStatus>, String> {
-    validate_slots(&servers)?;
-    for server in &servers {
-        server.server.validate()?;
-    }
-    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
-    let (output, _) = session
-        .run("/opt/tobevpn/tobevpn-router.sh devices", None)
-        .await?;
-    let slots = parse_slots(&output);
-    // Only the very slots the router has, each with the same server.
-    let same_slots = slots.len() == servers.len()
-        && servers.iter().all(|server| {
-            slots
-                .iter()
-                .any(|slot| slot.slot == server.slot && slot.server_id == server.id)
-        });
-    if !same_slots {
-        return Ok(None);
-    }
-    // Another subscription link on the router (the account's link was
-    // reset), or a written key that differs (a server moved). A slot written
-    // by an older app has no key: alone that is no difference, so nothing is
-    // restarted for it.
-    let (router_sub, _) = session
-        .run(
-            "sed -n \"s/^SUB_URL='\\(.*\\)'$/\\1/p\" /opt/tobevpn/subscription.conf 2>/dev/null",
-            None,
-        )
-        .await?;
-    let router_sub = router_sub.trim();
-    // By the account's key in the link, not the whole address: two apps write
-    // the same link in their own form (base, slash, template).
-    let link_changed = !router_sub.is_empty()
-        && subscription_key
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|key| !key.is_empty() && !router_sub.contains(key));
-    let key_changed = servers.iter().any(|server| {
-        let key = credential_key(&server.server);
-        slots
-            .iter()
-            .find(|slot| slot.slot == server.slot)
-            .and_then(|slot| slot.key.as_deref())
-            .is_some_and(|written| written != key)
-    });
-    if !(link_changed || key_changed) {
-        return Ok(None);
-    }
-    // Only asked whether the router differs: the app first makes sure its
-    // own credentials are the fresh ones, then writes.
-    if !write {
-        let (output, _) = session
-            .run("/opt/tobevpn/tobevpn-router.sh status", None)
-            .await?;
-        return Ok(Some(parse_status(&output)));
-    }
-    session
-        .write_file(
-            "/opt/tobevpn/servers",
-            server_list(&server_hosts).as_bytes(),
-            "644",
-        )
-        .await?;
-    write_servers(&app, &session, &servers).await?;
-    if let Some(url) = subscription_url.filter(|url| !url.trim().is_empty()) {
-        let (conf, _) = session
-            .run("cat /opt/tobevpn/subscription.conf 2>/dev/null", None)
-            .await?;
-        if !conf.trim().is_empty() {
-            let line = format!("SUB_URL='{}'", shell_quote_inner(&url));
-            let next: String = conf
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(|old| if old.starts_with("SUB_URL=") { line.as_str() } else { old })
-                .map(|line| format!("{line}\n"))
-                .collect();
-            if next != conf {
-                session
-                    .write_file("/opt/tobevpn/subscription.conf", next.as_bytes(), "600")
-                    .await?;
-            }
-        }
-    }
-    session
-        // The new files are on the router either way: a start that fails
-        // shows in the status (failed), not as a change that did not happen.
-        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
-        .await?;
-    let (output, _) = session
-        .run("/opt/tobevpn/tobevpn-router.sh status", None)
-        .await?;
-    Ok(Some(parse_status(&output)))
 }
 
 fn validate_slots(servers: &[SlotServer]) -> Result<(), String> {
