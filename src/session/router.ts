@@ -774,10 +774,10 @@ export async function routerSnapshot(link: RouterLink): Promise<RouterSnapshot> 
 /** Earlier versions' "default" devices keep the router's server, in one login; the default becomes direct. */
 export async function migrateRouterDefaults(
   link: RouterLink,
-  devices: Array<{ mac: string; name: string }>,
+  devices: Array<{ mac: string; name: string; slot: number }>,
 ): Promise<RouterStatus> {
   return linkInvoke<RouterStatus>(link, "router_migrate_defaults", {
-    devices: devices.map((device) => [device.mac, device.name]),
+    devices: devices.map((device) => [device.mac, device.name, device.slot]),
   });
 }
 

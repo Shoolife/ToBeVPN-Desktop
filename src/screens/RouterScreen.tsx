@@ -201,8 +201,11 @@ function usedSlots(network: RouterNetwork, exceptMac?: string, defaultVpn = fals
       .filter((device) => device.mac !== exceptMac && device.mode === "vpn")
       .map((device) => device.slot),
   );
-  if (defaultVpn && network.devices.some((device) => device.mac !== exceptMac && device.mode === "default")) {
-    used.add(0);
+  if (defaultVpn) {
+    // A "default" device rides the slot its entry names (0 unless another app set one).
+    network.devices
+      .filter((device) => device.mac !== exceptMac && device.mode === "default")
+      .forEach((device) => used.add(device.slot));
   }
   return used;
 }
@@ -1102,7 +1105,7 @@ function HomeNetwork({
         const kept = network.devices.filter((device) => device.mode === "default");
         const migrated = await migrateRouterDefaults(
           link,
-          kept.map((device) => ({ mac: device.mac, name: device.name ?? "" })),
+          kept.map((device) => ({ mac: device.mac, name: device.name ?? "", slot: device.slot })),
         );
         if (!alive()) return;
         onStatus(migrated);
@@ -1112,7 +1115,7 @@ function HomeNetwork({
           current && {
             ...current,
             devices: current.devices.map((device) =>
-              moved.has(device.mac) && device.mode === "default" ? { ...device, mode: "vpn", slot: 0 } : device,
+              moved.has(device.mac) && device.mode === "default" ? { ...device, mode: "vpn" } : device,
             ),
           },
         );

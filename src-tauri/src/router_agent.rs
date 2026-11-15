@@ -1419,6 +1419,16 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     if let Some(sites) = sites {
         progress(app, "upload:sites");
         write_ru_sites(&session, sites).await?;
+        // The config may lack the sites rule (written while the list was
+        // missing): turned on with the list, or the bypass stays off.
+        if let Ok((text, _)) = session.run("cat /opt/tobevpn/xray.json 2>/dev/null", None).await {
+            if let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&text) {
+                apply_ru_direct(&mut config, true);
+                if let Ok(json) = serde_json::to_vec_pretty(&config) {
+                    session.write_file("/opt/tobevpn/xray.json", &json, "600").await?;
+                }
+            }
+        }
         log(
             app,
             "info",
@@ -1606,10 +1616,12 @@ pub async fn router_migrate_defaults(
     host: String,
     user: String,
     fingerprint: Option<String>,
-    devices: Vec<(String, String)>,
+    devices: Vec<(String, String, u8)>,
 ) -> Result<RouterStatus, String> {
     let mut command = String::new();
-    for (mac, name) in devices {
+    for (mac, name, slot) in devices {
+        // The slot it already rode (a "default" entry can name one).
+        let slot = slot.min(MAX_SLOT);
         let mac = mac.trim().to_ascii_lowercase();
         let valid_mac = mac.len() == 17
             && mac.split(':').count() == 6
@@ -1625,7 +1637,7 @@ pub async fn router_migrate_defaults(
             .take(40)
             .collect();
         command.push_str(&format!(
-            "TOBEVPN_NO_APPLY=1 /opt/tobevpn/tobevpn-router.sh set-device '{mac}' vpn 0 '{}' && ",
+            "TOBEVPN_NO_APPLY=1 /opt/tobevpn/tobevpn-router.sh set-device '{mac}' vpn {slot} '{}' && ",
             shell_quote_inner(&name)
         ));
     }
