@@ -734,6 +734,9 @@ export async function routerSnapshot(link: RouterLink): Promise<RouterSnapshot> 
   // (its id was just checked above).
   if (snapshot.hostKey && !storedLink(link).hostKey && status.installed) {
     updateRouterLink(link, { hostKey: snapshot.hostKey });
+  } else if (status.installed && status.hwid && !storedLink(link).mark) {
+    // A mark dropped as outdated is computed again (saving does it).
+    updateRouterLink(link, {});
   }
   // Kept under the id the router reported (a just-paired link has none yet).
   if (snapshot.traffic) storeRouterTraffic({ ...link, hwid: status.hwid ?? link.hwid }, snapshot.traffic);
