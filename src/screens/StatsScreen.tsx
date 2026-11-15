@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type CSSProperties } from "react";
 import { formatDecimal, t, getSavedLang } from "../i18n";
 import {
   getDayStats,
@@ -89,8 +89,31 @@ function formatRowLabel(epochSeconds: number, period: Period): string {
   }
 }
 
+/** The Router screen's crossfade timing, as on the phone. */
+const SECTION_FADE_OUT_MS = 220;
+const SECTION_FADE_IN_MS = 420;
+const SECTION_FADE_IN_DELAY_MS = 60;
+
 export default function StatsScreen({ onBack }: { onBack: () => void }) {
+  // The chip follows a tap at once; the chart and rows below change to the
+  // new period after the old ones faded out, then fade in with their data
+  // (as on the phone): never a new period's labels over the old bars.
+  const [selectedPeriod, setSelectedPeriod] = useState<Period>("day");
   const [period, setPeriod] = useState<Period>("day");
+  const [sectionVisible, setSectionVisible] = useState(true);
+  useEffect(() => {
+    if (selectedPeriod === period) {
+      setSectionVisible(true);
+      return;
+    }
+    setSectionVisible(false);
+    const timer = window.setTimeout(() => {
+      setPeriod(selectedPeriod);
+      setSectionVisible(true);
+    }, SECTION_FADE_OUT_MS);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPeriod]);
   const [stats, setStats] = useState<StatSlot[]>([]);
   const [animated, setAnimated] = useState(false);
   // The bar under the mouse: its traffic shows above the chart, as on the
@@ -222,14 +245,25 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
           {(["day", "week", "month"] as Period[]).map((p) => (
             <button
               key={p}
-              className={`stats-period-chip ${period === p ? "stats-period-chip--active" : ""}`}
-              onClick={() => setPeriod(p)}
+              className={`stats-period-chip ${selectedPeriod === p ? "stats-period-chip--active" : ""}`}
+              onClick={() => setSelectedPeriod(p)}
             >
               {p === "day" ? t("stats_period_day") : p === "week" ? t("stats_period_week") : t("stats_period_month")}
             </button>
           ))}
         </div>
 
+        {/* Faded with a cover in the background's colour (the refresh swap's),
+            not its own opacity, which WebKitGTK draws badly over animated parts. */}
+        <div
+          className="refresh-swap"
+          style={{
+            ["--refresh-swap-cover" as string]: sectionVisible ? 0 : 1,
+            ["--refresh-swap-transition" as string]: sectionVisible
+              ? `opacity ${SECTION_FADE_IN_MS}ms cubic-bezier(0.4, 0, 0.2, 1) ${SECTION_FADE_IN_DELAY_MS}ms`
+              : `opacity ${SECTION_FADE_OUT_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+          } as CSSProperties}
+        >
         {withRouter && (
           <div className="stats-legend">
             <span className="stats-legend__item"><span className="stats-legend__dot" />{t("stats_this_computer")}</span>
@@ -328,6 +362,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
             </div>
           );
         })}
+        </div>
       </ScrollEdgeAffordance>
     </div>
   );
