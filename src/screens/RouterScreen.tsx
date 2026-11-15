@@ -24,6 +24,7 @@ import {
   accountHasRouterHere,
   isLinkedRouterHere,
   identifyRouterHere,
+  reconnectWithAppKey,
   accountSubscriptionUrl,
   connectRouter,
   detectRouter,
@@ -327,6 +328,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     // The linked router is asked only from its own network: elsewhere this
     // screen is about the router here, and SSH to the home address would
     // only fail (the phone app does the same).
+    // No link for this router, but its key may still be on it: connected
+    // again without asking for the password.
+    if (!getRouterLink() || getRouterLink()?.host !== nextInfo.gateway) await reconnectWithAppKey(nextInfo);
     const savedLink = getRouterLink();
     let currentLink = savedLink && (await isLinkedRouterHere(savedLink, nextInfo)) ? savedLink : null;
     let nextStatus: RouterStatus | null = null;

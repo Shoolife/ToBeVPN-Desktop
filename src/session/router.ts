@@ -560,6 +560,31 @@ export async function checkRouter(options: { host: string; user: string; passwor
   return invoke<RouterCheck>("router_check", { host, user, fingerprint: pairedKeys.get(host) ?? null });
 }
 
+/**
+ * This network's router has no link here, but it may still take this
+ * computer's key (the link was forgotten, the app reinstalled with its data
+ * kept): tried with the usual logins and, if ToBeVPN runs there, connected
+ * again without the password. Null when that does not work.
+ */
+export async function reconnectWithAppKey(info: RouterInfo): Promise<RouterLink | null> {
+  const host = info.gateway;
+  if (!host || readLinks().some((link) => link.host === host)) return null;
+  const users = Array.from(new Set([defaultRouterUser(info), "root"]));
+  for (const user of users) {
+    try {
+      const snapshot = await invoke<RouterSnapshot>("router_snapshot", { host, user, fingerprint: null });
+      if (!snapshot.status.installed) return null;
+      const link: RouterLink = { host, user, serverId: null, serverName: null, hostKey: snapshot.hostKey };
+      saveRouterLink(link);
+      remember(link, snapshot.status);
+      return storedLink(link);
+    } catch {
+      // Not this login, or the key is not on the router: the password then.
+    }
+  }
+  return null;
+}
+
 /** The host key each router showed when paired, for the link the install creates. */
 const pairedKeys = new Map<string, string | null>();
 

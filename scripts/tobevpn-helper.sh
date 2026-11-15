@@ -202,7 +202,8 @@ case "$1" in
         exit 1
     fi
     for BYPASS_IP in "$SERVER_IP" "${EXTRA_BYPASS_IPS[@]}"; do
-        if ! echo "$BYPASS_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        if ! echo "$BYPASS_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' &&
+            ! echo "$BYPASS_IP" | grep -qE '^[0-9a-fA-F:]*:[0-9a-fA-F:]*$'; then
             echo "ERROR: invalid bypass IP" >&2
             exit 1
         fi
@@ -261,6 +262,15 @@ case "$1" in
     ip link set "$TUN_NAME" up
 
     for BYPASS_IP in "$SERVER_IP" "${EXTRA_BYPASS_IPS[@]}"; do
+        case "$BYPASS_IP" in
+        *:*)
+            # The app's own services over IPv6 do not enter the tunnel (the
+            # servers carry no IPv6, and the request would hang): looked up
+            # outside it, they get an answer at once or fail fast to IPv4.
+            ip -6 route add throw "${BYPASS_IP}/128" table "$TUN_TABLE" 2>/dev/null || true
+            continue
+            ;;
+        esac
         if [ -n "$DEFAULT_GW" ]; then
             ip route add "${BYPASS_IP}/32" via "$DEFAULT_GW" dev "$DEFAULT_DEV" table "$TUN_TABLE"
         else
