@@ -193,6 +193,8 @@ export interface RouterLink {
   mark?: string | null;
   /** The router's SSH host key: commands for this link reach only this router. */
   hostKey?: string | null;
+  /** How `mark` was computed (marks of another kind are dropped). */
+  markAlgo?: string;
 }
 
 /**
@@ -215,6 +217,9 @@ const LINKS_KEY = "tobevpn_router_links_v1";
 /** The single link earlier versions kept. */
 const LINK_KEY = "tobevpn_router_v1";
 
+/** How the saved marks were computed; others are dropped on reading. */
+const MARK_ALGO = "md5";
+
 function parseLink(value: unknown): RouterLink | null {
   const parsed = value as Partial<RouterLink> | null;
   if (!parsed || typeof parsed.host !== "string" || typeof parsed.user !== "string") return null;
@@ -226,7 +231,10 @@ function parseLink(value: unknown): RouterLink | null {
     hwid: typeof parsed.hwid === "string" ? parsed.hwid : null,
     name: typeof parsed.name === "string" ? parsed.name : null,
     id: typeof parsed.id === "string" ? parsed.id : newLinkId(),
-    mark: typeof parsed.mark === "string" ? parsed.mark : null,
+    // Marks saved before they became MD5 (SNR firmware has no sha256sum) no
+    // longer match the router's: dropped, and computed again on next save.
+    mark: typeof parsed.mark === "string" && parsed.markAlgo === MARK_ALGO ? parsed.mark : null,
+    markAlgo: MARK_ALGO,
     hostKey: typeof parsed.hostKey === "string" ? parsed.hostKey : null,
   };
 }
@@ -335,7 +343,7 @@ function saveRouterLink(link: RouterLink): void {
       const list = readLinks();
       const index = list.findIndex((item) => item.id === entry.id);
       if (index < 0) return;
-      list[index] = { ...list[index], mark };
+      list[index] = { ...list[index], mark, markAlgo: MARK_ALGO };
       writeLinks(list);
     });
   }
