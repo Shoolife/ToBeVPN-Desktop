@@ -2,9 +2,10 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 /** One turn of the refresh icon (TopbarRefreshButton spins 0.9 s per turn). */
 export const REFRESH_TURN_MS = 900;
-const FADE_OUT_MS = 220;
-const GAP_MS = 40;
-const FADE_IN_MS = 420;
+const FADE_OUT_MS = 160;
+const FADE_IN_MS = 360;
+/** How far the old view fades before the swap: never a blank screen. */
+const LOW_COVER = 0.9;
 const EASING = "cubic-bezier(0.4, 0, 0.2, 1)";
 
 /**
@@ -48,7 +49,7 @@ export function useRefreshSwap(refreshing: boolean): { refreshing: boolean; styl
       setShown(refreshing);
       // The new view starts covered and is uncovered from the next frame.
       frame = window.requestAnimationFrame(() => setVisible(true));
-    }, FADE_OUT_MS + GAP_MS);
+    }, FADE_OUT_MS);
     return () => {
       window.clearTimeout(timer);
       window.cancelAnimationFrame(frame);
@@ -58,7 +59,7 @@ export function useRefreshSwap(refreshing: boolean): { refreshing: boolean; styl
   return {
     refreshing: shown,
     style: {
-      ["--refresh-swap-cover" as string]: visible ? 0 : 1,
+      ["--refresh-swap-cover" as string]: visible ? 0 : LOW_COVER,
       ["--refresh-swap-transition" as string]: visible
         ? `opacity ${FADE_IN_MS}ms ${EASING}`
         : `opacity ${FADE_OUT_MS}ms ${EASING}`,

@@ -739,7 +739,9 @@ html[data-window-frame="desktop"] .update-banner-overlay {
 .refresh-swap::after {
   content: "";
   position: absolute;
-  inset: -2px;
+  /* Exactly over the part: a margin would cover the edge of the card
+     above it (the router's card) while fading. */
+  inset: 0;
   background: var(--refresh-swap-bg, var(--bg));
   opacity: var(--refresh-swap-cover, 0);
   transition: var(--refresh-swap-transition, none);
