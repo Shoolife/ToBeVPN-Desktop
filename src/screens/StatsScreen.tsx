@@ -1,4 +1,5 @@
 import { useState, useEffect, type CSSProperties } from "react";
+import { useCountUp } from "../components/useCountUp";
 import { formatDecimal, t, getSavedLang } from "../i18n";
 import {
   getDayStats,
@@ -157,6 +158,13 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   const totalSessions = stats.reduce((s, st) => s + st.sessions, 0);
   const totalSeconds = stats.reduce((s, st) => s + st.totalSeconds, 0);
   const avgPerSession = totalSessions > 0 ? Math.floor(computerBytes / totalSessions) : 0;
+  // The numbers count over to a new period's values instead of jumping.
+  const shownTotal = Math.round(useCountUp(totalBytes));
+  const shownRouter = Math.round(useCountUp(routerTotal));
+  const shownComputer = Math.round(useCountUp(computerBytes));
+  const shownSessions = Math.round(useCountUp(totalSessions));
+  const shownSeconds = Math.round(useCountUp(totalSeconds));
+  const shownAvg = Math.round(useCountUp(avgPerSession));
 
   const slotBytes = stats.map((s, i) => s.totalBytes + routerAt(i));
   const maxBytes = Math.max(...slotBytes, 1);
@@ -197,16 +205,16 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
               <div className="stats-hero__sublabel">{t("stats_your_stats")}</div>
             </div>
           </div>
-          <div className={`stats-hero__total ${withRouter ? "stats-hero__total--split" : ""}`}>{formatBytes(totalBytes)}</div>
+          <div className={`stats-hero__total ${withRouter ? "stats-hero__total--split" : ""}`}>{formatBytes(shownTotal)}</div>
           {withRouter && (
             <div className="stats-hero__split">
               <span className="stats-hero__split-item">
                 <span className="stats-legend__dot" />
-                {t("stats_this_computer")} {formatBytes(computerBytes)}
+                {t("stats_this_computer")} {formatBytes(shownComputer)}
               </span>
               <span className="stats-hero__split-item">
                 <span className="stats-legend__dot stats-legend__dot--router" />
-                {t("stats_router_title")} {formatBytes(routerTotal)}
+                {t("stats_router_title")} {formatBytes(shownRouter)}
               </span>
             </div>
           )}
@@ -217,7 +225,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 <line x1="12" y1="8" x2="12" y2="16" />
                 <line x1="8" y1="12" x2="16" y2="12" />
               </svg>
-              <span className="stats-hero__metric-value">{totalSessions}</span>
+              <span className="stats-hero__metric-value">{shownSessions}</span>
               <span className="stats-hero__metric-label">{t("stats_metric_sessions")}</span>
             </div>
             <div className="stats-hero__divider" />
@@ -226,7 +234,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 <circle cx="12" cy="12" r="10" />
                 <polyline points="12 6 12 12 16 14" />
               </svg>
-              <span className="stats-hero__metric-value">{formatTime(totalSeconds)}</span>
+              <span className="stats-hero__metric-value">{formatTime(shownSeconds)}</span>
               <span className="stats-hero__metric-label">{t("stats_metric_time")}</span>
             </div>
             <div className="stats-hero__divider" />
@@ -234,7 +242,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
               <svg className="stats-hero__metric-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
               </svg>
-              <span className="stats-hero__metric-value">{formatBytes(avgPerSession)}</span>
+              <span className="stats-hero__metric-value">{formatBytes(shownAvg)}</span>
               <span className="stats-hero__metric-label">{t("stats_metric_avg")}</span>
             </div>
           </div>
