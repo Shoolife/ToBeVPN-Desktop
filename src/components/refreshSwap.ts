@@ -24,7 +24,12 @@ export async function awaitWholeRefreshTurns(startedAt: number | null): Promise<
  * The swap between a screen's content and its refresh placeholders, as on
  * the phone: the old view fades out quickly, then the new one fades in
  * slowly and evenly, never an instant switch. `refreshing` is what to show
- * (it lags the real state by the fade); `style` goes on the swapping part.
+ * (it lags the real state by the fade); `style` goes on the swapping part,
+ * which has the `refresh-swap` class.
+ *
+ * The fade is a cover in the background's colour over the part, not the
+ * part's own opacity: WebKitGTK draws pulsing placeholders inside a fading
+ * parent as black boxes.
  */
 export function useRefreshSwap(refreshing: boolean): { refreshing: boolean; style: CSSProperties } {
   const [shown, setShown] = useState(refreshing);
@@ -41,7 +46,7 @@ export function useRefreshSwap(refreshing: boolean): { refreshing: boolean; styl
     const timer = window.setTimeout(() => {
       shownRef.current = refreshing;
       setShown(refreshing);
-      // The new view starts transparent and fades in from the next frame.
+      // The new view starts covered and is uncovered from the next frame.
       frame = window.requestAnimationFrame(() => setVisible(true));
     }, FADE_OUT_MS + GAP_MS);
     return () => {
@@ -53,10 +58,10 @@ export function useRefreshSwap(refreshing: boolean): { refreshing: boolean; styl
   return {
     refreshing: shown,
     style: {
-      opacity: visible ? 1 : 0,
-      transition: visible
+      ["--refresh-swap-cover" as string]: visible ? 0 : 1,
+      ["--refresh-swap-transition" as string]: visible
         ? `opacity ${FADE_IN_MS}ms ${EASING}`
         : `opacity ${FADE_OUT_MS}ms ${EASING}`,
-    },
+    } as CSSProperties,
   };
 }

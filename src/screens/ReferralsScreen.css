@@ -1079,3 +1079,8 @@
     animation-iteration-count: 1;
   }
 }
+
+/* Swaps in the invited-friends sheet fade over the sheet's colour. */
+.referrals-sheet .refresh-swap {
+  --refresh-swap-bg: var(--sheet-bg);
+}

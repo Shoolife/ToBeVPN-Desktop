@@ -728,8 +728,20 @@ html[data-window-frame="desktop"] .update-banner-overlay {
 /* A part that swaps between content and refresh placeholders with a fade
    (useRefreshSwap): laid out like its container's own children. */
 .refresh-swap {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: inherit;
   flex-shrink: 0;
+}
+
+/* The fade: a cover in the background's colour (see useRefreshSwap). */
+.refresh-swap::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  background: var(--refresh-swap-bg, var(--bg));
+  opacity: var(--refresh-swap-cover, 0);
+  transition: var(--refresh-swap-transition, none);
+  pointer-events: none;
 }
