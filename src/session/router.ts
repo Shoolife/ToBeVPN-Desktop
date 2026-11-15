@@ -281,6 +281,12 @@ export function getRouterLink(): RouterLink | null {
   const info = cached;
   if (!info?.gateway) return links[0] ?? null;
   const here = links.filter((link) => link.host === info.gateway);
+  // Several routers connected at this address: the one whose host key the
+  // address showed last (identifyRouterHere) — asked, not guessed.
+  if (here.length > 1 && scannedKey?.host === info.gateway) {
+    const byKey = here.find((link) => link.hostKey === scannedKey?.key);
+    if (byKey) return byKey;
+  }
   if (!info.mark) return here[0] ?? null;
   // The entry that is this router; else the most recent one that may be
   // (its id or mark not known yet: just paired, e.g. again after a reset —
@@ -289,6 +295,22 @@ export function getRouterLink(): RouterLink | null {
 }
 
 export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
+
+let scannedKey: { host: string; key: string } | null = null;
+
+/**
+ * With several routers connected at this network's address, asks the router
+ * there for its host key (key exchange only, no login), so getRouterLink
+ * picks the one actually answering. Nothing to ask with one or none.
+ */
+export async function identifyRouterHere(info: RouterInfo | null): Promise<void> {
+  const gateway = info?.gateway;
+  if (!gateway) return;
+  const here = readLinks().filter((link) => link.host === gateway && link.hostKey);
+  if (here.length < 2) return;
+  const key = await invoke<string | null>("router_host_key", { host: gateway }).catch(() => null);
+  scannedKey = key ? { host: gateway, key } : null;
+}
 
 /**
  * Saves a connected router: its entry is replaced (or added first), and an
@@ -458,6 +480,7 @@ export async function refreshRouterTraffic(maxAgeMs = 5 * 60_000): Promise<void>
   // Only from a connected router's own network, and only that router: the
   // network is known first (not guessed from the last connected router).
   const here = getCachedRouter() ?? (await detectRouter());
+  await identifyRouterHere(here);
   const link = getRouterLink();
   if (!link || !(await isLinkedRouterHere(link, here))) return;
   return readRouterTraffic(link, maxAgeMs);

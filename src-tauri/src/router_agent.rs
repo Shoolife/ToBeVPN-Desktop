@@ -843,6 +843,14 @@ pub async fn router_pair(
 static PINS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
+/// The host key the router at `host` shows, from the key exchange alone (no
+/// login): which of several routers paired at one address answers now.
+#[tauri::command]
+pub async fn router_host_key(app: AppHandle, host: String) -> Option<String> {
+    let (_, fingerprint) = connect(&app, &host, true, None).await.ok()?;
+    fingerprint
+}
+
 /// Pins (or, with None, unpins) the router expected at an address.
 #[tauri::command]
 pub fn router_pin(host: String, fingerprint: Option<String>) {

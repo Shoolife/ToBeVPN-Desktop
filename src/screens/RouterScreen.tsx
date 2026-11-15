@@ -23,6 +23,7 @@ import { serverProfileConfig } from "../session/vpn";
 import {
   accountHasRouterHere,
   isLinkedRouterHere,
+  identifyRouterHere,
   accountSubscriptionUrl,
   connectRouter,
   detectRouter,
@@ -319,6 +320,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setRefreshing(refresh);
     setError(null);
     const nextInfo = await detectRouter(refresh);
+    await identifyRouterHere(nextInfo);
     void accountHasRouterHere(nextInfo).then((found) => {
       if (generation === generationRef.current) setInstalledByAnother(found);
     });

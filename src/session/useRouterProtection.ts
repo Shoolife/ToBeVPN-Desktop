@@ -4,6 +4,7 @@ import { isBrowserPreviewRuntime } from "./browserPreview";
 import {
   detectRouter,
   getRouterLink,
+  identifyRouterHere,
   isLinkedRouterHere,
   ROUTER_CHANGED_EVENT,
   ROUTER_SECTION_AVAILABLE,
@@ -32,6 +33,7 @@ export async function checkRouterProtection(): Promise<RouterProtection> {
     // This network's router first: of several connected routers, the link
     // is the one of the network the computer is on now.
     const info = await detectRouter(true);
+    await identifyRouterHere(info);
     const link = getRouterLink();
     if (!link || !(await isLinkedRouterHere(link, info))) return NONE;
     // Status and devices in one login.

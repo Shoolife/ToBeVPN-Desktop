@@ -18,6 +18,7 @@ import {
   getRouterLink,
   routerNameFor,
   routerMarks,
+  identifyRouterHere,
   ROUTER_CHANGED_EVENT,
   type RouterLink,
   ROUTER_SECTION_AVAILABLE,
@@ -218,7 +219,8 @@ export default function DevicesScreen({
   useEffect(() => {
     if (!ROUTER_SECTION_AVAILABLE) return;
     let alive = true;
-    void detectRouter().then((info) => {
+    void detectRouter().then(async (info) => {
+      await identifyRouterHere(info);
       if (!alive) return;
       setRouter(info);
       // Of several connected routers, the one of this network.

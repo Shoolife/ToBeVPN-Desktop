@@ -62,14 +62,32 @@ pub async fn detect_router() -> RouterInfo {
         gateway: Some(gateway.to_string()),
         ..RouterInfo::default()
     };
-    let Some(root) = http_get(gateway, interface.as_deref(), "/").await else {
+    let Some(mut root) = http_get(gateway, interface.as_deref(), "/").await else {
         return info;
+    };
+    // A web server that sends HTTP to HTTPS (OpenWrt's redirect_https): the
+    // pages are read over HTTPS then, with the router's own certificate
+    // (self-signed) accepted, since only its title and mark are read.
+    let https = redirects_to_https(&root);
+    if https {
+        match https_get(gateway, interface.clone(), "/").await {
+            Some(page) => root = page,
+            None => return info,
+        }
+    }
+    let get = |path: &'static str| {
+        let interface = interface.clone();
+        async move {
+            if https {
+                https_get(gateway, interface, path).await
+            } else {
+                http_get(gateway, interface.as_deref(), path).await
+            }
+        }
     };
     // LuCI's index only redirects (meta refresh) to /cgi-bin/luci.
     let page = if root.contains("/cgi-bin/luci") {
-        http_get(gateway, interface.as_deref(), "/cgi-bin/luci")
-            .await
-            .unwrap_or(root)
+        get("/cgi-bin/luci").await.unwrap_or(root)
     } else {
         root
     };
@@ -79,10 +97,48 @@ pub async fn detect_router() -> RouterInfo {
         .is_some_and(|model| SUPPORTED_MODELS.contains(&model));
     info.model = model;
     info.firmware = firmware;
-    info.mark = http_get(gateway, interface.as_deref(), "/tobevpn-id")
-        .await
-        .and_then(|body| parse_mark(&body));
+    info.mark = get("/tobevpn-id").await.and_then(|body| parse_mark(&body));
     info
+}
+
+/// An HTTP answer that sends the browser to an https:// address.
+fn redirects_to_https(response: &str) -> bool {
+    let mut lines = response.lines();
+    let redirect = lines
+        .next()
+        .and_then(|status| status.split_whitespace().nth(1))
+        .is_some_and(|code| code.starts_with('3'));
+    redirect
+        && lines
+            .take_while(|line| !line.is_empty())
+            .any(|line| line.to_ascii_lowercase().starts_with("location: https://"))
+}
+
+/// One HTTPS GET to the router: its self-signed certificate accepted (only
+/// the page title and the ToBeVPN mark are read; nothing is sent), no
+/// redirects followed, bound to the physical interface like `http_get`.
+async fn https_get(gateway: Ipv4Addr, interface: Option<String>, path: &'static str) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::update_download::install_rustls_provider();
+        let builder = reqwest::blocking::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(HTTP_TIMEOUT);
+        #[cfg(target_os = "linux")]
+        let builder = match &interface {
+            Some(name) => builder.interface(name),
+            None => builder,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let _ = &interface;
+        let client = builder.build().ok()?;
+        let response = client.get(format!("https://{gateway}{path}")).send().ok()?;
+        let text = response.text().ok()?;
+        (!text.is_empty()).then(|| text.chars().take(MAX_PAGE_BYTES).collect())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Model and firmware family from a router's login page.
@@ -377,6 +433,15 @@ fn parse_proc_net_route(table: &str) -> Option<(Ipv4Addr, String)> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sees_a_redirect_to_https() {
+        assert!(redirects_to_https(
+            "HTTP/1.1 302 Found\r\nLocation: https://192.168.1.1/cgi-bin/luci\r\n\r\n"
+        ));
+        assert!(!redirects_to_https("HTTP/1.1 200 OK\r\n\r\n<a href=\"https://x\">"));
+        assert!(!redirects_to_https("HTTP/1.1 302 Found\r\nLocation: /cgi-bin/luci\r\n\r\n"));
+    }
 
     #[test]
     fn router_mark_matches_the_agent() {
