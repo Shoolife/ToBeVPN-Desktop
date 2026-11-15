@@ -5,6 +5,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
 import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -37,7 +38,6 @@ import { PERSONAL_DATA_MASK, usePersonalDataHidden } from "../session/profileDis
 import "./ReferralsScreen.css";
 
 const PAGE_SIZE = 20;
-const MIN_REFRESH_FEEDBACK_MS = 900;
 const SHEET_EXIT_MS = 420;
 const SHEET_DRAG_ACTIVATION_PX = 9;
 const MAX_TELEGRAM_ID_DIGITS = 19;
@@ -323,6 +323,7 @@ export default function ReferralsScreen({
     !browserPreview && session.isLinked,
   );
   const [isRefreshing, setRefreshing] = useState(false);
+  const refreshSwap = useRefreshSwap(isRefreshing);
   const [isLoadingMore, setLoadingMore] = useState(false);
   const [isAssigningReferrer, setAssigningReferrer] = useState(false);
   const [loadError, setLoadError] = useState<LoadErrorKey | null>(null);
@@ -387,9 +388,7 @@ export default function ReferralsScreen({
       try {
         if (browserPreview) {
           if (refreshStartedAt !== null) {
-            await new Promise((resolve) =>
-              window.setTimeout(resolve, MIN_REFRESH_FEEDBACK_MS),
-            );
+            await awaitWholeRefreshTurns(refreshStartedAt);
           }
           if (requestId === requestSequenceRef.current) {
             commitData(previewData);
@@ -404,13 +403,7 @@ export default function ReferralsScreen({
         }
         const page = normalizeReferralPage(response.data);
 
-        if (refreshStartedAt !== null) {
-          const remaining =
-            MIN_REFRESH_FEEDBACK_MS - (performance.now() - refreshStartedAt);
-          if (remaining > 0) {
-            await new Promise((resolve) => window.setTimeout(resolve, remaining));
-          }
-        }
+        await awaitWholeRefreshTurns(refreshStartedAt);
 
         if (requestId !== requestSequenceRef.current) return;
         commitData(reset || !existing ? page : mergeReferralPages(existing, page));
@@ -739,7 +732,7 @@ export default function ReferralsScreen({
               </section>
             )}
 
-            {isRefreshing ? (
+            <div className="refresh-swap" style={refreshSwap.style}>{refreshSwap.refreshing ? (
               <ReferralSummarySkeleton />
             ) : (
               <section className="referrals-card referrals-summary">
@@ -771,7 +764,7 @@ export default function ReferralsScreen({
                   {t("referrals_open_list")}
                 </button>
               </section>
-            )}
+            )}</div>
 
             {loadError && (
               <ReferralInlineError
@@ -934,6 +927,7 @@ function InvitedFriendsSheet({
   onLoadMore: () => void;
   onDismiss: () => void;
 }) {
+  const refreshSwap = useRefreshSwap(isRefreshing);
   const [closing, setClosing] = useState(false);
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const sheetDragRef = useRef<SheetDragState | null>(null);
@@ -1117,7 +1111,7 @@ function InvitedFriendsSheet({
         <div className="referrals-sheet__body">
           {error && <ReferralInlineError error={error} onRetry={onRetry} />}
 
-          {isRefreshing ? (
+          <div className="refresh-swap" style={refreshSwap.style}>{refreshSwap.refreshing ? (
             <div className="referrals-list">
               {[0, 1, 2].map((index) => (
                 <ReferralListSkeleton index={index} key={index} />
@@ -1140,7 +1134,7 @@ function InvitedFriendsSheet({
                 />
               ))}
             </div>
-          )}
+          )}</div>
 
           {!isRefreshing && items.length < total && (
             <button

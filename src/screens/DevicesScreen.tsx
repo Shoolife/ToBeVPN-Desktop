@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
 import { t, tf } from "../i18n";
 import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../session/auth";
 import { getSession } from "../session/store";
@@ -28,7 +29,6 @@ import { RouterIcon, routerMeta } from "./RouterScreen";
 import "./DevicesScreen.css";
 
 type DeviceKind = "phone" | "desktop" | "tv";
-const MIN_REFRESH_FEEDBACK_MS = 800;
 
 function inferDeviceKind(dto: LinkedDeviceDto): DeviceKind {
   const type = (dto.device_type ?? "").toLowerCase();
@@ -157,6 +157,7 @@ export default function DevicesScreen({
   const [currentAliases, setCurrentAliases] = useState<string[]>(() => devicesCacheNow()?.aliases ?? []);
   const [isInitialLoading, setInitialLoading] = useState(() => devicesCacheNow() === null);
   const [isRefreshing, setRefreshing] = useState(false);
+  const refreshSwap = useRefreshSwap(isRefreshing);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<{ id: string; name: string } | null>(null);
@@ -178,12 +179,7 @@ export default function DevicesScreen({
       ]);
       // Match the promocodes screen: a fast response still completes a smooth,
       // readable refresh turn instead of stopping the icon mid-frame.
-      if (refreshStartedAt !== null) {
-        const remaining = MIN_REFRESH_FEEDBACK_MS - (performance.now() - refreshStartedAt);
-        if (remaining > 0) {
-          await new Promise((resolve) => window.setTimeout(resolve, remaining));
-        }
-      }
+      await awaitWholeRefreshTurns(refreshStartedAt);
       if (generation !== loadGenerationRef.current) return;
       setCurrentAliases(aliases);
       if (data) {
@@ -360,7 +356,7 @@ export default function DevicesScreen({
         {!isInitialLoading && (
           <>
             {/* Current device */}
-            {isRefreshing ? (
+            <div className="refresh-swap" style={refreshSwap.style}>{refreshSwap.refreshing ? (
               currentDevice !== undefined && (
                 <>
                   <div className="devices-section-title">{t("devices_this_device")}</div>
@@ -384,7 +380,7 @@ export default function DevicesScreen({
                   <span className="devices-card__badge">{t("devices_current_badge")}</span>
                 </div>
               </>
-            )}
+            )}</div>
 
             {showRouter && (
               <>
@@ -453,7 +449,7 @@ export default function DevicesScreen({
         </div>
       ) : (
         <ScrollEdgeAffordance className="devices-list" overlayFade>
-          {isRefreshing ? (
+          <div className="refresh-swap" style={refreshSwap.style}>{refreshSwap.refreshing ? (
             <>
               <DeviceCardSkeleton action />
               <DeviceCardSkeleton action />
@@ -481,7 +477,7 @@ export default function DevicesScreen({
                 </button>
               </div>
             ))
-          )}
+          )}</div>
         </ScrollEdgeAffordance>
       )}
       {confirming && (

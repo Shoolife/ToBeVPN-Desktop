@@ -724,3 +724,12 @@ html[data-window-frame="desktop"] .update-banner-overlay {
 }
 
 .home__status-text--on { color: var(--success); }
+
+/* A part that swaps between content and refresh placeholders with a fade
+   (useRefreshSwap): laid out like its container's own children. */
+.refresh-swap {
+  display: flex;
+  flex-direction: column;
+  gap: inherit;
+  flex-shrink: 0;
+}

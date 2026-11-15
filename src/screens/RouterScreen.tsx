@@ -8,6 +8,7 @@ import { loadLastServer } from "../session/lastServer";
 import { findSameServer } from "../session/serverSelection";
 import { useRouterTraffic } from "../session/useRouterTraffic";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
+import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
 import Spinner from "../components/Spinner";
 import BrandLoader from "../components/BrandLoader";
 import SmoothHeight from "../components/SmoothHeight";
@@ -68,7 +69,6 @@ import {
 import "./DevicesScreen.css";
 import "./RouterScreen.css";
 
-const MIN_REFRESH_FEEDBACK_MS = 800;
 /** As on the subscription sheet: its slide-down and drag threshold. */
 const SHEET_CLOSE_MS = 420;
 const SHEET_DRAG_ACTIVATION_PX = 9;
@@ -300,6 +300,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [status, setStatus] = useState<RouterStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const refreshSwap = useRefreshSwap(refreshing);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [step, setStep] = useState<string | null>(null);
@@ -379,10 +380,8 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
         }
       }
     }
-    if (refresh) {
-      const remaining = MIN_REFRESH_FEEDBACK_MS - (performance.now() - startedAt);
-      if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
-    }
+    // The result lands as the refresh icon comes to rest (as on every screen).
+    if (refresh) await awaitWholeRefreshTurns(startedAt);
     if (generation !== generationRef.current) return;
     // Newer components in this app than on the router: offered with a button.
     if (currentLink && nextStatus?.installed) {
@@ -577,12 +576,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
         <div className="spinner-center devices-spinner router-loading">
           <BrandLoader label={t("router_step_check")} />
         </div>
-      ) : refreshing ? (
-        <ScrollEdgeAffordance className="router-content" overlayFade>
-          <RouterSkeleton installed={!!link} />
-        </ScrollEdgeAffordance>
       ) : (
         <ScrollEdgeAffordance className="router-content" overlayFade>
+          {/* The router's card stays while refreshing (as on the phone); only
+              what is below it swaps with its placeholders, with a fade. */}
           <div className="devices-card devices-card--current">
             <div className="devices-card__icon"><RouterIcon /></div>
             <div className="devices-card__info">
@@ -642,6 +639,11 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               info.supported && <span className="devices-card__badge">{t("router_supported_badge")}</span>
             )}
           </div>
+          <div className="refresh-swap" style={refreshSwap.style}>
+          {refreshSwap.refreshing ? (
+            <RouterSkeleton installed={!!link} />
+          ) : (
+          <>
           {/* Nothing to say about installing on a router that already runs
               ToBeVPN: its card asks to connect to it. */}
           {!installed && !reconnect && <p className="router-status">{statusText}</p>}
@@ -920,6 +922,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
               </SmoothHeight>
             </>
           )}
+          </>
+          )}
+          </div>
         </ScrollEdgeAffordance>
       )}
     </div>
@@ -938,16 +943,9 @@ function RouterSkeleton({ installed }: { installed: boolean }) {
       ))}
     </div>
   );
+  // The router's own card stays on screen above these, as on the phone.
   return (
     <>
-      <div className="devices-card devices-skeleton__card" aria-hidden="true">
-        <span className="devices-skeleton__icon" />
-        <span className="devices-skeleton__info">
-          <span className="devices-skeleton__line" />
-          <span className="devices-skeleton__line devices-skeleton__line--wide" />
-        </span>
-        <span className="devices-skeleton__action" />
-      </div>
       {installed ? (
         <>
           <div className="devices-section-title">{t("router_home_network_section")}</div>

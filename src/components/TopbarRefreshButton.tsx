@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { StringKey } from "../i18n";
 import { t } from "../i18n";
 import "./TopbarRefreshButton.css";
@@ -45,6 +45,14 @@ export default function TopbarRefreshButton({
   hint?: { id: string; text: StringKey };
 }) {
   const [hintVisible, setHintVisible] = useState(false);
+  // As on the phone: told to stop, the icon finishes its turn and comes to
+  // rest upright instead of jumping back mid-turn.
+  const [spinning, setSpinning] = useState(loading);
+  const loadingRef = useRef(loading);
+  loadingRef.current = loading;
+  useEffect(() => {
+    if (loading) setSpinning(true);
+  }, [loading]);
 
   useEffect(() => {
     if (!hint || hintSeen(hint.id)) return;
@@ -78,8 +86,11 @@ export default function TopbarRefreshButton({
       >
         <svg
           className={`topbar-refresh__icon ${
-            loading ? "topbar-refresh__icon--spinning" : ""
+            spinning ? "topbar-refresh__icon--spinning" : ""
           }`}
+          onAnimationIteration={() => {
+            if (!loadingRef.current) setSpinning(false);
+          }}
           width="20"
           height="20"
           viewBox="0 0 24 24"

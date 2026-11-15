@@ -5,6 +5,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
 import { createPortal } from "react-dom";
 import { ApiHttpError } from "../api/client";
 import type {
@@ -39,7 +40,6 @@ import { recordDiagnosticEvent } from "../session/diagnostics";
 import "./PromocodesScreen.css";
 
 const PAGE_SIZE = 20;
-const MIN_REFRESH_FEEDBACK_MS = 800;
 const MAX_PROMOCODE_LENGTH = 128;
 
 type LoadErrorKey =
@@ -327,6 +327,7 @@ export default function PromocodesScreen({
   const [code, setCode] = useState("");
   const [isInitialLoading, setInitialLoading] = useState(!browserPreview && authenticated);
   const [isRefreshing, setRefreshing] = useState(false);
+  const refreshSwap = useRefreshSwap(isRefreshing);
   const [isLoadingMore, setLoadingMore] = useState(false);
   const [isActivating, setActivating] = useState(false);
   const [loadError, setLoadError] = useState<LoadErrorKey | null>(null);
@@ -374,12 +375,7 @@ export default function PromocodesScreen({
         refreshedDiscount = plans?.effective_discount_percent ?? null;
       }
 
-      if (refreshStartedAt !== null) {
-        const remaining = MIN_REFRESH_FEEDBACK_MS - (performance.now() - refreshStartedAt);
-        if (remaining > 0) {
-          await new Promise((resolve) => window.setTimeout(resolve, remaining));
-        }
-      }
+      await awaitWholeRefreshTurns(refreshStartedAt);
       if (requestId !== requestSequenceRef.current) return;
       commitData(
         reset || !existing
@@ -632,7 +628,7 @@ export default function PromocodesScreen({
             </section>
 
             <ScrollEdgeAffordance className="promocodes-history-scroll">
-            {isRefreshing ? (
+            <div className="refresh-swap" style={refreshSwap.style}>{refreshSwap.refreshing ? (
               <HistorySkeleton />
             ) : data.items.length === 0 ? (
               <section className="promocodes-card promocodes-empty">
@@ -650,7 +646,7 @@ export default function PromocodesScreen({
                   <HistoryCard key={itemKey(item)} item={item} />
                 ))}
               </div>
-            )}
+            )}</div>
 
             {loadError && data !== null && (
               <div className="promocodes-inline-error" role="alert">
