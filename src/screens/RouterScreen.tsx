@@ -197,18 +197,35 @@ function slotServer(slot: number, server: VpnServer): SlotServer {
  * is in use too and never handed to another server.
  */
 function usedSlots(network: RouterNetwork, exceptMac?: string, defaultVpn = false): Set<number> {
+  // The slot each device really rides (slot 0 when its own has no server),
+  // as the agent reads it.
   const used = new Set(
     network.devices
       .filter((device) => device.mac !== exceptMac && device.mode === "vpn")
-      .map((device) => device.slot),
+      .map((device) => routerDeviceSlot(device, network)),
   );
   if (defaultVpn) {
-    // A "default" device rides the slot its entry names (0 unless another app set one).
+    // A "default" device rides the slot its entry names (0 unless another
+    // app set one); devices not listed yet ride slot 0.
+    used.add(0);
     network.devices
       .filter((device) => device.mac !== exceptMac && device.mode === "default")
-      .forEach((device) => used.add(device.slot));
+      .forEach((device) => used.add(routerDeviceSlot(device, network)));
   }
   return used;
+}
+
+/**
+ * Slots other devices' entries name, server or not: a new server put in one
+ * would move them to it at once, so they are not handed out.
+ */
+function namedSlots(network: RouterNetwork, exceptMac: string | undefined, defaultVpn: boolean): number[] {
+  return network.devices
+    .filter(
+      (device) =>
+        device.mac !== exceptMac && (device.mode === "vpn" || (device.mode === "default" && defaultVpn)),
+    )
+    .map((device) => device.slot);
 }
 
 /**
@@ -242,7 +259,7 @@ function planSlots(
     list.push(slotServer(item.slot, kept));
   }
   if (list.length >= limit) return "full";
-  const taken = new Set([...list.map((item) => item.slot), ...used]);
+  const taken = new Set([...list.map((item) => item.slot), ...used, ...namedSlots(network, exceptMac, defaultVpn)]);
   const free = Array.from({ length: ROUTER_MAX_SERVERS }, (_, slot) => slot).find((slot) => !taken.has(slot));
   if (free === undefined) return "full";
   list.push(slotServer(free, server));
@@ -741,9 +758,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                       type="button"
                       className="router-button"
                       disabled={busy}
-                      onClick={() => void runAction(status.running ? "stop" : "start")}
+                      onClick={() => void runAction(status.running || status.failed ? "stop" : "start")}
                     >
-                      {status.running ? t("router_stop") : t("router_start")}
+                      {status.running || status.failed ? t("router_stop") : t("router_start")}
                     </button>
                     <button type="button" className="router-button router-button--danger" disabled={busy} onClick={() => setConfirmUninstall(true)}>
                       {t("router_uninstall_short")}

@@ -135,6 +135,10 @@ fn pinned_xray(arch: Arch) -> Binary {
 /// back (the failed state): an update restarts it either way.
 const AGENT_RUNNING: &str =
     "{ pidof xray >/dev/null || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
+/// Stop and start on the router, carried to its end there even if the
+/// connection drops (HUP ignored, output to a file): the home is never left
+/// with the VPN stopped halfway. Its output and exit code are the start's.
+const RESTART_ON_ROUTER: &str = "(trap '' HUP; [ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh stop >/dev/null; /opt/tobevpn/tobevpn-router.sh start) </dev/null >/tmp/tobevpn-restart.log 2>&1 & pid=$!; wait $pid; code=$?; cat /tmp/tobevpn-restart.log; exit $code";
 const HEV_VERSION: &str = "2.19.2";
 
 fn hev_tunnel(arch: Arch) -> Binary {
@@ -1052,14 +1056,12 @@ async fn install(
         downloads.push((*binary, fetch_binary(&app, binary).await?));
     }
 
-    // An earlier run may be active; it is restarted with the new files.
-    let (stopped, _) = session
-        .run(
-            "[ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh stop",
-            None,
-        )
+    // Nothing is stopped while files go up (each one replaced in one step):
+    // a cut-off install leaves a running VPN as it was. The agent there, to
+    // never put an older one over a newer one from the phone app.
+    let (agent_on_router, _) = session
+        .run("cat /opt/tobevpn/tobevpn-router.sh 2>/dev/null", None)
         .await?;
-    log_output(&app, &stopped);
 
     session.run_ok("mkdir -p /opt/tobevpn", None).await?;
     if !packages.is_empty() {
@@ -1154,13 +1156,15 @@ async fn install(
         ),
         shell_quote_inner(&model),
     );
-    session
-        .write_file(
-            "/opt/tobevpn/tobevpn-router.sh",
-            AGENT_SCRIPT.as_bytes(),
-            "755",
-        )
-        .await?;
+    if agent_version(&agent_on_router) <= agent_version(AGENT_SCRIPT) {
+        session
+            .write_file(
+                "/opt/tobevpn/tobevpn-router.sh",
+                AGENT_SCRIPT.as_bytes(),
+                "755",
+            )
+            .await?;
+    }
     write_servers(&app, &session, &servers).await?;
     session
         .write_file(
@@ -1214,9 +1218,7 @@ async fn install(
         format!("autostart {}", if autostart { "on" } else { "off" }),
     );
     progress(&app, "start");
-    let started = session
-        .run_ok("/opt/tobevpn/tobevpn-router.sh start", None)
-        .await?;
+    let started = session.run_ok(RESTART_ON_ROUTER, None).await?;
     log_output(&app, &started);
     let status = session
         .run_ok("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -1322,19 +1324,12 @@ pub async fn router_update(
     user: String,
     fingerprint: Option<String>,
 ) -> Result<RouterStatus, String> {
+    // Nothing is stopped while the files go up (each one replaced in one
+    // step), and the restart runs on the router to its end: a failure on the
+    // way leaves the VPN as it was.
     let result = update(&app, &host, &user, fingerprint.as_deref()).await;
     if let Err(error) = &result {
         log(&app, "error", error.clone());
-        // The update stops the VPN before replacing files: a failure after
-        // that must not leave the home without it. The files it had not
-        // replaced yet are the working old ones.
-        if let Ok(session) = open(&app, &host, &user, fingerprint.as_deref()).await {
-            let _ = session
-                // Only when the VPN is down: a failure before the stop, or a
-                // start still running on the router, needs no second start.
-                .run("[ -x /opt/tobevpn/tobevpn-router.sh ] && [ -f /tmp/tobevpn-update-running ] && ! pidof xray >/dev/null && /opt/tobevpn/tobevpn-router.sh start; rm -f /tmp/tobevpn-update-running", None)
-                .await;
-        }
     }
     result
 }
@@ -1365,14 +1360,6 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     }
 
     progress(app, "configure");
-    // Whether it ran, so the update leaves it as it found it.
-    session
-        .run(&format!("if {AGENT_RUNNING}; then touch /tmp/tobevpn-update-running; else rm -f /tmp/tobevpn-update-running; fi"), None)
-        .await?;
-    let (stopped, _) = session
-        .run("/opt/tobevpn/tobevpn-router.sh stop", None)
-        .await?;
-    log_output(app, &stopped);
     for (binary, content) in downloads {
         progress(app, &format!("upload:{}", binary.name));
         session
@@ -1445,9 +1432,10 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     }
 
     progress(app, "start");
-    // Started again only if it ran before the update.
+    // Restarted onto the new files only if it runs (or retries after a
+    // failure); a stopped VPN stays stopped.
     let started = session
-        .run_ok("if [ -f /tmp/tobevpn-update-running ]; then rm -f /tmp/tobevpn-update-running; /opt/tobevpn/tobevpn-router.sh start; else echo kept=1; fi", None)
+        .run_ok(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; else echo kept=1; fi"), None)
         .await?;
     log_output(app, &started);
     let status = session
@@ -1937,10 +1925,15 @@ async fn write_servers(
                 write_ru_sites(session, sites).await?;
                 true
             }
-            // Without the list the VPN still works, only without the bypass.
+            // The router's own list still carries the rule; without any
+            // list the VPN still works, only without the bypass.
             Err(error) => {
                 log(app, "warn", format!("Russian sites list: {error}"));
-                false
+                session
+                    .run(&format!("[ -s {RU_SITES_PATH} ]"), None)
+                    .await
+                    .map(|(_, code)| code == 0)
+                    .unwrap_or(false)
             }
         }
     } else {
