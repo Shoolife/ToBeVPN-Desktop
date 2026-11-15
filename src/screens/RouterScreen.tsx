@@ -630,7 +630,11 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
           {installed && status?.failed && !status.running && <p className="router-error">{t("router_failed")}</p>}
           {installed &&
             status?.running &&
-            network?.devices.some((device) => device.mode === "vpn" && status.downSlots.includes(device.slot)) && (
+            network?.devices.some(
+              (device) =>
+                (device.mode === "vpn" || (device.mode === "default" && status.defaultMode === "vpn")) &&
+                status.downSlots.includes(device.slot),
+            ) && (
             <p className="router-error">{t("router_server_down")}</p>
           )}
           {error && <p className="router-error">{error}</p>}

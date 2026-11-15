@@ -41,6 +41,12 @@ export async function routerMarks(ids: string[]): Promise<string[]> {
 export async function isLinkedRouterHere(link: RouterLink, info: RouterInfo | null): Promise<boolean> {
   if (!info?.gateway || info.gateway !== link.host) return false;
   if (!info.mark || !link.hwid) return true;
+  // The router itself just showed this link's host key: it is this one,
+  // whatever kind of mark it publishes (an older agent: SHA-256).
+  const scan = scannedKey;
+  if (scan && scan.host === link.host && link.hostKey && scan.key === link.hostKey && Date.now() - scan.at < SCAN_VALID_MS) {
+    return true;
+  }
   const [mark] = await routerMarks([link.hwid]);
   return mark === info.mark;
 }
@@ -311,7 +317,7 @@ export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
 
 let scannedKey: { host: string; key: string; at: number } | null = null;
 /** A scanned host key speaks for the address this long. */
-const SCAN_VALID_MS = 60_000;
+const SCAN_VALID_MS = 5 * 60_000;
 
 /**
  * With several routers connected at this network's address, asks the router
@@ -340,6 +346,8 @@ export async function identifyRouterHere(info: RouterInfo | null): Promise<void>
     scannedKey = null;
     return;
   }
+  // A fresh answer for this address is reused (no key exchange each minute).
+  if (scannedKey && scannedKey.host === gateway && Date.now() - scannedKey.at < SCAN_VALID_MS) return;
   const key = await invoke<string | null>("router_host_key", { host: gateway }).catch(() => null);
   scannedKey = key ? { host: gateway, key, at: Date.now() } : null;
 }
@@ -442,13 +450,15 @@ export function routerDisplayName(link: RouterLink | null, info: RouterInfo | nu
 /** Russian sites around the VPN on the router, for every device on VPN; restarts the VPN. */
 export async function setRouterRuDirect(link: RouterLink, enabled: boolean): Promise<RouterStatus> {
   const status = await linkInvoke<RouterStatus>(link, "router_set_ru_direct", { enabled });
-  remember(getRouterLink() ?? link, status);
+  // The link acted on, not whichever the network picks now.
+  remember(link, status);
   return status;
 }
 
 export async function setRouterName(link: RouterLink, name: string): Promise<RouterStatus> {
   const status = await linkInvoke<RouterStatus>(link, "router_set_name", { name });
-  remember(getRouterLink() ?? link, status);
+  // The link acted on, not whichever the network picks now.
+  remember(link, status);
   return status;
 }
 

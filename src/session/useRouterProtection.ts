@@ -43,7 +43,8 @@ export async function checkRouterProtection(): Promise<RouterProtection> {
     if (!me) return NONE;
     const mode = me.mode === "default" ? status.defaultMode : me.mode;
     if (mode !== "vpn") return NONE;
-    const slot = me.mode === "vpn" ? me.slot : 0;
+    // A "default" device rides the slot its entry names, like a chosen one.
+    const slot = me.slot;
     if (status.downSlots.includes(slot)) return NONE;
     const server =
       network.slots.find((item) => item.slot === slot) ?? network.slots.find((item) => item.slot === 0);

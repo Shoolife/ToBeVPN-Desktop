@@ -1328,7 +1328,7 @@ pub async fn router_update(
             let _ = session
                 // Only when the VPN is down: a failure before the stop, or a
                 // start still running on the router, needs no second start.
-                .run("[ -x /opt/tobevpn/tobevpn-router.sh ] && ! pidof xray >/dev/null && /opt/tobevpn/tobevpn-router.sh start", None)
+                .run("[ -x /opt/tobevpn/tobevpn-router.sh ] && [ -f /tmp/tobevpn-update-running ] && ! pidof xray >/dev/null && /opt/tobevpn/tobevpn-router.sh start; rm -f /tmp/tobevpn-update-running", None)
                 .await;
         }
     }
@@ -1361,6 +1361,10 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     }
 
     progress(app, "configure");
+    // Whether it ran, so the update leaves it as it found it.
+    session
+        .run("if pidof xray >/dev/null; then touch /tmp/tobevpn-update-running; else rm -f /tmp/tobevpn-update-running; fi", None)
+        .await?;
     let (stopped, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh stop", None)
         .await?;
@@ -1437,8 +1441,9 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     }
 
     progress(app, "start");
+    // Started again only if it ran before the update.
     let started = session
-        .run_ok("/opt/tobevpn/tobevpn-router.sh start", None)
+        .run_ok("if [ -f /tmp/tobevpn-update-running ]; then /opt/tobevpn/tobevpn-router.sh start; fi; rm -f /tmp/tobevpn-update-running; true", None)
         .await?;
     log_output(app, &started);
     let status = session
@@ -1880,7 +1885,9 @@ pub async fn router_set_servers(
         .await?;
     write_servers(&app, &session, &servers).await?;
     session
-        .run_ok("/opt/tobevpn/tobevpn-router.sh restart", None)
+        // Applied by a restart only when the VPN runs: a VPN the owner
+        // stopped stays stopped (the new config is used at its next start).
+        .run_ok("if pidof xray >/dev/null; then /opt/tobevpn/tobevpn-router.sh restart; fi; true", None)
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -2211,7 +2218,9 @@ pub async fn router_set_ru_direct(
         .write_file(RU_DIRECT_FLAG, if enabled { b"1\n" } else { b"0\n" }, "644")
         .await?;
     session
-        .run_ok("/opt/tobevpn/tobevpn-router.sh restart", None)
+        // Applied by a restart only when the VPN runs: a VPN the owner
+        // stopped stays stopped (the new config is used at its next start).
+        .run_ok("if pidof xray >/dev/null; then /opt/tobevpn/tobevpn-router.sh restart; fi; true", None)
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
