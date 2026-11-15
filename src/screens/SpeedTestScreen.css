@@ -52,6 +52,11 @@
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
+  transition: opacity 220ms ease;
+}
+
+.speed-vpn-badge--pending {
+  opacity: 0;
 }
 
 .speed-vpn-badge--on {

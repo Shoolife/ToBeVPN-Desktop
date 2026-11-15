@@ -23,6 +23,13 @@ const NONE: RouterProtection = { active: false, serverName: null };
 const CHECK_EVERY_MS = 3 * 60_000;
 
 /**
+ * The last answer in this run of the app: a screen opened later shows it at
+ * once (Home has usually just asked) instead of first claiming a direct
+ * line, and asks again in the background.
+ */
+let lastKnown: RouterProtection | null = null;
+
+/**
  * At home behind a router with ToBeVPN, and the router sends this computer
  * through a server that answers. Anything else (another network, the VPN
  * on the router stopped, this computer set to "No VPN", its server down)
@@ -56,8 +63,17 @@ export async function checkRouterProtection(): Promise<RouterProtection> {
   }
 }
 
-export function useRouterProtection(): RouterProtection {
-  const [protection, setProtection] = useState<RouterProtection>(NONE);
+/** The hook's answer; `known` is false until the first check this run. */
+export type RouterProtectionState = RouterProtection & { known: boolean };
+
+export function useRouterProtection(): RouterProtectionState {
+  const [protection, setProtection] = useState<RouterProtectionState>(() =>
+    !ROUTER_SECTION_AVAILABLE
+      ? { ...NONE, known: true }
+      : lastKnown
+        ? { ...lastKnown, known: true }
+        : { ...NONE, known: false },
+  );
 
   useEffect(() => {
     if (!ROUTER_SECTION_AVAILABLE) return;
@@ -68,7 +84,8 @@ export function useRouterProtection(): RouterProtection {
       running = true;
       void checkRouterProtection()
         .then((next) => {
-          if (alive) setProtection(next);
+          lastKnown = next;
+          if (alive) setProtection({ ...next, known: true });
         })
         .finally(() => {
           running = false;

@@ -72,7 +72,13 @@ export default function SpeedTestScreen({
           </svg>
         </button>
         <span className="speed-topbar__title">{t("speed_test_title")}</span>
-        <span className={`speed-vpn-badge ${protectedRoute ? "speed-vpn-badge--on" : "speed-vpn-badge--off"}`}>
+        {/* Hidden until the route is known, then faded in: never "Direct"
+            first and the router's VPN a moment later. */}
+        <span
+          className={`speed-vpn-badge ${protectedRoute ? "speed-vpn-badge--on" : "speed-vpn-badge--off"} ${
+            vpnConnected || routerVpn.known ? "" : "speed-vpn-badge--pending"
+          }`}
+        >
           {vpnConnected ? t("speed_via_vpn") : viaRouter ? t("speed_via_router_vpn") : t("speed_direct")}
         </span>
       </div>
