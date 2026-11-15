@@ -135,7 +135,7 @@ fn pinned_xray(arch: Arch) -> Binary {
 /// xray: matched by the binary it runs) or its watchdog waits to bring it
 /// back (the failed state): a restart then keeps it on.
 const AGENT_RUNNING: &str =
-    "{ [ -n \"$(for p in $(pidof xray); do case \"$(readlink /proc/$p/exe 2>/dev/null)\" in /opt/tobevpn/xray | \"/opt/tobevpn/xray (deleted)\") echo $p; break ;; esac; done)\" ] || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
+    "{ [ -n \"$(r=$(readlink -f /opt/tobevpn/xray 2>/dev/null); r=${r:-/opt/tobevpn/xray}; for p in $(pidof xray); do case \"$(readlink /proc/$p/exe 2>/dev/null)\" in /opt/tobevpn/xray | \"/opt/tobevpn/xray (deleted)\" | \"$r\" | \"$r (deleted)\") echo $p; break ;; esac; done)\" ] || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
 /// Stop and start on the router, carried to its end there even if the
 /// connection drops (HUP ignored, output to a file): the home is never left
 /// with the VPN stopped halfway. Its output and exit code are the start's.
@@ -366,7 +366,7 @@ fn base_facts_command() -> String {
      echo installed=$([ -x /opt/tobevpn/xray ] && echo 1 || echo 0); \
      echo mem_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); \
      echo mem_available_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo); \
-     echo own_xray_kb=$(p=$(for p in $(pidof xray); do case \"$(readlink /proc/$p/exe 2>/dev/null)\" in /opt/tobevpn/xray | \"/opt/tobevpn/xray (deleted)\") echo $p; break ;; esac; done); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
+     echo own_xray_kb=$(p=$(r=$(readlink -f /opt/tobevpn/xray 2>/dev/null); r=${r:-/opt/tobevpn/xray}; for p in $(pidof xray); do case \"$(readlink /proc/$p/exe 2>/dev/null)\" in /opt/tobevpn/xray | \"/opt/tobevpn/xray (deleted)\" | \"$r\" | \"$r (deleted)\") echo $p; break ;; esac; done); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
      echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
      . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_ID $DISTRIB_RELEASE\"; echo release=\"$DISTRIB_RELEASE\"; \
      echo model=$(cat /tmp/sysinfo/model 2>/dev/null | tr ' ' '-')"
@@ -1185,7 +1185,9 @@ async fn install(
         format!("autostart {}", if autostart { "on" } else { "off" }),
     );
     progress(&app, "start");
-    let started = session.run_ok(RESTART_ON_ROUTER, None).await?;
+    // The files are on the router: a start that fails shows as its state
+    // (failed, retried each minute), the install is not lost.
+    let (started, _) = session.run(RESTART_ON_ROUTER, None).await?;
     log_output(&app, &started);
     let status = session
         .run_ok("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -1427,8 +1429,10 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     progress(app, "start");
     // Restarted onto the new files only if it runs (or retries after a
     // failure); a stopped VPN stays stopped.
-    let started = session
-        .run_ok(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; else echo kept=1; fi"), None)
+    // The new files are in place either way: a start that fails shows as the
+    // router's state (failed), not as an update that did not happen.
+    let (started, _) = session
+        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; else echo kept=1; fi"), None)
         .await?;
     log_output(app, &started);
     let status = session
@@ -1494,6 +1498,19 @@ pub async fn router_control(
             }
         }
         let _ = save_known_hosts(&app, &hosts);
+        // A pin on the forgotten key would make every later session at this
+        // address fail ("not paired") for another router still paired there.
+        {
+            let mut pins = PINS.lock().unwrap();
+            let stale = match (&session.fingerprint, pins.get(&host)) {
+                (Some(fingerprint), Some(pinned)) => pinned == fingerprint,
+                (None, _) => true,
+                _ => false,
+            };
+            if stale {
+                pins.remove(&host);
+            }
+        }
         return Ok(RouterStatus::default());
     }
     let (output, _) = session
@@ -1906,6 +1923,7 @@ pub async fn router_refresh_credentials(
     servers: Vec<SlotServer>,
     server_hosts: Vec<String>,
     subscription_url: Option<String>,
+    subscription_key: Option<String>,
     write: bool,
 ) -> Result<Option<RouterStatus>, String> {
     validate_slots(&servers)?;
@@ -1938,10 +1956,13 @@ pub async fn router_refresh_credentials(
         )
         .await?;
     let router_sub = router_sub.trim();
+    // By the account's key in the link, not the whole address: two apps write
+    // the same link in their own form (base, slash, template).
     let link_changed = !router_sub.is_empty()
-        && subscription_url
+        && subscription_key
             .as_deref()
-            .is_some_and(|url| !url.trim().is_empty() && url.trim() != router_sub);
+            .map(str::trim)
+            .is_some_and(|key| !key.is_empty() && !router_sub.contains(key));
     let key_changed = servers.iter().any(|server| {
         let key = credential_key(&server.server);
         slots

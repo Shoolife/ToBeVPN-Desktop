@@ -19,7 +19,7 @@ import ResetLinkOption from "../components/ResetLinkOption";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import "../components/SubscriptionSheet.css";
 import "../components/WhatsNewDialog.css";
-import { fetchVpnServers, getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, syncSubscription, type VpnServer } from "../session/auth";
+import { fetchVpnServers, getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, subscriptionIsLive, syncSubscription, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
 import {
@@ -305,6 +305,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const refreshSwap = useRefreshSwap(refreshing);
   const [busy, setBusy] = useState(false);
+  const credentialsCheckedRef = useRef<string | null>(null);
   const busyRef = useRef(false);
   busyRef.current = busy;
   const statusRef = useRef<RouterStatus | null>(null);
@@ -359,6 +360,12 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     hwid: string | null,
     generation: number,
   ) => {
+    if (!hwid) return;
+    // Once per router while the screen is open: a router that stays
+    // different (another account's) is not asked again and again.
+    const routerKey = `${link.host}|${hwid.toLowerCase()}`;
+    if (credentialsCheckedRef.current === routerKey) return;
+    credentialsCheckedRef.current = routerKey;
     const slotsWith = (servers: VpnServer[]) => {
       const list = network.slots.map((slot) => {
         const server = servers.find((candidate) => candidate.id === slot.serverId);
@@ -369,22 +376,33 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     try {
       const first = slotsWith(routableServers());
       if (!first || !(await refreshRouterCredentials(link, network, first, false))) return;
-      await syncSubscription({ force: true }).catch(() => undefined);
-      await fetchVpnServers().catch(() => []);
-      const fresh = slotsWith(routableServers());
-      if (!fresh || !hwid) return;
+      // Only this account's router gets this account's credentials (an
+      // account list that cannot be read stops here too).
       const routers = await accountRouters();
       if (!routers.some((router) => router.id.toLowerCase() === hwid.toLowerCase())) return;
+      // This app may be the stale side (the link was reset on another
+      // device): its own link is synced and must answer live with servers,
+      // or nothing is written.
+      await syncSubscription({ force: true });
+      if (!(await subscriptionIsLive())) return;
+      await fetchVpnServers();
+      const fresh = slotsWith(routableServers());
+      if (!fresh) return;
       if (generation !== generationRef.current || busyRef.current) return;
       setBusy(true);
       try {
         const next = await refreshRouterCredentials(link, network, fresh, true);
-        if (next && generation === generationRef.current) setStatus(next);
+        if (next && generation === generationRef.current) {
+          setStatus(next);
+          // The slots and their new keys as the router has them now.
+          const now = await routerDevices(link).catch(() => null);
+          if (now && generation === generationRef.current) setNetwork(now);
+        }
       } finally {
         setBusy(false);
       }
     } catch {
-      // Tried again at the next load.
+      // Nothing written; asked again on the next visit.
     }
   };
 

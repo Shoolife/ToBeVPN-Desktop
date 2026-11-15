@@ -261,6 +261,8 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
           className="refresh-swap"
           style={{
             ["--refresh-swap-cover" as string]: sectionVisible ? 0 : 1,
+            // The old period's bars cannot be hovered while they fade out.
+            pointerEvents: sectionVisible ? undefined : "none",
             ["--refresh-swap-transition" as string]: sectionVisible
               ? `opacity ${SECTION_FADE_IN_MS}ms cubic-bezier(0.4, 0, 0.2, 1) ${SECTION_FADE_IN_DELAY_MS}ms`
               : `opacity ${SECTION_FADE_OUT_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`,

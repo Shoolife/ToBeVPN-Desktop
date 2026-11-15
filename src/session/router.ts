@@ -5,7 +5,7 @@
 // cannot run SSH or install software on another device.
 import { invoke } from "@tauri-apps/api/core";
 import type { LinkedDeviceDto } from "../api/types";
-import { BOT_API_BASE_URL, CONTROL_PLANE_BYPASS_HOSTS, SUBSCRIPTION_BASE_URL } from "../api/config";
+import { BOT_API_BASE_URL, PANEL_BASE_URL, SUBSCRIPTION_BASE_URL } from "../api/config";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { getSession } from "./store";
 import type { ServerVpnConfig } from "./vpn";
@@ -892,6 +892,7 @@ export async function refreshRouterCredentials(
     servers,
     serverHosts: accountServerHosts(),
     subscriptionUrl: accountSubscriptionUrl(),
+    subscriptionKey: getSession().shortUuid ?? null,
     write,
   });
 }
@@ -974,25 +975,21 @@ function accountServerHosts(): string[] {
 }
 
 /**
- * The app's own services (subscription, bot API, panel). The router sends
- * them direct too: the app on a computer behind the router then reaches
- * them as without it, not through a foreign server that may not get to
- * them (its subscription requests timed out that way).
- */
-/**
- * The app's own service hosts, sent direct by the router: every host the
- * app itself keeps out of its tunnel (the fallback bot API and subscription
- * hosts too), plus the bot API.
+ * The app's own services (subscription, panel, bot API), which the router
+ * sends direct, so the app behind it reaches them as without it. Not the
+ * fallback endpoints: they live on shared CDN and cloud addresses, and the
+ * router sends whole addresses direct for the home (other sites there would
+ * skip the VPN too).
  */
 function serviceHosts(): string[] {
-  const urls = [BOT_API_BASE_URL, import.meta.env.VITE_BOT_API_URL];
-  return [...CONTROL_PLANE_BYPASS_HOSTS, ...urls.flatMap((url) => {
+  const urls = [SUBSCRIPTION_BASE_URL, PANEL_BASE_URL, BOT_API_BASE_URL, import.meta.env.VITE_BOT_API_URL];
+  return urls.flatMap((url) => {
     try {
       return url ? [new URL(url).hostname] : [];
     } catch {
       return [];
     }
-  })];
+  });
 }
 
 /** Subscription address of the account, which the router fetches itself. */
