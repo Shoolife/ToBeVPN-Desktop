@@ -5,7 +5,7 @@
 // cannot run SSH or install software on another device.
 import { invoke } from "@tauri-apps/api/core";
 import type { LinkedDeviceDto } from "../api/types";
-import { BOT_API_BASE_URL, PANEL_BASE_URL, SUBSCRIPTION_BASE_URL } from "../api/config";
+import { BOT_API_BASE_URL, CONTROL_PLANE_BYPASS_HOSTS, SUBSCRIPTION_BASE_URL } from "../api/config";
 import { isBrowserPreviewRuntime } from "./browserPreview";
 import { getSession } from "./store";
 import type { ServerVpnConfig } from "./vpn";
@@ -146,6 +146,8 @@ export interface RouterSlot {
   slot: number;
   serverId: string;
   serverName: string;
+  /** Fingerprint of the credentials written for it; null when not known (older apps). */
+  key?: string | null;
 }
 
 export interface RouterNetwork {
@@ -614,15 +616,6 @@ export interface RouterCheck {
   problems: string[];
 }
 
-/**
- * Logs in once with the router password (which installs the app's key and is
- * not stored), then checks the router without changing anything else.
- */
-export async function checkRouter(options: { host: string; user: string; password: string }): Promise<RouterCheck> {
-  const { host, user, password } = options;
-  pairedKeys.set(host, await invoke<string | null>("router_pair", { host, user, password }));
-  return invoke<RouterCheck>("router_check", { host, user, fingerprint: pairedKeys.get(host) ?? null });
-}
 
 /**
  * This network's router has no link here, but it may still take this
@@ -881,6 +874,26 @@ export async function setRouterServers(link: RouterLink, servers: SlotServer[]):
   return status;
 }
 
+/**
+ * After the account's link was reset (or a server moved) the router still
+ * logs in with the old credentials: its servers (the same slots, this app's
+ * current profiles) and the subscription link are written again. Null when
+ * nothing changed, or when a slot's server is not in this app's list.
+ */
+export async function refreshRouterCredentials(
+  link: RouterLink,
+  network: RouterNetwork,
+  servers: SlotServer[],
+): Promise<RouterStatus | null> {
+  if (!network.slots.some((slot) => slot.slot === 0)) return null;
+  if (servers.length !== network.slots.length) return null;
+  return linkInvoke<RouterStatus | null>(link, "router_refresh_credentials", {
+    servers,
+    serverHosts: accountServerHosts(),
+    subscriptionUrl: accountSubscriptionUrl(),
+  });
+}
+
 export async function routerDevices(link: RouterLink): Promise<RouterNetwork> {
   return linkInvoke<RouterNetwork>(link, "router_devices", {});
 }
@@ -905,12 +918,6 @@ export async function flushThisComputerDns(): Promise<boolean> {
   return invoke<boolean>("flush_dns_cache").catch(() => false);
 }
 
-export async function setRouterDefaultMode(
-  link: RouterLink,
-  mode: RouterDeviceMode,
-): Promise<RouterStatus> {
-  return linkInvoke<RouterStatus>(link, "router_set_default_mode", { mode });
-}
 
 // Names home devices announce over UPnP ("[LG] webOS TV UJ630V" where DHCP
 // only says "LGwebOSTV"), kept by MAC so a device that is off keeps its name.
@@ -970,15 +977,20 @@ function accountServerHosts(): string[] {
  * them as without it, not through a foreign server that may not get to
  * them (its subscription requests timed out that way).
  */
+/**
+ * The app's own service hosts, sent direct by the router: every host the
+ * app itself keeps out of its tunnel (the fallback bot API and subscription
+ * hosts too), plus the bot API.
+ */
 function serviceHosts(): string[] {
-  const urls = [SUBSCRIPTION_BASE_URL, PANEL_BASE_URL, BOT_API_BASE_URL, import.meta.env.VITE_BOT_API_URL];
-  return urls.flatMap((url) => {
+  const urls = [BOT_API_BASE_URL, import.meta.env.VITE_BOT_API_URL];
+  return [...CONTROL_PLANE_BYPASS_HOSTS, ...urls.flatMap((url) => {
     try {
       return url ? [new URL(url).hostname] : [];
     } catch {
       return [];
     }
-  });
+  })];
 }
 
 /** Subscription address of the account, which the router fetches itself. */

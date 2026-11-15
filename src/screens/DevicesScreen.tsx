@@ -274,8 +274,10 @@ export default function DevicesScreen({
   // Routers have their own section: the one of this network opens its
   // settings; other routers of the account (another home, a cottage) are
   // listed with the names given to them and can be disconnected.
+  // Without the router section (Store build) routers stay in this list, so
+  // they can still be seen and disconnected.
   const otherDevices = devices.filter(
-    (d) => !deviceMatchesAliases(d, currentAliases) && !isRouterDevice(d),
+    (d) => !deviceMatchesAliases(d, currentAliases) && !(ROUTER_SECTION_AVAILABLE && isRouterDevice(d)),
   );
   // With the router's mark: which of the account's routers is this one, and
   // whether the linked one is (not merely a router at the same address).

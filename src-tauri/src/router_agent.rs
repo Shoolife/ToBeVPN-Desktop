@@ -131,14 +131,15 @@ fn pinned_xray(arch: Arch) -> Binary {
 /// hev-socks5-tunnel; both builds are static, the ARMv7 one soft-float so
 /// it runs on any ARMv7 core.
 /// The hev-socks5-tunnel build this app installs (also in its download URL).
-/// The VPN counts as on while its core runs or its watchdog waits to bring it
-/// back (the failed state): an update restarts it either way.
+/// The VPN counts as on while its own core runs (never another package's
+/// xray: matched by the binary it runs) or its watchdog waits to bring it
+/// back (the failed state): a restart then keeps it on.
 const AGENT_RUNNING: &str =
-    "{ pidof xray >/dev/null || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
+    "{ [ -n \"$(for p in $(pidof xray); do case \"$(readlink /proc/$p/exe 2>/dev/null)\" in /opt/tobevpn/xray | \"/opt/tobevpn/xray (deleted)\") echo $p; break ;; esac; done)\" ] || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
 /// Stop and start on the router, carried to its end there even if the
 /// connection drops (HUP ignored, output to a file): the home is never left
 /// with the VPN stopped halfway. Its output and exit code are the start's.
-const RESTART_ON_ROUTER: &str = "(trap '' HUP; [ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh stop >/dev/null; /opt/tobevpn/tobevpn-router.sh start) </dev/null >/tmp/tobevpn-restart.log 2>&1 & pid=$!; wait $pid; code=$?; cat /tmp/tobevpn-restart.log; exit $code";
+const RESTART_ON_ROUTER: &str = "(trap '' HUP PIPE; [ -x /opt/tobevpn/tobevpn-router.sh ] && /opt/tobevpn/tobevpn-router.sh stop >/dev/null; /opt/tobevpn/tobevpn-router.sh start) </dev/null >/tmp/tobevpn-restart.log 2>&1 & pid=$!; wait $pid; code=$?; cat /tmp/tobevpn-restart.log; exit $code";
 const HEV_VERSION: &str = "2.19.2";
 
 fn hev_tunnel(arch: Arch) -> Binary {
@@ -357,7 +358,7 @@ const MIN_FREE_MEMORY_KB: u64 = 64 * 1024;
 
 /// What the install needs to know about a router, as shell lines.
 fn base_facts_command() -> String {
-    "echo arch=$(uname -m); echo free_kb=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'); \
+    "echo arch=$(uname -m); echo free_kb=$({ df -k /overlay 2>/dev/null || df -k /; } | awk 'NR==2{print $4}'); \
      echo tun=$([ -c /dev/net/tun ] || grep -qw tun /proc/modules && echo 1 || echo 0); \
      echo pkg=$(command -v apk >/dev/null || command -v opkg >/dev/null && echo 1 || echo 0); \
      echo curl=$(command -v curl >/dev/null && echo 1 || echo 0); \
@@ -365,7 +366,7 @@ fn base_facts_command() -> String {
      echo installed=$([ -x /opt/tobevpn/xray ] && echo 1 || echo 0); \
      echo mem_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); \
      echo mem_available_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo); \
-     echo own_xray_kb=$(p=$(pidof xray); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
+     echo own_xray_kb=$(p=$(for p in $(pidof xray); do case \"$(readlink /proc/$p/exe 2>/dev/null)\" in /opt/tobevpn/xray | \"/opt/tobevpn/xray (deleted)\") echo $p; break ;; esac; done); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
      echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
      . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_ID $DISTRIB_RELEASE\"; echo release=\"$DISTRIB_RELEASE\"; \
      echo model=$(cat /tmp/sysinfo/model 2>/dev/null | tr ' ' '-')"
@@ -867,19 +868,6 @@ pub async fn router_host_key(app: AppHandle, host: String) -> Option<String> {
     fingerprint
 }
 
-/// Pins (or, with None, unpins) the router expected at an address.
-#[tauri::command]
-pub fn router_pin(host: String, fingerprint: Option<String>) {
-    let mut pins = PINS.lock().unwrap();
-    match fingerprint {
-        Some(fingerprint) if !fingerprint.is_empty() => {
-            pins.insert(host, fingerprint);
-        }
-        _ => {
-            pins.remove(&host);
-        }
-    }
-}
 
 /// Returns the host key the router showed, to pin it for this link.
 async fn pair(app: &AppHandle, host: String, user: String, password: String) -> Result<Option<String>, String> {
@@ -990,6 +978,9 @@ async fn install(
     let app = app.clone();
     validate_slots(&servers)?;
     for server in &servers {
+        server.server.validate()?;
+    }
+    for server in &servers {
         log(
             &app,
             "info",
@@ -1038,15 +1029,7 @@ async fn install(
             ),
         );
     }
-    if !needed.is_empty() {
-        let free_kb: u64 = fact("free_kb").parse().unwrap_or(0);
-        if free_kb < REQUIRED_FREE_KB {
-            return Err(format!(
-                "not enough space on the router: {} MB free",
-                free_kb / 1024
-            ));
-        }
-    }
+    let free_kb: u64 = fact("free_kb").parse().unwrap_or(0);
 
     // Everything is downloaded before the running VPN is touched: a failed
     // download leaves the router as it was.
@@ -1055,6 +1038,7 @@ async fn install(
         progress(&app, &format!("download:{}", binary.name));
         downloads.push((*binary, fetch_binary(&app, binary).await?));
     }
+    check_space(free_kb, &downloads)?;
 
     // Nothing is stopped while files go up (each one replaced in one step):
     // a cut-off install leaves a running VPN as it was. The agent there, to
@@ -1107,6 +1091,11 @@ async fn install(
         .cloned()
         .unwrap_or_default()
         .to_ascii_uppercase();
+    // The router's id in the account comes from this MAC: without one every
+    // such router would get the same id (and mark).
+    if mac.len() != 17 {
+        return Err("could not read the router's LAN MAC address".into());
+    }
     let hwid = uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_OID,
         format!("tobevpn-router:{mac}").as_bytes(),
@@ -1128,7 +1117,10 @@ async fn install(
         ),
         shell_quote_inner(&model),
     );
-    if agent_version(&agent_on_router) <= agent_version(AGENT_SCRIPT) {
+    // The agent and its hooks come together: a newer agent from the phone
+    // app keeps its own hooks and init script too.
+    let write_agent = agent_version(&agent_on_router) <= agent_version(AGENT_SCRIPT);
+    if write_agent {
         session
             .write_file(
                 "/opt/tobevpn/tobevpn-router.sh",
@@ -1163,16 +1155,18 @@ async fn install(
             None,
         )
         .await?;
-    session
-        .write_file(
-            "/etc/hotplug.d/dhcp/90-tobevpn",
-            DHCP_HOOK.as_bytes(),
-            "755",
-        )
-        .await?;
-    session
-        .write_file("/etc/init.d/tobevpn", INIT_SCRIPT.as_bytes(), "755")
-        .await?;
+    if write_agent {
+        session
+            .write_file(
+                "/etc/hotplug.d/dhcp/90-tobevpn",
+                DHCP_HOOK.as_bytes(),
+                "755",
+            )
+            .await?;
+        session
+            .write_file("/etc/init.d/tobevpn", INIT_SCRIPT.as_bytes(), "755")
+            .await?;
+    }
     session
         .run_ok(
             if autostart {
@@ -1346,30 +1340,43 @@ async fn upload_binaries(
     Ok(())
 }
 
+/// Free space where ToBeVPN lives: the overlay on OpenWrt, the root
+/// filesystem on images without one (ext4 on a Raspberry Pi).
+const FREE_KB_COMMAND: &str = "{ df -k /overlay 2>/dev/null || df -k /; } | awk 'NR==2{print $4}'";
+/// Kept free besides the new files.
+const SPACE_MARGIN_KB: u64 = 4 * 1024;
+
+/// Room for the files about to go up: each lands next to the running one
+/// (which keeps its space until the restart), so the new files' size plus a
+/// margin, not a fixed amount (a hev-only update needs little).
+fn check_space<T>(free_kb: u64, downloads: &[(T, Vec<u8>)]) -> Result<(), String> {
+    if downloads.is_empty() {
+        return Ok(());
+    }
+    let needed_kb = downloads.iter().map(|(_, content)| content.len() as u64).sum::<u64>() / 1024 + SPACE_MARGIN_KB;
+    if free_kb < needed_kb {
+        return Err(format!("not enough space on the router: {} MB free", free_kb / 1024));
+    }
+    Ok(())
+}
+
 async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&str>) -> Result<RouterStatus, String> {
     progress(app, "connect");
     let session = open(app, host, user, fingerprint).await?;
     progress(app, "check");
     let (needed, _, agent_outdated, sites) = outdated_components(app, &session).await?;
-    if !needed.is_empty() {
-        let free_kb: u64 = session
-            .run_ok("df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'", None)
-            .await?
-            .trim()
-            .parse()
-            .unwrap_or(0);
-        if free_kb < REQUIRED_FREE_KB {
-            return Err(format!(
-                "not enough space on the router: {} MB free",
-                free_kb / 1024
-            ));
-        }
-    }
+    let free_kb: u64 = session
+        .run_ok(FREE_KB_COMMAND, None)
+        .await?
+        .trim()
+        .parse()
+        .unwrap_or(0);
     let mut downloads = Vec::new();
     for binary in &needed {
         progress(app, &format!("download:{}", binary.name));
         downloads.push((binary, fetch_binary(app, binary).await?));
     }
+    check_space(free_kb, &downloads)?;
 
     progress(app, "configure");
     upload_binaries(app, &session, downloads).await?;
@@ -1515,6 +1522,8 @@ pub struct RouterSlot {
     pub slot: u8,
     pub server_id: String,
     pub server_name: String,
+    /// Fingerprint of the credentials written for it; None when not known (older apps).
+    pub key: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -1765,36 +1774,12 @@ fn parse_traffic(text: &str) -> Vec<TrafficHour> {
         .collect()
 }
 
-/// Mode for devices without their own choice: "vpn" or "direct".
-#[tauri::command]
-pub async fn router_set_default_mode(
-    app: AppHandle,
-    host: String,
-    user: String,
-    fingerprint: Option<String>,
-    mode: String,
-) -> Result<RouterStatus, String> {
-    if !matches!(mode.as_str(), "vpn" | "direct") {
-        return Err("invalid mode".into());
-    }
-    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
-    session
-        .run_ok(
-            &format!("/opt/tobevpn/tobevpn-router.sh set-default {mode}"),
-            None,
-        )
-        .await?;
-    let (output, _) = session
-        .run("/opt/tobevpn/tobevpn-router.sh status", None)
-        .await?;
-    Ok(parse_status(&output))
-}
 
 fn parse_slots(text: &str) -> Vec<RouterSlot> {
     text.lines()
         .filter_map(|line| line.strip_prefix("slot="))
         .filter_map(|line| {
-            let mut fields = line.splitn(3, '|');
+            let mut fields = line.splitn(4, '|');
             let slot = fields
                 .next()?
                 .parse::<u8>()
@@ -1804,6 +1789,10 @@ fn parse_slots(text: &str) -> Vec<RouterSlot> {
                 slot,
                 server_id: fields.next()?.to_string(),
                 server_name: fields.next().unwrap_or_default().to_string(),
+                key: fields
+                    .next()
+                    .map(|key| key.trim().to_string())
+                    .filter(|key| !key.is_empty()),
             })
         })
         .collect()
@@ -1835,7 +1824,13 @@ fn parse_devices(text: &str) -> Vec<RouterDevice> {
             })
         })
         .collect();
-    devices.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| a.ip.cmp(&b.ip)));
+    // By address as numbers (…1.2 before …1.10), devices without one last.
+    let ip_key = |ip: &Option<String>| {
+        ip.as_deref()
+            .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+            .map_or(u32::MAX, u32::from)
+    };
+    devices.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| ip_key(&a.ip).cmp(&ip_key(&b.ip))));
     devices
 }
 
@@ -1851,6 +1846,11 @@ pub async fn router_set_servers(
     server_hosts: Vec<String>,
 ) -> Result<RouterStatus, String> {
     validate_slots(&servers)?;
+    // The same checks the app's own connection makes: a profile Xray cannot
+    // use must not take the whole home's VPN down.
+    for server in &servers {
+        server.server.validate()?;
+    }
     let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     session
         .write_file(
@@ -1863,7 +1863,7 @@ pub async fn router_set_servers(
     session
         // Applied by a restart only when the VPN runs: a VPN the owner
         // stopped stays stopped (the new config is used at its next start).
-        .run_ok("if pidof xray >/dev/null; then /opt/tobevpn/tobevpn-router.sh restart; fi; true", None)
+        .run_ok(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -1878,6 +1878,94 @@ pub struct SlotServer {
     pub id: String,
     pub name: String,
     pub server: ServerConfig,
+}
+
+/// A fingerprint of what a server's tunnel logs in with (the account's user
+/// id, the address and port), as the phone app computes it: when the
+/// account's link is reset these change, and an app sees from the router's
+/// slots that its servers must be written again.
+fn credential_key(server: &ServerConfig) -> String {
+    sha256_hex(format!("{}|{}|{}", server.uuid, server.address, server.port).as_bytes())[..16].to_string()
+}
+
+/// The router's servers written again when the account's credentials for
+/// them changed (its link was reset, a server moved): the router would
+/// otherwise keep logging in with the old ones and quietly send the home
+/// direct. `servers` are the router's own slots with this app's current
+/// profiles; None when every slot is up to date.
+#[tauri::command]
+pub async fn router_refresh_credentials(
+    app: AppHandle,
+    host: String,
+    user: String,
+    fingerprint: Option<String>,
+    servers: Vec<SlotServer>,
+    server_hosts: Vec<String>,
+    subscription_url: Option<String>,
+) -> Result<Option<RouterStatus>, String> {
+    validate_slots(&servers)?;
+    for server in &servers {
+        server.server.validate()?;
+    }
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh devices", None)
+        .await?;
+    let slots = parse_slots(&output);
+    // Only the very slots the router has, each with the same server.
+    let same_slots = slots.len() == servers.len()
+        && servers.iter().all(|server| {
+            slots
+                .iter()
+                .any(|slot| slot.slot == server.slot && slot.server_id == server.id)
+        });
+    if !same_slots {
+        return Ok(None);
+    }
+    let stale = servers.iter().any(|server| {
+        let key = credential_key(&server.server);
+        slots
+            .iter()
+            .find(|slot| slot.slot == server.slot)
+            .map_or(true, |slot| slot.key.as_deref() != Some(key.as_str()))
+    });
+    if !stale {
+        return Ok(None);
+    }
+    session
+        .write_file(
+            "/opt/tobevpn/servers",
+            server_list(&server_hosts).as_bytes(),
+            "644",
+        )
+        .await?;
+    write_servers(&app, &session, &servers).await?;
+    if let Some(url) = subscription_url.filter(|url| !url.trim().is_empty()) {
+        let (conf, _) = session
+            .run("cat /opt/tobevpn/subscription.conf 2>/dev/null", None)
+            .await?;
+        if !conf.trim().is_empty() {
+            let line = format!("SUB_URL='{}'", shell_quote_inner(&url));
+            let next: String = conf
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|old| if old.starts_with("SUB_URL=") { line.as_str() } else { old })
+                .map(|line| format!("{line}\n"))
+                .collect();
+            if next != conf {
+                session
+                    .write_file("/opt/tobevpn/subscription.conf", next.as_bytes(), "600")
+                    .await?;
+            }
+        }
+    }
+    session
+        .run_ok(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
+        .await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh status", None)
+        .await?;
+    Ok(Some(parse_status(&output)))
 }
 
 fn validate_slots(servers: &[SlotServer]) -> Result<(), String> {
@@ -1955,10 +2043,11 @@ async fn write_servers(
         .iter()
         .map(|server| {
             format!(
-                "{}\t{}\t{}\n",
+                "{}\t{}\t{}\t{}\n",
                 server.slot,
                 clean(&server.id),
-                clean(&server.name)
+                clean(&server.name),
+                credential_key(&server.server)
             )
         })
         .collect();
@@ -2201,7 +2290,7 @@ pub async fn router_set_ru_direct(
     session
         // Applied by a restart only when the VPN runs: a VPN the owner
         // stopped stays stopped (the new config is used at its next start).
-        .run_ok("if pidof xray >/dev/null; then /opt/tobevpn/tobevpn-router.sh restart; fi; true", None)
+        .run_ok(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -2737,6 +2826,18 @@ mod tests {
     }
 
     #[test]
+    fn credential_key_matches_the_phone_app() {
+        // The phone computes the same: sha256("uuid|address|port"), first 16 hex.
+        let server: ServerConfig = serde_json::from_value(serde_json::json!({
+            "address": "de.example.com",
+            "port": 443,
+            "uuid": "uuid-1",
+        }))
+        .unwrap();
+        assert_eq!(credential_key(&server), "28ae8b0d2adbc151");
+    }
+
+    #[test]
     fn parses_device_lines() {
         let devices = parse_devices(
             "device=52:e1:c9:b5:1a:c8|192.168.1.107|Pixel-10-Pro|direct|Телефон|1|2\n\
@@ -2745,17 +2846,19 @@ mod tests {
         assert_eq!(devices[0].slot, 2);
         assert_eq!(devices[1].slot, 0);
         assert_eq!(
-            parse_slots("slot=0|de2|Германия 2\nslot=9|x|y\nslot=2|nl2|Нидерланды 2\n"),
+            parse_slots("slot=0|de2|Германия 2|0123456789abcdef\nslot=9|x|y\nslot=2|nl2|Нидерланды 2\n"),
             vec![
                 RouterSlot {
                     slot: 0,
                     server_id: "de2".into(),
-                    server_name: "Германия 2".into()
+                    server_name: "Германия 2".into(),
+                    key: Some("0123456789abcdef".into()),
                 },
                 RouterSlot {
                     slot: 2,
                     server_id: "nl2".into(),
-                    server_name: "Нидерланды 2".into()
+                    server_name: "Нидерланды 2".into(),
+                    key: None,
                 },
             ]
         );

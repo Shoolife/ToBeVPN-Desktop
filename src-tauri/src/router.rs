@@ -223,8 +223,11 @@ pub async fn lan_device_names(local_ip: String) -> std::collections::HashMap<Str
         .await
         .unwrap_or_default();
     let interface = default_gateway().and_then(|(_, interface)| interface);
+    // A device answers ssdp:all once per service, mostly with the same
+    // description: each one is fetched once, never again for every answer.
+    let mut tried = std::collections::HashSet::new();
     for (ip, location) in answers {
-        if names.contains_key(&ip.to_string()) {
+        if names.contains_key(&ip.to_string()) || !tried.insert((ip, location.clone())) {
             continue;
         }
         let Some((port, path)) = location_on(&location, ip) else {

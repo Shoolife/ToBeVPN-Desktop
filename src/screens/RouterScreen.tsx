@@ -66,6 +66,7 @@ import {
   type RouterStatus,
   type SlotServer,
   routerDeviceSlot,
+  refreshRouterCredentials,
 } from "../session/router";
 import "./DevicesScreen.css";
 import "./RouterScreen.css";
@@ -408,6 +409,21 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setLostAccess(accessLost);
     setLoading(false);
     setRefreshing(false);
+    // After the account's link was reset the router still logs in with the
+    // old credentials: its servers are written again, quietly, once seen.
+    if (currentLink && nextStatus?.installed && nextNetwork) {
+      const list = nextNetwork.slots.map((slot) => {
+        const server = nextServers.find((candidate) => candidate.id === slot.serverId);
+        return server ? slotServer(slot.slot, server) : null;
+      });
+      if (list.every((item): item is SlotServer => item !== null)) {
+        void refreshRouterCredentials(currentLink, nextNetwork, list)
+          .then((next) => {
+            if (next && generation === generationRef.current) setStatus(next);
+          })
+          .catch(() => undefined);
+      }
+    }
   };
 
   // The server list can arrive (or change, after the subscription link was
