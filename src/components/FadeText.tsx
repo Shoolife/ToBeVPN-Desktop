@@ -5,9 +5,11 @@ import "./FadeText.css";
  * switching at once, as on the phone. Keyed by the text: a new text is a new
  * element that plays the fade.
  */
-export default function FadeText({ text }: { text: string }) {
+export default function FadeText({ text, fadeKey }: { text: string; fadeKey?: string }) {
+  // A live value (traffic counted each second) passes what it belongs to (the
+  // period): it then changes in place and fades only when that changes.
   return (
-    <span key={text} className="fade-text">
+    <span key={fadeKey ?? text} className="fade-text">
       {text}
     </span>
   );

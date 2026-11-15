@@ -199,16 +199,16 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
               <div className="stats-hero__sublabel">{t("stats_your_stats")}</div>
             </div>
           </div>
-          <div className={`stats-hero__total ${withRouter ? "stats-hero__total--split" : ""}`}><FadeText text={formatBytes(totalBytes)} /></div>
+          <div className={`stats-hero__total ${withRouter ? "stats-hero__total--split" : ""}`}><FadeText fadeKey={period} text={formatBytes(totalBytes)} /></div>
           {withRouter && (
             <div className="stats-hero__split">
               <span className="stats-hero__split-item">
                 <span className="stats-legend__dot" />
-                <FadeText text={`${t("stats_this_computer")} ${formatBytes(computerBytes)}`} />
+                <FadeText fadeKey={period} text={`${t("stats_this_computer")} ${formatBytes(computerBytes)}`} />
               </span>
               <span className="stats-hero__split-item">
                 <span className="stats-legend__dot stats-legend__dot--router" />
-                <FadeText text={`${t("stats_router_title")} ${formatBytes(routerTotal)}`} />
+                <FadeText fadeKey={period} text={`${t("stats_router_title")} ${formatBytes(routerTotal)}`} />
               </span>
             </div>
           )}
@@ -219,7 +219,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 <line x1="12" y1="8" x2="12" y2="16" />
                 <line x1="8" y1="12" x2="16" y2="12" />
               </svg>
-              <span className="stats-hero__metric-value"><FadeText text={String(totalSessions)} /></span>
+              <span className="stats-hero__metric-value"><FadeText fadeKey={period} text={String(totalSessions)} /></span>
               <span className="stats-hero__metric-label">{t("stats_metric_sessions")}</span>
             </div>
             <div className="stats-hero__divider" />
@@ -228,7 +228,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 <circle cx="12" cy="12" r="10" />
                 <polyline points="12 6 12 12 16 14" />
               </svg>
-              <span className="stats-hero__metric-value"><FadeText text={formatTime(totalSeconds)} /></span>
+              <span className="stats-hero__metric-value"><FadeText fadeKey={period} text={formatTime(totalSeconds)} /></span>
               <span className="stats-hero__metric-label">{t("stats_metric_time")}</span>
             </div>
             <div className="stats-hero__divider" />
@@ -236,7 +236,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
               <svg className="stats-hero__metric-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
               </svg>
-              <span className="stats-hero__metric-value"><FadeText text={formatBytes(avgPerSession)} /></span>
+              <span className="stats-hero__metric-value"><FadeText fadeKey={period} text={formatBytes(avgPerSession)} /></span>
               <span className="stats-hero__metric-label">{t("stats_metric_avg")}</span>
             </div>
           </div>

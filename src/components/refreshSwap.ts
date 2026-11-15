@@ -60,6 +60,9 @@ export function useRefreshSwap(refreshing: boolean): { refreshing: boolean; styl
     refreshing: shown,
     style: {
       ["--refresh-swap-cover" as string]: visible ? 0 : LOW_COVER,
+      // What is fading out cannot be clicked: an action there would race the
+      // load that replaces it.
+      pointerEvents: visible ? undefined : "none",
       ["--refresh-swap-transition" as string]: visible
         ? `opacity ${FADE_IN_MS}ms ${EASING}`
         : `opacity ${FADE_OUT_MS}ms ${EASING}`,

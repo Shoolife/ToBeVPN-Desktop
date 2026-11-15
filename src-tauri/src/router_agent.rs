@@ -358,7 +358,7 @@ const MIN_FREE_MEMORY_KB: u64 = 64 * 1024;
 
 /// What the install needs to know about a router, as shell lines.
 fn base_facts_command() -> String {
-    "echo arch=$(uname -m); echo free_kb=$({ df -k /overlay 2>/dev/null || df -k /; } | awk 'NR==2{print $4}'); \
+    "echo arch=$(uname -m); echo free_kb=$(f=$(df -k /overlay 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}'); [ -n \"$f\" ] || f=$(df -k / 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}'); echo \"$f\"); \
      echo tun=$([ -c /dev/net/tun ] || grep -qw tun /proc/modules && echo 1 || echo 0); \
      echo pkg=$(command -v apk >/dev/null || command -v opkg >/dev/null && echo 1 || echo 0); \
      echo curl=$(command -v curl >/dev/null && echo 1 || echo 0); \
@@ -1030,6 +1030,11 @@ async fn install(
         );
     }
     let free_kb: u64 = fact("free_kb").parse().unwrap_or(0);
+    // Before anything is changed on the router: its id in the account comes
+    // from this MAC, and without one every such router would get the same id.
+    if fact("mac").trim().len() != 17 {
+        return Err("could not read the router's LAN MAC address".into());
+    }
 
     // Everything is downloaded before the running VPN is touched: a failed
     // download leaves the router as it was.
@@ -1091,11 +1096,7 @@ async fn install(
         .cloned()
         .unwrap_or_default()
         .to_ascii_uppercase();
-    // The router's id in the account comes from this MAC: without one every
-    // such router would get the same id (and mark).
-    if mac.len() != 17 {
-        return Err("could not read the router's LAN MAC address".into());
-    }
+
     let hwid = uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_OID,
         format!("tobevpn-router:{mac}").as_bytes(),
@@ -1342,7 +1343,8 @@ async fn upload_binaries(
 
 /// Free space where ToBeVPN lives: the overlay on OpenWrt, the root
 /// filesystem on images without one (ext4 on a Raspberry Pi).
-const FREE_KB_COMMAND: &str = "{ df -k /overlay 2>/dev/null || df -k /; } | awk 'NR==2{print $4}'";
+const FREE_KB_COMMAND: &str = "f=$(df -k /overlay 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}'); \
+     [ -n \"$f\" ] || f=$(df -k / 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}'); echo \"$f\"";
 /// Kept free besides the new files.
 const SPACE_MARGIN_KB: u64 = 4 * 1024;
 
@@ -1863,7 +1865,9 @@ pub async fn router_set_servers(
     session
         // Applied by a restart only when the VPN runs: a VPN the owner
         // stopped stays stopped (the new config is used at its next start).
-        .run_ok(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
+        // The new files are on the router either way: a start that fails
+        // shows in the status (failed), not as a change that did not happen.
+        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -1902,6 +1906,7 @@ pub async fn router_refresh_credentials(
     servers: Vec<SlotServer>,
     server_hosts: Vec<String>,
     subscription_url: Option<String>,
+    write: bool,
 ) -> Result<Option<RouterStatus>, String> {
     validate_slots(&servers)?;
     for server in &servers {
@@ -1922,15 +1927,39 @@ pub async fn router_refresh_credentials(
     if !same_slots {
         return Ok(None);
     }
-    let stale = servers.iter().any(|server| {
+    // Another subscription link on the router (the account's link was
+    // reset), or a written key that differs (a server moved). A slot written
+    // by an older app has no key: alone that is no difference, so nothing is
+    // restarted for it.
+    let (router_sub, _) = session
+        .run(
+            "sed -n \"s/^SUB_URL='\\(.*\\)'$/\\1/p\" /opt/tobevpn/subscription.conf 2>/dev/null",
+            None,
+        )
+        .await?;
+    let router_sub = router_sub.trim();
+    let link_changed = !router_sub.is_empty()
+        && subscription_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty() && url.trim() != router_sub);
+    let key_changed = servers.iter().any(|server| {
         let key = credential_key(&server.server);
         slots
             .iter()
             .find(|slot| slot.slot == server.slot)
-            .map_or(true, |slot| slot.key.as_deref() != Some(key.as_str()))
+            .and_then(|slot| slot.key.as_deref())
+            .is_some_and(|written| written != key)
     });
-    if !stale {
+    if !(link_changed || key_changed) {
         return Ok(None);
+    }
+    // Only asked whether the router differs: the app first makes sure its
+    // own credentials are the fresh ones, then writes.
+    if !write {
+        let (output, _) = session
+            .run("/opt/tobevpn/tobevpn-router.sh status", None)
+            .await?;
+        return Ok(Some(parse_status(&output)));
     }
     session
         .write_file(
@@ -1960,7 +1989,9 @@ pub async fn router_refresh_credentials(
         }
     }
     session
-        .run_ok(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
+        // The new files are on the router either way: a start that fails
+        // shows in the status (failed), not as a change that did not happen.
+        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -2290,7 +2321,9 @@ pub async fn router_set_ru_direct(
     session
         // Applied by a restart only when the VPN runs: a VPN the owner
         // stopped stays stopped (the new config is used at its next start).
-        .run_ok(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
+        // The new files are on the router either way: a start that fails
+        // shows in the status (failed), not as a change that did not happen.
+        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)

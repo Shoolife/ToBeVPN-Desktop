@@ -884,6 +884,7 @@ export async function refreshRouterCredentials(
   link: RouterLink,
   network: RouterNetwork,
   servers: SlotServer[],
+  write: boolean,
 ): Promise<RouterStatus | null> {
   if (!network.slots.some((slot) => slot.slot === 0)) return null;
   if (servers.length !== network.slots.length) return null;
@@ -891,6 +892,7 @@ export async function refreshRouterCredentials(
     servers,
     serverHosts: accountServerHosts(),
     subscriptionUrl: accountSubscriptionUrl(),
+    write,
   });
 }
 

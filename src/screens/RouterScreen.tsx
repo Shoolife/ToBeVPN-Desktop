@@ -19,11 +19,12 @@ import ResetLinkOption from "../components/ResetLinkOption";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
 import "../components/SubscriptionSheet.css";
 import "../components/WhatsNewDialog.css";
-import { getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, type VpnServer } from "../session/auth";
+import { fetchVpnServers, getCachedVpnServers, isAvailableVpnServer, subscribeVpnServers, syncSubscription, type VpnServer } from "../session/auth";
 import { measureVpnServerPings } from "../session/serverQuality";
 import { serverProfileConfig } from "../session/vpn";
 import {
   accountHasRouterHere,
+  accountRouters,
   isLinkedRouterHere,
   identifyRouterHere,
   reconnectWithAppKey,
@@ -304,6 +305,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const refreshSwap = useRefreshSwap(refreshing);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  const statusRef = useRef<RouterStatus | null>(null);
+  const networkRef = useRef<RouterNetwork | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [step, setStep] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -316,6 +321,8 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   // Read again on every load: the server list may arrive after the screen opens.
   const [servers, setServers] = useState<VpnServer[]>(routableServers);
   const [network, setNetwork] = useState<RouterNetwork | null>(null);
+  statusRef.current = status;
+  networkRef.current = network;
   const [logLines, setLogLines] = useState<InstallLogLine[]>([]);
   const [logOpen, setLogOpen] = useState(false);
   const [pings, setPings] = useState<Map<string, number>>(new Map());
@@ -338,6 +345,48 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   // again with its password, and kept as it is if ToBeVPN runs on it.
   const [lostAccess, setLostAccess] = useState(false);
   const reconnect = installedByAnother || lostAccess;
+
+  /**
+   * The router's servers written again when it logs in differently from this
+   * app (another subscription link, a moved server). This app may be the
+   * stale side (the link was reset on another device), so its own
+   * subscription and servers are read anew first, and only this account's
+   * router is written to. Quiet, but the screen is busy while it writes.
+   */
+  const refreshCredentialsIfStale = async (
+    link: RouterLink,
+    network: RouterNetwork,
+    hwid: string | null,
+    generation: number,
+  ) => {
+    const slotsWith = (servers: VpnServer[]) => {
+      const list = network.slots.map((slot) => {
+        const server = servers.find((candidate) => candidate.id === slot.serverId);
+        return server ? slotServer(slot.slot, server) : null;
+      });
+      return list.every((item): item is SlotServer => item !== null) ? list : null;
+    };
+    try {
+      const first = slotsWith(routableServers());
+      if (!first || !(await refreshRouterCredentials(link, network, first, false))) return;
+      await syncSubscription({ force: true }).catch(() => undefined);
+      await fetchVpnServers().catch(() => []);
+      const fresh = slotsWith(routableServers());
+      if (!fresh || !hwid) return;
+      const routers = await accountRouters();
+      if (!routers.some((router) => router.id.toLowerCase() === hwid.toLowerCase())) return;
+      if (generation !== generationRef.current || busyRef.current) return;
+      setBusy(true);
+      try {
+        const next = await refreshRouterCredentials(link, network, fresh, true);
+        if (next && generation === generationRef.current) setStatus(next);
+      } finally {
+        setBusy(false);
+      }
+    } catch {
+      // Tried again at the next load.
+    }
+  };
 
   const load = async (refresh: boolean) => {
     const generation = ++generationRef.current;
@@ -379,6 +428,12 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
           // A lost key is not an error to show in red: the card below says
           // what to do (connect again with the password).
           if (!accessLost && generation === generationRef.current) setError(routerErrorText(statusError));
+          // The router did not answer this time (busy, slow SSH): what was
+          // known of it stays, never an install form over a running setup.
+          if (!accessLost && savedLink?.id === link?.id) {
+            nextStatus = statusRef.current;
+            nextNetwork = networkRef.current;
+          }
         }
       }
     }
@@ -412,17 +467,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     // After the account's link was reset the router still logs in with the
     // old credentials: its servers are written again, quietly, once seen.
     if (currentLink && nextStatus?.installed && nextNetwork) {
-      const list = nextNetwork.slots.map((slot) => {
-        const server = nextServers.find((candidate) => candidate.id === slot.serverId);
-        return server ? slotServer(slot.slot, server) : null;
-      });
-      if (list.every((item): item is SlotServer => item !== null)) {
-        void refreshRouterCredentials(currentLink, nextNetwork, list)
-          .then((next) => {
-            if (next && generation === generationRef.current) setStatus(next);
-          })
-          .catch(() => undefined);
-      }
+      void refreshCredentialsIfStale(currentLink, nextNetwork, nextStatus.hwid ?? null, generation);
     }
   };
 
@@ -1227,7 +1272,9 @@ function HomeNetwork({
       onError(
         message.includes("slots-full")
           ? tf("router_slots_full", limit, Math.round((status.memoryAvailableKb ?? 0) / 1024))
-          : routerErrorText(error),
+          : message.includes("server-missing")
+            ? t("router_error_server_missing")
+            : routerErrorText(error),
       );
     } finally {
       setSavingMac(null);
