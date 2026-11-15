@@ -1,4 +1,5 @@
 import { createPortal } from "react-dom";
+import FadeText from "../components/FadeText";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { formatDecimal, t, tf, type StringKey } from "../i18n";
@@ -615,19 +616,18 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                     setRenaming(true);
                   }}
                 >
-                  <span className="router-device__label">{status?.name || info.model || t("router_title")}</span>
+                  <span className="router-device__label"><FadeText text={status?.name || info.model || t("router_title")} /></span>
                   <svg className="router-card__pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M12 20h9" />
                     <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
                   </svg>
                 </button>
               ) : (
-                <div className="devices-card__name">{detected ? info.model : t("router_not_detected")}</div>
+                <div className="devices-card__name"><FadeText text={detected && info.model ? info.model : t("router_not_detected")} /></div>
               )}
               {routerMeta(info) && (
                 <div className="devices-card__meta">
-                  {installed && status?.name && info.model ? `${info.model} · ` : ""}
-                  {routerMeta(info)}
+                  <FadeText text={`${installed && status?.name && info.model ? `${info.model} · ` : ""}${routerMeta(info)}`} />
                 </div>
               )}
             </div>

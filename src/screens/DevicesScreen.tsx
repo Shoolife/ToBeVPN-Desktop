@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import FadeText from "../components/FadeText";
 import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
 import { t, tf } from "../i18n";
 import { fetchDevices, getCurrentDeviceAliases, unlinkOtherDevice } from "../session/auth";
@@ -355,15 +356,33 @@ export default function DevicesScreen({
 
         {!isInitialLoading && (
           <>
-            {/* Current device */}
-            <div className="refresh-swap" style={refreshSwap.style}>{refreshSwap.refreshing ? (
-              currentDevice !== undefined && (
-                <>
-                  <div className="devices-section-title">{t("devices_this_device")}</div>
-                  <DeviceCardSkeleton action />
-                </>
-              )
-            ) : currentDevice && (
+            {/* This device, the routers and the next title swap together with
+                their placeholders (each section's title moves with them). */}
+            <div className="refresh-swap" style={refreshSwap.style}>
+            {refreshSwap.refreshing ? (
+              <>
+                {currentDevice !== undefined && (
+                  <>
+                    <div className="devices-section-title">{t("devices_this_device")}</div>
+                    <DeviceCardSkeleton action />
+                  </>
+                )}
+                {showRouter && (
+                  <>
+                    <div className="devices-section-title">
+                      {otherRouters.length + (router?.gateway ? 1 : 0) > 1
+                        ? t("router_section_title_many")
+                        : t("router_section_title")}
+                    </div>
+                    {Array.from({ length: otherRouters.length + (router?.gateway ? 1 : 0) }, (_, index) => (
+                      <DeviceCardSkeleton key={index} action />
+                    ))}
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+            {currentDevice && (
               <>
                 <div className="devices-section-title">{t("devices_this_device")}</div>
                 <div className="devices-card devices-card--current">
@@ -380,7 +399,7 @@ export default function DevicesScreen({
                   <span className="devices-card__badge">{t("devices_current_badge")}</span>
                 </div>
               </>
-            )}</div>
+            )}
 
             {showRouter && (
               <>
@@ -393,14 +412,17 @@ export default function DevicesScreen({
                   <button type="button" className="devices-card devices-card--router" onClick={onOpenRouter}>
                     <div className="devices-card__icon"><RouterIcon /></div>
                     <div className="devices-card__info">
-                      <div className="devices-card__name">{hereName}</div>
+                      <div className="devices-card__name"><FadeText text={hereName} /></div>
                       <div className="devices-card__meta">
-                        {linkedHere && routerLink?.name && router.model ? `${router.model} · ` : ""}
-                        {installedHere
-                          ? t("router_card_installed")
-                          : router.supported
-                            ? t("router_card_protect_home")
-                            : routerMeta(router)}
+                        <FadeText
+                          text={`${linkedHere && routerLink?.name && router.model ? `${router.model} · ` : ""}${
+                            installedHere
+                              ? t("router_card_installed")
+                              : router.supported
+                                ? t("router_card_protect_home")
+                                : routerMeta(router)
+                          }`}
+                        />
                       </div>
                     </div>
                     <svg className="devices-card__chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -437,8 +459,10 @@ export default function DevicesScreen({
                 ))}
               </>
             )}
-
+              </>
+            )}
             <div className="devices-section-title">{t("devices_other_devices")}</div>
+            </div>
           </>
         )}
       </div>
