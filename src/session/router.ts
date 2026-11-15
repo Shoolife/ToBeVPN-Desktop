@@ -289,10 +289,15 @@ export function getRouterLink(): RouterLink | null {
   const info = cached;
   if (!info?.gateway) return links[0] ?? null;
   const here = links.filter((link) => link.host === info.gateway);
-  // Several routers connected at this address: the one whose host key the
-  // address showed last (identifyRouterHere) — asked, not guessed.
-  if (here.length > 1 && scannedKey?.host === info.gateway) {
-    const byKey = here.find((link) => link.hostKey === scannedKey?.key);
+  // The router's own mark first (exact), then the host key the address
+  // showed a moment ago (identifyRouterHere), then a loose guess.
+  if (info.mark) {
+    const byMark = here.find((link) => link.mark === info.mark);
+    if (byMark) return byMark;
+  }
+  const scan = scannedKey;
+  if (scan && scan.host === info.gateway && Date.now() - scan.at < SCAN_VALID_MS) {
+    const byKey = here.find((link) => link.hostKey === scan.key);
     if (byKey) return byKey;
   }
   if (!info.mark) return here[0] ?? null;
@@ -304,7 +309,9 @@ export function getRouterLink(): RouterLink | null {
 
 export const ROUTER_CHANGED_EVENT = "tobevpn:router-changed";
 
-let scannedKey: { host: string; key: string } | null = null;
+let scannedKey: { host: string; key: string; at: number } | null = null;
+/** A scanned host key speaks for the address this long. */
+const SCAN_VALID_MS = 60_000;
 
 /**
  * With several routers connected at this network's address, asks the router
@@ -314,17 +321,34 @@ let scannedKey: { host: string; key: string } | null = null;
 export async function identifyRouterHere(info: RouterInfo | null): Promise<void> {
   const gateway = info?.gateway;
   if (!gateway) return;
-  const here = readLinks().filter((link) => link.host === gateway && link.hostKey);
-  if (here.length < 2) return;
+  let here = readLinks().filter((link) => link.host === gateway);
+  // Marks missing (dropped as outdated, never read) are computed first, so
+  // the router's own mark can pick its link.
+  const unmarked = here.filter((link) => link.hwid && !link.mark);
+  if (unmarked.length > 0) {
+    const marks = await routerMarks(unmarked.map((link) => link.hwid as string));
+    unmarked.forEach((link, index) => {
+      if (marks[index]) updateRouterLink(link, { mark: marks[index], markAlgo: MARK_ALGO });
+    });
+    here = readLinks().filter((link) => link.host === gateway);
+  }
+  const markMatches = !!info?.mark && here.some((link) => link.mark === info.mark);
+  // The host key is asked when the mark does not settle it: several routers
+  // at the address, or one whose mark is of another kind (an older agent).
+  const keyed = here.filter((link) => link.hostKey);
+  if (markMatches || keyed.length === 0 || (here.length < 2 && !info?.mark)) {
+    scannedKey = null;
+    return;
+  }
   const key = await invoke<string | null>("router_host_key", { host: gateway }).catch(() => null);
-  scannedKey = key ? { host: gateway, key } : null;
+  scannedKey = key ? { host: gateway, key, at: Date.now() } : null;
 }
 
 /**
  * Saves a connected router: its entry is replaced (or added first), and an
  * older entry of the same router (connected again) is dropped.
  */
-function saveRouterLink(link: RouterLink): void {
+function saveRouterLink(link: RouterLink): RouterLink {
   const entry: RouterLink = { ...link, id: link.id ?? newLinkId() };
   let links = readLinks().filter((item) => item.id !== entry.id);
   if (!entry.hwid) links = links.filter((item) => !(item.host === entry.host && !item.hwid));
@@ -347,6 +371,7 @@ function saveRouterLink(link: RouterLink): void {
       writeLinks(list);
     });
   }
+  return entry;
 }
 
 /** The saved entry of a link (a screen may hold an older copy of it). */
@@ -360,7 +385,10 @@ function storedLink(link: RouterLink): RouterLink {
  * a mark, a host key) is kept.
  */
 function updateRouterLink(link: RouterLink, patch: Partial<RouterLink>): void {
-  saveRouterLink({ ...storedLink(link), ...patch });
+  // A link forgotten meanwhile (removed on uninstall) is not brought back.
+  const stored = readLinks().find((item) => item.id && item.id === link.id);
+  if (!stored) return;
+  saveRouterLink({ ...stored, ...patch });
 }
 
 /** Forgets one connected router; the others stay. */
@@ -583,9 +611,9 @@ export async function reconnectWithAppKey(info: RouterInfo): Promise<RouterLink 
       const snapshot = await invoke<RouterSnapshot>("router_snapshot", { host, user, fingerprint: null });
       if (!snapshot.status.installed) return null;
       const link: RouterLink = { host, user, serverId: null, serverName: null, hostKey: snapshot.hostKey };
-      saveRouterLink(link);
-      remember(link, snapshot.status);
-      return storedLink(link);
+      const saved = saveRouterLink(link);
+      remember(saved, snapshot.status);
+      return saved;
     } catch {
       // Not this login, or the key is not on the router: the password then.
     }
@@ -609,8 +637,8 @@ export async function connectRouter(options: { host: string; user: string; passw
   const status = await invoke<RouterStatus>("router_status", { host, user, fingerprint: hostKey });
   if (status.installed) {
     const link: RouterLink = { host, user, serverId: null, serverName: null, hostKey };
-    saveRouterLink(link);
-    remember(link, status);
+    const saved = saveRouterLink(link);
+    remember(saved, status);
   }
   return status;
 }
@@ -686,8 +714,8 @@ export async function installRouter(options: {
     serverName: server.name,
     hostKey: pairedKeys.get(host) ?? null,
   };
-  saveRouterLink(link);
-  remember(link, status);
+  const saved = saveRouterLink(link);
+  remember(saved, status);
   return status;
 }
 

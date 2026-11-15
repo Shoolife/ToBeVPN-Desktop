@@ -66,9 +66,6 @@ struct Binary {
     /// app (the router's busybox has md5sum, not sha256sum). A newer GitHub
     /// release is checked by its download digest and compared by version.
     sha256: Option<&'static str>,
-    /// The pinned build's MD5, kept for reference: a different build on the
-    /// router is no longer replaced (it may be newer).
-    #[allow(dead_code)]
     md5: Option<&'static str>,
     /// Version, for binaries compared by version (Xray).
     version: Option<String>,
@@ -133,6 +130,9 @@ fn pinned_xray(arch: Arch) -> Binary {
 
 /// hev-socks5-tunnel; both builds are static, the ARMv7 one soft-float so
 /// it runs on any ARMv7 core.
+/// The hev-socks5-tunnel build this app installs (also in its download URL).
+const HEV_VERSION: &str = "2.19.2";
+
 fn hev_tunnel(arch: Arch) -> Binary {
     let (asset, sha256, md5) = match arch {
         Arch::Arm64 => (
@@ -149,7 +149,7 @@ fn hev_tunnel(arch: Arch) -> Binary {
     Binary {
         name: "hev-socks5-tunnel",
         url: format!(
-            "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.19.2/{asset}"
+            "https://github.com/heiher/hev-socks5-tunnel/releases/download/{HEV_VERSION}/{asset}"
         ),
         download_sha256: sha256.into(),
         zip_member: None,
@@ -506,7 +506,8 @@ fn component_facts_command(binaries: &[Binary]) -> String {
     command.push_str(
         // The version is written next to Xray on install and update; "xray
         // version" is only for routers set up before that.
-        "echo xray_version=$(cat /opt/tobevpn/xray.version 2>/dev/null || /opt/tobevpn/xray version 2>/dev/null | awk 'NR==1{print $2}'); ",
+        "echo xray_version=$(cat /opt/tobevpn/xray.version 2>/dev/null || /opt/tobevpn/xray version 2>/dev/null | awk 'NR==1{print $2}'); \
+         echo hev_version=$(cat /opt/tobevpn/hev.version 2>/dev/null); ",
     );
     command
 }
@@ -520,12 +521,19 @@ fn binary_outdated(binary: &Binary, facts: &HashMap<String, String>) -> bool {
             let current = version_tuple(current);
             current.is_empty() || current < version_tuple(target)
         }
-        // Without a version to compare, only a missing binary is replaced: a
-        // different one may be newer (put there by the phone app), and the two
-        // apps must not keep swapping each other's build.
-        None => facts
-            .get(&format!("md5_{}", binary.name))
-            .is_none_or(|md5| md5.is_empty()),
+        // hev: replaced when missing or older by the version written next
+        // to it (hev.version), never with an older build than the router
+        // has. A router from before that file: by the build's MD5.
+        None => {
+            let md5 = facts.get(&format!("md5_{}", binary.name)).map(String::as_str).unwrap_or("");
+            if md5.is_empty() {
+                return true;
+            }
+            match facts.get("hev_version").map(String::as_str).filter(|v| !v.is_empty()) {
+                Some(current) => version_tuple(current) < version_tuple(HEV_VERSION),
+                None => Some(md5) != binary.md5,
+            }
+        }
     }
 }
 
@@ -1104,6 +1112,15 @@ async fn install(
                 )
                 .await?;
         }
+        if binary.name == "hev-socks5-tunnel" {
+            session
+                .write_file(
+                    "/opt/tobevpn/hev.version",
+                    format!("{HEV_VERSION}\n").as_bytes(),
+                    "644",
+                )
+                .await?;
+        }
     }
 
     progress(&app, "configure");
@@ -1363,6 +1380,15 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
                 .write_file(
                     "/opt/tobevpn/xray.version",
                     format!("{version}\n").as_bytes(),
+                    "644",
+                )
+                .await?;
+        }
+        if binary.name == "hev-socks5-tunnel" {
+            session
+                .write_file(
+                    "/opt/tobevpn/hev.version",
+                    format!("{HEV_VERSION}\n").as_bytes(),
                     "644",
                 )
                 .await?;
@@ -2625,9 +2651,13 @@ mod tests {
             "7720e92733082f4920c511205bb115da".to_string(),
         );
         assert!(!binary_outdated(&hev_tunnel(Arch::Arm64), &facts));
-        // Another build (maybe newer, from the phone app) is kept; only a
-        // missing one is installed.
+        // Without hev.version: by MD5 (a router from before the file).
+        assert!(binary_outdated(&hev_tunnel(Arch::Armv7), &facts));
+        // A newer build named in hev.version is kept; an older one is not.
+        facts.insert("hev_version".to_string(), "2.20.0".to_string());
         assert!(!binary_outdated(&hev_tunnel(Arch::Armv7), &facts));
+        facts.insert("hev_version".to_string(), "2.19.1".to_string());
+        assert!(binary_outdated(&hev_tunnel(Arch::Armv7), &facts));
         facts.insert("md5_hev-socks5-tunnel".to_string(), String::new());
         assert!(binary_outdated(&hev_tunnel(Arch::Armv7), &facts));
         assert_eq!(Arch::from_uname("aarch64\n"), Some(Arch::Arm64));
