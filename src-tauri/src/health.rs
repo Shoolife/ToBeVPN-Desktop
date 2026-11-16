@@ -358,6 +358,15 @@ pub fn watch_webview(_window: &tauri::WebviewWindow) {}
 
 // ------------------------------------------------------------ signals ---
 
+/// Whether the process has a controlling terminal (started from a shell).
+#[cfg(unix)]
+fn has_controlling_terminal() -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open("/dev/tty")
+        .is_ok()
+}
+
 /// SIGTERM, SIGHUP and SIGINT (logout, `kill`, a terminal's Ctrl+C) are
 /// logged and turned into a normal exit, which also stops the VPN cleanly.
 #[cfg(unix)]
@@ -376,6 +385,14 @@ fn start_signal_watch(app: AppHandle) {
         .spawn(move || loop {
             std::thread::sleep(Duration::from_millis(300));
             let signal = SIGNAL.swap(0, Ordering::SeqCst);
+            // SIGHUP means "your terminal closed": only an app started from a
+            // terminal has one. Started from the menu it has none, and a
+            // SIGHUP then comes from elsewhere (seen on Astra Linux's Fly when
+            // its compositor is switched): the window stays.
+            if signal as libc::c_int == libc::SIGHUP && !has_controlling_terminal() {
+                log("W", "App-Health", "Received SIGHUP without a terminal; ignored");
+                continue;
+            }
             if signal != 0 {
                 let name = match signal as libc::c_int {
                     libc::SIGTERM => "SIGTERM",
