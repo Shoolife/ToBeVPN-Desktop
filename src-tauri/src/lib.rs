@@ -220,6 +220,28 @@ fn send_window_to_background(window: tauri::WebviewWindow) {
     }
 }
 
+/// Whether the desktop draws windows through a compositor, so a transparent
+/// window (rounded corners) is possible; always on outside Linux.
+#[tauri::command]
+fn window_composited(app: tauri::AppHandle) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(window) = app.get_webview_window("main") {
+            if let Ok(gtk_window) = window.gtk_window() {
+                if let Some(screen) = gtk::prelude::GtkWindowExt::screen(&gtk_window) {
+                    return screen.is_composited();
+                }
+            }
+        }
+        true
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        true
+    }
+}
+
 #[tauri::command]
 fn hide_main_window_to_tray(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -983,6 +1005,21 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // Without a compositor (Astra Linux's Fly has it off by default)
+            // no window can be transparent: the page draws a plain square
+            // window then, and switches when the compositor comes or goes.
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(gtk_window) = window.gtk_window() {
+                    if let Some(screen) = gtk::prelude::GtkWindowExt::screen(&gtk_window) {
+                        let handle = app.handle().clone();
+                        screen.connect_composited_changed(move |screen| {
+                            let _ = handle.emit("window-composited-changed", screen.is_composited());
+                        });
+                    }
+                }
+            }
+
             // Deep-link `tobevpn://open` handling: we deliberately do NOT use
             // tauri-plugin-deep-link. Its init() writes a user-level
             // ~/.local/share/applications/*-handler.desktop on Linux, which
@@ -1176,6 +1213,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            window_composited,
             notifications::show_system_notification,
             router::detect_router,
             router::router_marks,

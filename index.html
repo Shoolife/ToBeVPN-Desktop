@@ -49,6 +49,16 @@
         border-radius: 14px;
         overflow: hidden;
       }
+      /* No compositor (Astra Linux's Fly by default): a window cannot be
+         transparent, so it is square and opaque instead of showing dark
+         corners where the rounding would be. */
+      html[data-window-frame="desktop"][data-window-composited="false"],
+      html[data-window-frame="desktop"][data-window-composited="false"] body,
+      html[data-window-frame="desktop"][data-window-composited="false"] #window-clip,
+      html[data-window-frame="desktop"][data-window-composited="false"] #scale-frame {
+        background: var(--initial-bg);
+        border-radius: 0;
+      }
       /* The app is designed around 494x895, but the outer frame expands in
          unscaled CSS pixels so that after transform scaling it covers the
          whole native window. This avoids side gutters on short Windows

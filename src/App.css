@@ -218,6 +218,15 @@ html[data-window-frame="desktop"] #root {
   background: transparent;
 }
 
+/* No compositor: an opaque, square window (see index.html). */
+html[data-window-frame="desktop"][data-window-composited="false"],
+html[data-window-frame="desktop"][data-window-composited="false"] body,
+html[data-window-frame="desktop"][data-window-composited="false"] #window-clip,
+html[data-window-frame="desktop"][data-window-composited="false"] #scale-frame,
+html[data-window-frame="desktop"][data-window-composited="false"] #root {
+  background: var(--bg);
+}
+
 body {
   user-select: none;
   -webkit-user-select: none;

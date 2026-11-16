@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useSyncExternalStore, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import SplashScreen from "./screens/SplashScreen";
 import OnboardingScreen from "./screens/OnboardingScreen";
@@ -323,6 +324,23 @@ export default function App({
     if (useDesktopFrame) document.documentElement.dataset.windowFrame = "desktop";
     else delete document.documentElement.dataset.windowFrame;
   }, [useDesktopFrame]);
+
+  // Without a compositor (Astra Linux's Fly by default) the window cannot be
+  // transparent: it is drawn square and opaque then, with no dark corners,
+  // and rounds again as soon as a compositor is switched on.
+  useEffect(() => {
+    if (browserPreview) return;
+    const root = document.documentElement;
+    const apply = (composited: boolean) => {
+      if (composited) delete root.dataset.windowComposited;
+      else root.dataset.windowComposited = "false";
+    };
+    void invoke<boolean>("window_composited").then(apply).catch(() => undefined);
+    const unlisten = listen<boolean>("window-composited-changed", (event) => apply(event.payload));
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
 
   useEffect(() => {
     if (browserPreview) return;
