@@ -858,6 +858,12 @@ export default function App({
       const startedAt = performance.now();
       let lastWidth = Math.round(startWidth);
       let lastHeight = Math.round(startHeight);
+      // A fixed-size window on Linux gets new size hints from GTK at every
+      // step, and window managers such as Astra Linux's Fly answered a run of
+      // them by snapping the window to another size mid-animation. Resizable
+      // while it changes, fixed again once it has its size.
+      const unlockForResize = navigator.userAgent.toLowerCase().includes("linux") && resizeDistance > 1;
+      if (unlockForResize) await win.setResizable(true).catch(() => {});
 
       while (!cancelled && generation === interfaceScaleResizeGenerationRef.current) {
         const progress = resizeDistance <= 1 || durationMs === 0
@@ -896,6 +902,7 @@ export default function App({
         if (progress >= 1) break;
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       }
+      if (unlockForResize) await win.setResizable(false).catch(() => {});
       if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
 
       if (interfaceScaleRequest.centerAfterResize) {
