@@ -132,10 +132,11 @@ fn pinned_xray(arch: Arch) -> Binary {
 /// it runs on any ARMv7 core.
 /// The hev-socks5-tunnel build this app installs (also in its download URL).
 /// The VPN counts as on while its own core runs (never another package's
-/// xray: matched by the binary it runs) or its watchdog waits to bring it
-/// back (the failed state): a restart then keeps it on.
+/// xray: matched by the path it was started with, as the agent's own_pids)
+/// or its watchdog waits to bring it back (the failed state): a restart then
+/// keeps it on.
 const AGENT_RUNNING: &str =
-    "{ [ -n \"$(for p in $(pidof xray); do [ \"$(tr '\\0' '\\n' </proc/$p/cmdline 2>/dev/null | head -n 1)\" = /opt/tobevpn/xray ] && { echo $p; break; }; done)\" ] || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
+    "{ [ -n \"$(for p in $(pidof xray); do [ \"$({ tr '\\0' '\\n' </proc/$p/cmdline; } 2>/dev/null | head -n 1)\" = /opt/tobevpn/xray ] && { echo $p; break; }; done)\" ] || { [ -f /tmp/tobevpn/watch.pid ] && kill -0 \"$(cat /tmp/tobevpn/watch.pid)\" 2>/dev/null; }; }";
 /// Stop and start on the router, carried to its end there even if the
 /// connection drops (HUP ignored, output to a file): the home is never left
 /// with the VPN stopped halfway. Its output and exit code are the start's.
@@ -366,7 +367,7 @@ fn base_facts_command() -> String {
      echo installed=$([ -x /opt/tobevpn/xray ] && echo 1 || echo 0); \
      echo mem_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); \
      echo mem_available_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo); \
-     echo own_xray_kb=$(p=$(for p in $(pidof xray); do [ \"$(tr '\\0' '\\n' </proc/$p/cmdline 2>/dev/null | head -n 1)\" = /opt/tobevpn/xray ] && { echo $p; break; }; done); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
+     echo own_xray_kb=$(p=$(for p in $(pidof xray); do [ \"$({ tr '\\0' '\\n' </proc/$p/cmdline; } 2>/dev/null | head -n 1)\" = /opt/tobevpn/xray ] && { echo $p; break; }; done); [ -n \"$p\" ] && awk '/^VmRSS:/{print $2}' /proc/$p/status || echo 0); \
      echo mac=$(cat /sys/class/net/br-lan/address 2>/dev/null); \
      . /etc/openwrt_release 2>/dev/null; echo os=\"$DISTRIB_ID $DISTRIB_RELEASE\"; echo release=\"$DISTRIB_RELEASE\"; \
      echo model=$(cat /tmp/sysinfo/model 2>/dev/null | tr ' ' '-')"
