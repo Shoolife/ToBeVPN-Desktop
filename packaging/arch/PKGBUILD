@@ -1,0 +1,25 @@
+# Arch package of a ToBeVPN release, built from that release's .deb
+# (CI puts ToBeVPN_<version>_amd64.deb next to this file and runs makepkg).
+# The AUR package (packaging/aur) installs the very same files.
+pkgname=tobevpn-desktop
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="ToBeVPN desktop client"
+arch=('x86_64')
+url="https://github.com/Shoolife/ToBeVPN-Desktop"
+license=('custom')
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'polkit' 'iproute2' 'procps-ng' 'hicolor-icon-theme')
+optdepends=('xdg-utils: open tobevpn:// links with the app')
+options=('!strip' '!debug')
+install=tobevpn-desktop.install
+source=("ToBeVPN_${pkgver}_amd64.deb" "package.sh")
+sha256sums=('SKIP' 'SKIP')
+noextract=("ToBeVPN_${pkgver}_amd64.deb")
+
+package() {
+    mkdir -p deb
+    bsdtar -xf "ToBeVPN_${pkgver}_amd64.deb" -C deb
+    mkdir -p deb/root
+    bsdtar -xf deb/data.tar.* -C deb/root
+    bash ./package.sh deb/root "$pkgdir"
+}

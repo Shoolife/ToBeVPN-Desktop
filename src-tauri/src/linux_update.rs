@@ -9,8 +9,17 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 const UPDATE_HELPER: &str = "/usr/local/bin/tobevpn-update-helper.sh";
+/// The Arch package's helper (Arch packages may not use /usr/local).
+const ARCH_UPDATE_HELPER: &str = "/usr/lib/ToBeVPN/tobevpn-update-helper.sh";
 const UPDATE_ENDPOINT: &str =
     "https://github.com/Shoolife/ToBeVPN-Desktop/releases/latest/download/latest.json";
+/// The Arch packages of the same release, in a manifest of their own.
+const ARCH_UPDATE_ENDPOINT: &str =
+    "https://github.com/Shoolife/ToBeVPN-Desktop/releases/latest/download/latest-arch.json";
+/// The name of the Arch package from the releases; installed from the AUR
+/// (tobevpn-desktop-bin) the app is updated by the AUR helper instead.
+const ARCH_PACKAGE_NAME: &str = "tobevpn-desktop";
+const APP_BINARY: &str = "/usr/bin/tobevpn-desktop";
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_PACKAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -94,8 +103,22 @@ pub fn maybe_run_update_helper() -> bool {
 pub async fn install_latest_via_polkit(app: AppHandle, version: String) -> Result<(), String> {
     validate_version(&version)?;
 
+    // Installed from the AUR: its package is updated by the AUR helper, as
+    // every other one there (replacing it here would fight pacman).
+    if let PackageManager::Pacman(Some(name)) = installed_by() {
+        if name != ARCH_PACKAGE_NAME {
+            return Err(format!(
+                "ToBeVPN is installed from the AUR ({name}): update it with your AUR helper, e.g. `yay -Syu` or `paru -Syu`"
+            ));
+        }
+    }
+    let helper = if std::path::Path::new(ARCH_UPDATE_HELPER).is_file() {
+        ARCH_UPDATE_HELPER
+    } else {
+        UPDATE_HELPER
+    };
     let mut cmd = Command::new("pkexec");
-    cmd.arg(UPDATE_HELPER)
+    cmd.arg(helper)
         .arg("install-latest")
         .arg(&version)
         .stdin(Stdio::null())
@@ -156,14 +179,50 @@ pub async fn install_latest_via_polkit(app: AppHandle, version: String) -> Resul
     })
 }
 
+/// Which package manager installed the running app.
+enum PackageManager {
+    Dpkg,
+    /// The pacman package that owns the app (None when it cannot be told).
+    Pacman(Option<String>),
+}
+
+fn installed_by() -> PackageManager {
+    if !std::path::Path::new("/usr/bin/pacman").is_file() {
+        return PackageManager::Dpkg;
+    }
+    let owner = StdCommand::new("/usr/bin/pacman")
+        .args(["-Qqo", APP_BINARY])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|name| !name.is_empty());
+    match owner {
+        Some(name) => PackageManager::Pacman(Some(name)),
+        // pacman on the system, but the app is not its package (a .deb
+        // unpacked by hand, debtap): left to dpkg as before.
+        None if std::path::Path::new("/usr/bin/dpkg").is_file() => PackageManager::Dpkg,
+        None => PackageManager::Pacman(None),
+    }
+}
+
 fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
     validate_root()?;
     validate_version(expected_version)?;
+    let pacman = match installed_by() {
+        PackageManager::Dpkg => false,
+        PackageManager::Pacman(Some(name)) if name == ARCH_PACKAGE_NAME => true,
+        PackageManager::Pacman(Some(name)) => {
+            return Err(format!("ToBeVPN is installed from the AUR ({name}): update it with your AUR helper"))
+        }
+        PackageManager::Pacman(None) => return Err("the installed ToBeVPN package could not be identified".into()),
+    };
 
     let client = update_download::http_client()?;
 
     let manifest_response = client
-        .get(UPDATE_ENDPOINT)
+        .get(if pacman { ARCH_UPDATE_ENDPOINT } else { UPDATE_ENDPOINT })
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|e| format!("fetch update manifest: {e}"))?;
@@ -179,8 +238,8 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
         ));
     }
 
-    let platform = select_platform(&manifest)?;
-    validate_package_url(&platform.url, expected_version)?;
+    let platform = select_platform(&manifest, pacman)?;
+    validate_package_url(&platform.url, expected_version, pacman)?;
     let bytes = update_download::download(
         &client,
         &platform.url,
@@ -190,6 +249,9 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
     report_progress(format_args!("install"));
 
     update_download::verify_signature(&bytes, &platform.signature)?;
+    if pacman {
+        return install_pacman_package(&bytes, expected_version);
+    }
     if !infer::archive::is_deb(&bytes) {
         return Err("downloaded update is not a deb package".into());
     }
@@ -226,6 +288,66 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
     }
 }
 
+/// A signed Arch package of this release: written to a private temp dir,
+/// checked to be ToBeVPN of the expected version, then installed by pacman.
+fn install_pacman_package(bytes: &[u8], expected_version: &str) -> Result<(), String> {
+    // zstd frame magic: an Arch package (.pkg.tar.zst).
+    if !bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        return Err("downloaded update is not an Arch package".into());
+    }
+    let tmp_dir = tempfile::Builder::new()
+        .prefix("tobevpn_pkg_update")
+        .tempdir()
+        .map_err(|e| format!("create update temp dir: {e}"))?;
+    let pkg_path = tmp_dir.path().join("package.pkg.tar.zst");
+    std::fs::File::create(&pkg_path)
+        .and_then(|mut f| {
+            f.write_all(bytes)?;
+            f.sync_all()
+        })
+        .map_err(|e| format!("write update package: {e}"))?;
+
+    let info = StdCommand::new("/usr/bin/pacman")
+        .arg("-Qip")
+        .arg(&pkg_path)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("run pacman: {e}"))?;
+    if !info.status.success() {
+        return Err("pacman could not read the update package".into());
+    }
+    let text = String::from_utf8_lossy(&info.stdout);
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name)?.trim_start().strip_prefix(':'))
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default()
+    };
+    if field("Name") != ARCH_PACKAGE_NAME {
+        return Err(format!("unexpected package name: {}", field("Name")));
+    }
+    // "1.2.3-1": the release's version, then pacman's own package release.
+    let version = field("Version");
+    let upstream = version.rsplit_once('-').map_or(version.as_str(), |(upstream, _)| upstream);
+    if normalize_version(upstream) != normalize_version(expected_version) {
+        return Err(format!("package version mismatch: expected {expected_version}, got {version}"));
+    }
+
+    let output = StdCommand::new("/usr/bin/pacman")
+        .args(["-U", "--noconfirm", "--needed"])
+        .arg(&pkg_path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("run pacman: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() { format!("pacman failed: {}", output.status) } else { stderr })
+    }
+}
+
 fn read_limited_response(
     response: reqwest::blocking::Response,
     max_bytes: usize,
@@ -249,7 +371,7 @@ fn read_limited_response(
     Ok(bytes)
 }
 
-fn validate_package_url(value: &str, expected_version: &str) -> Result<(), String> {
+fn validate_package_url(value: &str, expected_version: &str, pacman: bool) -> Result<(), String> {
     let url = reqwest::Url::parse(value).map_err(|_| "invalid update package URL".to_string())?;
     let expected_prefix = format!(
         "/Shoolife/ToBeVPN-Desktop/releases/download/v{}/",
@@ -261,7 +383,7 @@ fn validate_package_url(value: &str, expected_version: &str) -> Result<(), Strin
         .unwrap_or_default();
     let valid_file_name = !file_name.is_empty()
         && !file_name.contains("..")
-        && file_name.ends_with(".deb")
+        && file_name.ends_with(if pacman { ".pkg.tar.zst" } else { ".deb" })
         && file_name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'));
@@ -280,12 +402,14 @@ fn validate_package_url(value: &str, expected_version: &str) -> Result<(), Strin
     Ok(())
 }
 
-fn select_platform(manifest: &UpdateManifest) -> Result<UpdatePlatform, String> {
+fn select_platform(manifest: &UpdateManifest, pacman: bool) -> Result<UpdatePlatform, String> {
     if let Some(platforms) = &manifest.platforms {
         let arch = std::env::consts::ARCH;
         let deb_target = format!("linux-{arch}-deb");
         let plain_target = format!("linux-{arch}");
-        for target in [&deb_target, &plain_target] {
+        let pacman_target = format!("linux-{arch}-pacman");
+        let targets: Vec<&String> = if pacman { vec![&pacman_target] } else { vec![&deb_target, &plain_target] };
+        for target in targets {
             if let Some(platform) = platforms.get(target.as_str()) {
                 return Ok(UpdatePlatform {
                     url: platform.url.clone(),
@@ -293,7 +417,10 @@ fn select_platform(manifest: &UpdateManifest) -> Result<UpdatePlatform, String> 
                 });
             }
         }
-        return Err(format!("no Linux deb update for architecture {arch}"));
+        return Err(format!(
+            "no Linux {} update for architecture {arch}",
+            if pacman { "Arch" } else { "deb" }
+        ));
     }
 
     match (&manifest.url, &manifest.signature) {
@@ -369,26 +496,47 @@ mod tests {
         assert!(validate_package_url(
             "https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v1.2.3/ToBeVPN_1.2.3_amd64.deb",
             "1.2.3",
+            false,
         )
         .is_ok());
         assert!(validate_package_url(
             "https://example.com/Shoolife/ToBeVPN-Desktop/releases/download/v1.2.3/app.deb",
             "1.2.3",
+            false,
         )
         .is_err());
         assert!(validate_package_url(
             "https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v9.9.9/app.deb",
             "1.2.3",
+            false,
         )
         .is_err());
         assert!(validate_package_url(
             "https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v1.2.3/subdir/app.deb",
             "1.2.3",
+            false,
         )
         .is_err());
         assert!(validate_package_url(
             "https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v1.2.3/app.deb?raw=1",
             "1.2.3",
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn arch_package_url_must_be_an_arch_package_of_the_release() {
+        assert!(validate_package_url(
+            "https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v1.2.3/tobevpn-desktop-1.2.3-1-x86_64.pkg.tar.zst",
+            "1.2.3",
+            true,
+        )
+        .is_ok());
+        assert!(validate_package_url(
+            "https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v1.2.3/ToBeVPN_1.2.3_amd64.deb",
+            "1.2.3",
+            true,
         )
         .is_err());
     }

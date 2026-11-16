@@ -40,6 +40,28 @@ const STATS_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 // Path of the installed polkit helper. When present, pkexec invocations match
 // the app.tobevpn.network policy and run without repeated password prompts.
 const POLKIT_HELPER: &str = "/usr/local/bin/tobevpn-helper.sh";
+/// The Arch package's helpers: Arch packages may not use /usr/local, so they
+/// live next to the app's other files (its policies name these paths).
+const ARCH_POLKIT_HELPER: &str = "/usr/lib/ToBeVPN/tobevpn-helper.sh";
+const ARCH_UPDATE_HELPER: &str = "/usr/lib/ToBeVPN/tobevpn-update-helper.sh";
+
+/// The installed network helper: the Arch package's when it is there, else
+/// the Debian package's (or the one installed on first connect).
+fn polkit_helper() -> &'static str {
+    if Path::new(ARCH_POLKIT_HELPER).is_file() {
+        ARCH_POLKIT_HELPER
+    } else {
+        POLKIT_HELPER
+    }
+}
+
+fn update_helper() -> &'static str {
+    if Path::new(ARCH_UPDATE_HELPER).is_file() {
+        ARCH_UPDATE_HELPER
+    } else {
+        UPDATE_HELPER
+    }
+}
 const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.network.policy";
 const UPDATE_HELPER: &str = "/usr/local/bin/tobevpn-update-helper.sh";
 const UPDATE_POLICY: &str = "/usr/share/polkit-1/actions/app.tobevpn.update.policy";
@@ -252,9 +274,9 @@ impl VpnManager {
         }
         eprintln!("[VPN] Preparing {} direct ping routes", unique_ips.len());
 
-        if Path::new(POLKIT_HELPER).exists() {
+        if Path::new(polkit_helper()).exists() {
             let mut cmd = Command::new("pkexec");
-            cmd.arg(POLKIT_HELPER).arg("bypass");
+            cmd.arg(polkit_helper()).arg("bypass");
             for ip in &unique_ips {
                 cmd.arg(ip);
             }
@@ -984,11 +1006,11 @@ echo "OK"
         let installed_tun2socks = PathBuf::from("/usr/bin/tun2socks");
         let use_installed_sidecar_for_dev = is_dev_build
             && Self::is_trusted_root_executable(&installed_tun2socks)
-            && Self::is_trusted_root_executable(Path::new(POLKIT_HELPER))
+            && Self::is_trusted_root_executable(Path::new(polkit_helper()))
             && std::fs::read_to_string(POLKIT_POLICY)
                 .map(|policy| {
                     policy.contains("<allow_active>yes</allow_active>")
-                        && policy.contains(POLKIT_HELPER)
+                        && policy.contains(polkit_helper())
                 })
                 .unwrap_or(false);
         if use_installed_sidecar_for_dev {
@@ -1020,8 +1042,8 @@ echo "OK"
             }
 
             // Prefer the installed polkit helper — passwordless via app.tobevpn.network policy.
-            if std::path::Path::new(POLKIT_HELPER).exists() {
-                eprintln!("[TUN] Using polkit helper at {}", POLKIT_HELPER);
+            if std::path::Path::new(polkit_helper()).exists() {
+                eprintln!("[TUN] Using polkit helper at {}", polkit_helper());
                 match self
                     .start_tun_via_helper(&tun2socks_bin, &server_ip, control_bypass_ips, attempt)
                     .await
@@ -1047,7 +1069,7 @@ echo "OK"
             } else {
                 eprintln!(
                     "[TUN] Helper not installed at {} — falling back to inline pkexec (will prompt for password)",
-                    POLKIT_HELPER
+                    polkit_helper()
                 );
             }
         } else {
@@ -1288,8 +1310,8 @@ echo "[TUN-SCRIPT] Done!"
         // installer didn't run (e.g. the binary was launched out of a
         // tarball or the .deb's postinst was skipped) — that's the edge
         // case the manual installer was originally written for.
-        let helper_present = std::path::Path::new(POLKIT_HELPER).is_file();
-        let update_helper_present = std::path::Path::new(UPDATE_HELPER).is_file();
+        let helper_present = std::path::Path::new(polkit_helper()).is_file();
+        let update_helper_present = std::path::Path::new(update_helper()).is_file();
         let policy_ready = std::fs::read_to_string(POLKIT_POLICY)
             .map(|s| {
                 s.contains("<allow_active>yes</allow_active>")
@@ -1385,7 +1407,7 @@ echo "INSTALLED"
     ) -> Result<(), String> {
         attempt.ensure_active()?;
         let mut cmd = Command::new("pkexec");
-        cmd.arg(POLKIT_HELPER)
+        cmd.arg(polkit_helper())
             .arg("start")
             .arg(tun2socks_bin)
             .arg(server_ip);
@@ -1428,10 +1450,10 @@ echo "INSTALLED"
         eprintln!("[VPN] tun2socks PID to kill: {:?}", tun2socks_pid);
 
         // Prefer the polkit helper.
-        if Path::new(POLKIT_HELPER).exists() {
+        if Path::new(polkit_helper()).exists() {
             eprintln!("[VPN] Using polkit helper for cleanup");
             let mut cmd = Command::new("pkexec");
-            cmd.arg(POLKIT_HELPER).arg("stop");
+            cmd.arg(polkit_helper()).arg("stop");
             let helper_stopped = match run_with_timeout_and_env(cmd, PKEXEC_TIMEOUT, None).await {
                 Ok(out) => {
                     eprintln!(

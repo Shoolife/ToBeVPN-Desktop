@@ -1,0 +1,29 @@
+# Maintainer: Shoolife
+# ToBeVPN desktop client from the release's .deb, laid out as the release's
+# own Arch package (same files, see package.sh); updated through the AUR.
+pkgname=tobevpn-desktop-bin
+_pkgname=tobevpn-desktop
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="ToBeVPN desktop client"
+arch=('x86_64')
+url="https://github.com/Shoolife/ToBeVPN-Desktop"
+license=('custom')
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'polkit' 'iproute2' 'procps-ng' 'hicolor-icon-theme')
+optdepends=('xdg-utils: open tobevpn:// links with the app')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+options=('!strip' '!debug')
+install=tobevpn-desktop.install
+source=("https://github.com/Shoolife/ToBeVPN-Desktop/releases/download/v${pkgver}/ToBeVPN_${pkgver}_amd64.deb"
+        "package.sh")
+sha256sums=('SKIP' 'SKIP')
+noextract=("ToBeVPN_${pkgver}_amd64.deb")
+
+package() {
+    mkdir -p deb
+    bsdtar -xf "ToBeVPN_${pkgver}_amd64.deb" -C deb
+    mkdir -p deb/root
+    bsdtar -xf deb/data.tar.* -C deb/root
+    bash ./package.sh deb/root "$pkgdir"
+}

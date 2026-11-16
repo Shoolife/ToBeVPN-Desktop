@@ -1,0 +1,15 @@
+# The VPN of a running app is stopped before its files change, so an old
+# tunnel never outlives the package that made it.
+pre_upgrade() {
+    if [ -x /usr/lib/ToBeVPN/tobevpn-helper.sh ]; then
+        /usr/lib/ToBeVPN/tobevpn-helper.sh stop >/dev/null 2>&1 || true
+    fi
+}
+
+pre_remove() {
+    pre_upgrade
+}
+
+post_install() {
+    xdg-mime default ToBeVPN.desktop x-scheme-handler/tobevpn 2>/dev/null || true
+}
