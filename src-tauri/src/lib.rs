@@ -220,6 +220,50 @@ fn send_window_to_background(window: tauri::WebviewWindow) {
     }
 }
 
+/// Corner radius of the window outline, as #window-clip's in index.html.
+#[cfg(target_os = "linux")]
+const WINDOW_CORNER_RADIUS: i32 = 14;
+
+/// Without a compositor no window can be transparent, but X11 can still give
+/// it a rounded outline (the SHAPE extension, which the window manager
+/// honours): the corners outside the curve are cut away. With a compositor the
+/// page's own transparent rounding is used and the outline is removed.
+#[cfg(target_os = "linux")]
+fn update_window_shape<W: gtk::prelude::IsA<gtk::Widget> + gtk::prelude::IsA<gtk::Window>>(window: &W) {
+    use gtk::prelude::*;
+    let Some(gdk_window) = window.window() else {
+        return;
+    };
+    let composited = GtkWindowExt::screen(window)
+        .map(|screen| screen.is_composited())
+        .unwrap_or(true);
+    if composited {
+        gdk_window.shape_combine_region(None, 0, 0);
+        return;
+    }
+    let width = window.allocated_width();
+    let height = window.allocated_height();
+    let radius = WINDOW_CORNER_RADIUS.min(width / 2).min(height / 2);
+    if width <= 0 || height <= 0 || radius <= 0 {
+        return;
+    }
+    let region = gtk::cairo::Region::create();
+    let add = |x: i32, y: i32, w: i32, h: i32| {
+        if w > 0 && h > 0 {
+            let _ = region.union_rectangle(&gtk::cairo::RectangleInt::new(x, y, w, h));
+        }
+    };
+    // Each row of the corner curve, mirrored for the bottom edge.
+    for row in 0..radius {
+        let dy = radius as f64 - row as f64 - 0.5;
+        let inset = (radius as f64 - (radius as f64 * radius as f64 - dy * dy).max(0.0).sqrt()).round() as i32;
+        add(inset, row, width - 2 * inset, 1);
+        add(inset, height - 1 - row, width - 2 * inset, 1);
+    }
+    add(0, radius, width, height - 2 * radius);
+    gdk_window.shape_combine_region(Some(&region), 0, 0);
+}
+
 /// Whether the desktop draws windows through a compositor, so a transparent
 /// window (rounded corners) is possible; always on outside Linux.
 #[tauri::command]
@@ -996,7 +1040,11 @@ pub fn run() {
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            show_main_window(app);
+            // On Linux this runs on the D-Bus (zbus) thread; GTK may only be
+            // touched from the main one (Astra Linux: "main context already
+            // acquired by another thread", and the app closed).
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || show_main_window(&handle));
             if cfg!(any(target_os = "windows", target_os = "linux"))
                 && autostart::args_contain_autostart(argv.iter())
             {
@@ -1026,10 +1074,15 @@ pub fn run() {
                 if let Ok(gtk_window) = window.gtk_window() {
                     if let Some(screen) = gtk::prelude::GtkWindowExt::screen(&gtk_window) {
                         let handle = app.handle().clone();
+                        let shaped = gtk_window.clone();
                         screen.connect_composited_changed(move |screen| {
                             let _ = handle.emit("window-composited-changed", screen.is_composited());
+                            update_window_shape(&shaped);
                         });
                     }
+                    // The rounded outline follows every size the window takes.
+                    gtk_window.connect_size_allocate(|window, _| update_window_shape(window));
+                    update_window_shape(&gtk_window);
                 }
             }
 
