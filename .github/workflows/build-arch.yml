@@ -1,0 +1,128 @@
+name: build-arch
+run-name: Arch package for ${{ github.event.workflow_run.head_branch || inputs.tag }}
+
+# The Arch Linux package of a release, made from that release's signed .deb
+# once the main build has published it (a release made with GITHUB_TOKEN
+# starts no other workflow, workflow_run does). Kept apart from build.yml so
+# the two can change independently.
+on:
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to package (e.g. v1.0.99)'
+        required: true
+        type: string
+
+jobs:
+  arch:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Tools
+        run: pacman -Syu --noconfirm --needed git github-cli nodejs npm jq
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Release .deb
+        run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*) ;; *) echo "::error::Not a release tag: $TAG"; exit 1 ;; esac
+          VERSION="${TAG#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p build
+          gh release download "$TAG" --pattern "ToBeVPN_${VERSION}_amd64.deb" --dir build
+          test -s "build/ToBeVPN_${VERSION}_amd64.deb"
+
+      - name: Build the Arch package
+        # makepkg refuses to run as root.
+        run: |
+          set -euo pipefail
+          cp packaging/arch/* build/
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" build/PKGBUILD
+          useradd -m builder
+          chown -R builder build
+          su builder -c "cd build && makepkg -f --noconfirm"
+          ls -la build/*.pkg.tar.zst
+
+      - name: Sign for the in-app updater
+        # The same key as the .deb and .exe: the app verifies the package
+        # with the public key it carries before pacman installs it.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          PKG=$(ls build/tobevpn-desktop-"${VERSION}"-*-x86_64.pkg.tar.zst)
+          npx --yes @tauri-apps/cli@2 signer sign "$PKG"
+          test -s "$PKG.sig"
+          NAME=$(basename "$PKG")
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg signature "$(cat "$PKG.sig")" \
+            --arg url "https://github.com/${GH_REPO}/releases/download/${TAG}/${NAME}" \
+            '{version: $version, pub_date: $pub_date,
+              platforms: {"linux-x86_64-pacman": {signature: $signature, url: $url}}}' > build/latest-arch.json
+          jq -e . build/latest-arch.json > /dev/null
+          cat build/latest-arch.json
+
+      - name: AUR package files
+        # PKGBUILD and .SRCINFO of tobevpn-desktop-bin for this release, with
+        # the .deb's real checksum, attached to the release (and pushed to the
+        # AUR when an AUR key is configured).
+        run: |
+          set -euo pipefail
+          mkdir -p aur
+          cp packaging/aur/* aur/
+          SUM=$(sha256sum "build/ToBeVPN_${VERSION}_amd64.deb" | cut -d' ' -f1)
+          PKGSUM=$(sha256sum aur/package.sh | cut -d' ' -f1)
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" aur/PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${SUM}' '${PKGSUM}')/" aur/PKGBUILD
+          chown -R builder aur
+          su builder -c "cd aur && makepkg --printsrcinfo > .SRCINFO"
+          tar -C aur -czf "build/aur-tobevpn-desktop-bin-${VERSION}.tar.gz" PKGBUILD .SRCINFO package.sh tobevpn-desktop.install
+
+      - name: Attach to the release
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" --clobber \
+            build/tobevpn-desktop-"${VERSION}"-*-x86_64.pkg.tar.zst \
+            build/tobevpn-desktop-"${VERSION}"-*-x86_64.pkg.tar.zst.sig \
+            build/latest-arch.json \
+            "build/aur-tobevpn-desktop-bin-${VERSION}.tar.gz"
+
+      - name: Push to the AUR
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          pacman -S --noconfirm --needed openssh
+          install -dm700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          git clone ssh://aur@aur.archlinux.org/tobevpn-desktop-bin.git aur-repo
+          cp aur/PKGBUILD aur/.SRCINFO aur/package.sh aur/tobevpn-desktop.install aur-repo/
+          cd aur-repo
+          git config user.name "ToBeVPN release"
+          git config user.email "noreply@github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Update to ${VERSION}"
+          git push origin HEAD:master
