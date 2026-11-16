@@ -874,6 +874,28 @@ export async function setRouterServers(link: RouterLink, servers: SlotServer[]):
   return status;
 }
 
+/** The router's subscription link and its id in the account, as the router has them. */
+export async function routerSubscriptionLink(link: RouterLink): Promise<{ url: string; hwid: string | null } | null> {
+  return linkInvoke(link, "router_subscription_link", {});
+}
+
+/**
+ * The router's own slots written again with these servers' credentials and
+ * its subscription link set to `subscriptionUrl` (see routerCredentials).
+ * Null when a slot's server is not among them (nothing written then).
+ */
+export async function rewriteRouterServers(
+  link: RouterLink,
+  servers: SlotServer[],
+  subscriptionUrl: string,
+): Promise<RouterStatus | null> {
+  return linkInvoke<RouterStatus | null>(link, "router_rewrite_servers", {
+    servers,
+    serverHosts: accountServerHosts(),
+    subscriptionUrl,
+  });
+}
+
 export async function routerDevices(link: RouterLink): Promise<RouterNetwork> {
   return linkInvoke<RouterNetwork>(link, "router_devices", {});
 }

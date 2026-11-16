@@ -1184,6 +1184,8 @@ pub fn run() {
             router_agent::router_status,
             router_agent::router_control,
             router_agent::router_set_servers,
+            router_agent::router_subscription_link,
+            router_agent::router_rewrite_servers,
             router_agent::router_set_ru_direct,
             router_agent::router_devices,
             router_agent::router_snapshot,

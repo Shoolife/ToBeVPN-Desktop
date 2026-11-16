@@ -10,6 +10,7 @@ import { findSameServer } from "../session/serverSelection";
 import { useRouterTraffic } from "../session/useRouterTraffic";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
+import { repairRouterCredentials } from "../session/routerCredentials";
 import Spinner from "../components/Spinner";
 import BrandLoader from "../components/BrandLoader";
 import SmoothHeight from "../components/SmoothHeight";
@@ -303,6 +304,10 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const refreshSwap = useRefreshSwap(refreshing);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  const credentialsSettledRef = useRef(false);
+  const [credentialsNote, setCredentialsNote] = useState(false);
   const statusRef = useRef<RouterStatus | null>(null);
   const networkRef = useRef<RouterNetwork | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -418,6 +423,29 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     setLostAccess(accessLost);
     setLoading(false);
     setRefreshing(false);
+    // After the account's link was reset elsewhere the router still logs in
+    // with the revoked credentials: replaced on proof only (routerCredentials),
+    // quietly, with a short note when done. Asked again at the next load
+    // while it is not known.
+    if (currentLink && nextStatus?.installed && !credentialsSettledRef.current) {
+      const repairLink = currentLink;
+      // Busy only while it writes, and cleared only by itself.
+      let marked = false;
+      void repairRouterCredentials(repairLink, () => {
+        if (busyRef.current || generation !== generationRef.current) return false;
+        marked = true;
+        setBusy(true);
+        return true;
+      }).then((result) => {
+        if (marked) setBusy(false);
+        if (result.kind !== "unknown") credentialsSettledRef.current = true;
+        if (result.kind === "updated") {
+          setCredentialsNote(true);
+          window.setTimeout(() => setCredentialsNote(false), 8000);
+          if (generation === generationRef.current) void load(false);
+        }
+      });
+    }
   };
 
   // The server list can arrive (or change, after the subscription link was
@@ -668,6 +696,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
             <p className="router-error">{t("router_server_down")}</p>
           )}
           {error && <p className="router-error">{error}</p>}
+          {credentialsNote && <p className="router-status">{t("router_credentials_updated")}</p>}
           {/* The update offer unfolds and folds away smoothly (height and
               fade), keeping its text while it leaves. */}
           <div className={`router-update-wrap ${installed && updateAvailable ? "router-update-wrap--open" : ""}`}>

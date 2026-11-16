@@ -1910,6 +1910,108 @@ fn credential_key(server: &ServerConfig) -> String {
     sha256_hex(format!("{}|{}|{}", server.uuid, server.address, server.port).as_bytes())[..16].to_string()
 }
 
+/// The router's subscription link and its id in the account, as the router
+/// has them (subscription.conf).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterSubscription {
+    pub url: String,
+    pub hwid: Option<String>,
+}
+
+#[tauri::command]
+pub async fn router_subscription_link(
+    app: AppHandle,
+    host: String,
+    user: String,
+    fingerprint: Option<String>,
+) -> Result<Option<RouterSubscription>, String> {
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
+    let (conf, _) = session
+        .run("cat /opt/tobevpn/subscription.conf 2>/dev/null", None)
+        .await?;
+    let value = |name: &str| {
+        conf.lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")))
+            .map(|value| value.trim().trim_matches('\'').to_string())
+            .filter(|value| !value.is_empty())
+    };
+    Ok(value("SUB_URL").map(|url| RouterSubscription { url, hwid: value("HWID") }))
+}
+
+/// The router's servers written again with `servers`' credentials (its own
+/// slots, read in this session, so a slot added meanwhile is kept) and its
+/// subscription link set to `subscription_url`; restarted when it runs. None
+/// when a slot's server is not in `servers` (nothing written then). The
+/// caller has proven the router's link revoked and its own live.
+#[tauri::command]
+pub async fn router_rewrite_servers(
+    app: AppHandle,
+    host: String,
+    user: String,
+    fingerprint: Option<String>,
+    servers: Vec<SlotServer>,
+    server_hosts: Vec<String>,
+    subscription_url: String,
+) -> Result<Option<RouterStatus>, String> {
+    for server in &servers {
+        server.server.validate()?;
+    }
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh devices", None)
+        .await?;
+    let slots = parse_slots(&output);
+    if !slots.iter().any(|slot| slot.slot == 0) {
+        return Ok(None);
+    }
+    let mut list = Vec::new();
+    for slot in &slots {
+        let Some(server) = servers.iter().find(|server| server.id == slot.server_id) else {
+            return Ok(None);
+        };
+        list.push(SlotServer {
+            slot: slot.slot,
+            id: server.id.clone(),
+            name: server.name.clone(),
+            server: server.server.clone(),
+        });
+    }
+    validate_slots(&list)?;
+    session
+        .write_file(
+            "/opt/tobevpn/servers",
+            server_list(&server_hosts).as_bytes(),
+            "644",
+        )
+        .await?;
+    write_servers(&app, &session, &list).await?;
+    let (conf, _) = session
+        .run("cat /opt/tobevpn/subscription.conf 2>/dev/null", None)
+        .await?;
+    if !conf.trim().is_empty() {
+        let line = format!("SUB_URL='{}'", shell_quote_inner(&subscription_url));
+        let next: String = conf
+            .lines()
+            .filter(|old| !old.is_empty())
+            .map(|old| if old.starts_with("SUB_URL=") { line.as_str() } else { old })
+            .map(|old| format!("{old}\n"))
+            .collect();
+        session
+            .write_file("/opt/tobevpn/subscription.conf", next.as_bytes(), "600")
+            .await?;
+    }
+    // The new files are on the router either way: a start that fails shows
+    // in the status (failed), not as a change that did not happen.
+    session
+        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
+        .await?;
+    let (output, _) = session
+        .run("/opt/tobevpn/tobevpn-router.sh status", None)
+        .await?;
+    Ok(Some(parse_status(&output)))
+}
+
 fn validate_slots(servers: &[SlotServer]) -> Result<(), String> {
     let mut seen = [false; MAX_SLOT as usize + 1];
     for server in servers {

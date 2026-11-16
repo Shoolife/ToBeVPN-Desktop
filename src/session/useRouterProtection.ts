@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { serverDisplayName } from "../components/serverDisplay";
 import { isBrowserPreviewRuntime } from "./browserPreview";
+import { repairRouterCredentialsInBackground } from "./routerCredentials";
 import {
   detectRouter,
   getRouterLink,
@@ -45,7 +46,14 @@ export async function checkRouterProtection(): Promise<RouterProtection> {
     const link = getRouterLink();
     if (!link || !(await isLinkedRouterHere(link, info))) return NONE;
     // Status and devices in one login.
-    const { status, network } = await routerSnapshot(link);
+    let { status, network } = await routerSnapshot(link);
+    // After a link reset elsewhere the router gets the new credentials
+    // without anyone opening its screen (at most every few hours; it writes
+    // only on proof). Also when its VPN looks off: that is one reason for it.
+    if (status.installed) {
+      const repaired = await repairRouterCredentialsInBackground(link);
+      if (repaired.kind === "updated") ({ status, network } = await routerSnapshot(link));
+    }
     if (!status.installed || !status.running || !status.clientIp || !network) return NONE;
     const me = network.devices.find((device) => device.ip === status.clientIp);
     if (!me) return NONE;
