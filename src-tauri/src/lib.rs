@@ -968,6 +968,19 @@ async fn get_xray_version(state: tauri::State<'_, AppVpn>) -> Result<String, Str
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Astra Linux's Fly desktop: WebKitGTK's DMA-BUF renderer crashed when
+    // the compositor was switched on or off (Fly restarts its window manager
+    // for that), and the app closed with it. The shared-memory renderer
+    // survives the switch. Only on Fly, and never over the user's own choice.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+        && std::env::var("XDG_CURRENT_DESKTOP")
+            .map(|desktop| desktop.split(':').any(|part| part.eq_ignore_ascii_case("fly")))
+            .unwrap_or(false)
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     // WebKitGTK keeps localStorage in SQLite. Older versions wrote the VPN
     // stats snapshot once per second, which could leave a large WAL file.
     // Run a safe checkpoint before the webview opens; SQLite skips it if a
