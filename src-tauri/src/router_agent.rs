@@ -973,6 +973,8 @@ fn log(app: &AppHandle, level: &'static str, text: impl Into<String>) {
 
 /// Installs (or updates) ToBeVPN on the paired router and starts it.
 #[tauri::command]
+// The arguments are the keys the frontend passes.
+#[allow(clippy::too_many_arguments)]
 pub async fn router_install(
     app: AppHandle,
     host: String,
@@ -1000,6 +1002,7 @@ pub async fn router_install(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn install(
     app: &AppHandle,
     host: String,
@@ -1735,6 +1738,8 @@ pub async fn router_migrate_defaults(
 
 /// Sets one device to "vpn", "direct" or back to "default", with a name.
 #[tauri::command]
+// The arguments are the keys the frontend passes.
+#[allow(clippy::too_many_arguments)]
 pub async fn router_set_device(
     app: AppHandle,
     host: String,
