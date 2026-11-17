@@ -52,14 +52,15 @@ jobs:
           test -s "build/ToBeVPN_${VERSION}_amd64.deb"
 
       - name: Build the Arch package
-        # makepkg refuses to run as root.
+        # makepkg refuses to run as root. --nodeps: the package only repacks
+        # the release .deb, its runtime dependencies are not needed to build.
         run: |
           set -euo pipefail
           cp packaging/arch/* build/
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" build/PKGBUILD
           useradd -m builder
           chown -R builder build
-          su builder -c "cd build && makepkg -f --noconfirm"
+          su builder -c "cd build && makepkg -f --noconfirm --nodeps"
           ls -la build/*.pkg.tar.zst
 
       - name: Sign for the in-app updater
