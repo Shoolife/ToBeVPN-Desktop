@@ -18,29 +18,34 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
-      icon: "dns",
-      titleKey: "whats_new_openvpn_dns_title",
-      descriptionKey: "whats_new_openvpn_dns_description",
+      icon: "router",
+      titleKey: "whats_new_router_vpn_title",
+      descriptionKey: "whats_new_router_vpn_description",
     },
     {
-      icon: "refresh",
-      titleKey: "whats_new_resume_title",
-      descriptionKey: "whats_new_resume_description",
+      icon: "devices",
+      titleKey: "whats_new_several_routers_title",
+      descriptionKey: "whats_new_several_routers_description",
+    },
+    {
+      icon: "dataUsage",
+      titleKey: "whats_new_router_traffic_title",
+      descriptionKey: "whats_new_router_traffic_description",
     },
     {
       icon: "bolt",
-      titleKey: "whats_new_quick_ping_title",
-      descriptionKey: "whats_new_quick_ping_description",
+      titleKey: "whats_new_router_speed_test_title",
+      descriptionKey: "whats_new_router_speed_test_description",
     },
     {
-      icon: "altRoute",
-      titleKey: "whats_new_final_mask_title",
-      descriptionKey: "whats_new_final_mask_description",
+      icon: "autoAwesome",
+      titleKey: "whats_new_smoother_ui_title",
+      descriptionKey: "whats_new_smoother_ui_description",
     },
     {
-      icon: "cloudOff",
-      titleKey: "whats_new_fallback_subscription_title",
-      descriptionKey: "whats_new_fallback_subscription_description",
+      icon: "dns",
+      titleKey: "whats_new_linux_distros_title",
+      descriptionKey: "whats_new_linux_distros_description",
     },
     {
       icon: "security",
