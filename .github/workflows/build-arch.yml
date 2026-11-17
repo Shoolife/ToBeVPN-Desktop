@@ -30,6 +30,9 @@ jobs:
       TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
+      # At job level so the AUR step's `if` can see whether it is set (a
+      # step's own env is not there yet when its `if` is evaluated).
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
     steps:
       - name: Tools
         run: pacman -Syu --noconfirm --needed git github-cli nodejs npm jq
@@ -108,8 +111,6 @@ jobs:
 
       - name: Push to the AUR
         if: env.AUR_SSH_PRIVATE_KEY != ''
-        env:
-          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           pacman -S --noconfirm --needed openssh
