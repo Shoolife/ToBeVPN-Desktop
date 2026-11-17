@@ -2876,10 +2876,11 @@ mod tests {
         assert!(version_tuple("v26").is_empty());
 
         let mut facts = HashMap::new();
-        facts.insert("xray_version".to_string(), "26.10.31".to_string());
+        // A router on the pinned version is current; a newer target is not.
+        facts.insert("xray_version".to_string(), PINNED_XRAY_VERSION.to_string());
         let mut target = pinned_xray(Arch::Arm64);
         assert!(!binary_outdated(&target, &facts));
-        target.version = Some("26.11.2".into());
+        target.version = Some("99.1.1".into());
         assert!(binary_outdated(&target, &facts));
         facts.insert("xray_version".to_string(), String::new());
         assert!(binary_outdated(&pinned_xray(Arch::Arm64), &facts));
