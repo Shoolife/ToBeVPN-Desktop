@@ -390,7 +390,11 @@ fn start_signal_watch(app: AppHandle) {
             // SIGHUP then comes from elsewhere (seen on Astra Linux's Fly when
             // its compositor is switched): the window stays.
             if signal as libc::c_int == libc::SIGHUP && !has_controlling_terminal() {
-                log("W", "App-Health", "Received SIGHUP without a terminal; ignored");
+                log(
+                    "W",
+                    "App-Health",
+                    "Received SIGHUP without a terminal; ignored",
+                );
                 continue;
             }
             if signal != 0 {

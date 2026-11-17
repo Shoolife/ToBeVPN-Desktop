@@ -38,7 +38,12 @@ pub struct RouterInfo {
 /// which every router's busybox has; the mark only names the router).
 pub fn router_mark(hwid: &str) -> String {
     let digest = md5::compute(hwid.trim().to_lowercase().as_bytes());
-    digest.0.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .0
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Marks for the account's router ids, to compare with a router's mark.
@@ -50,7 +55,11 @@ pub fn router_marks(ids: Vec<String>) -> Vec<String> {
 fn parse_mark(body: &str) -> Option<String> {
     let rest = &body[body.find("tobevpn-router ")? + "tobevpn-router ".len()..];
     let mark: String = rest.chars().take(16).collect();
-    (mark.len() == 16 && mark.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())).then_some(mark)
+    (mark.len() == 16
+        && mark
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+    .then_some(mark)
 }
 
 #[tauri::command]
@@ -117,7 +126,11 @@ fn redirects_to_https(response: &str) -> bool {
 /// One HTTPS GET to the router: its self-signed certificate accepted (only
 /// the page title and the ToBeVPN mark are read; nothing is sent), no
 /// redirects followed, bound to the physical interface like `http_get`.
-async fn https_get(gateway: Ipv4Addr, interface: Option<String>, path: &'static str) -> Option<String> {
+async fn https_get(
+    gateway: Ipv4Addr,
+    interface: Option<String>,
+    path: &'static str,
+) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::update_download::install_rustls_provider();
         let builder = reqwest::blocking::Client::builder()
@@ -442,14 +455,21 @@ mod tests {
         assert!(redirects_to_https(
             "HTTP/1.1 302 Found\r\nLocation: https://192.168.1.1/cgi-bin/luci\r\n\r\n"
         ));
-        assert!(!redirects_to_https("HTTP/1.1 200 OK\r\n\r\n<a href=\"https://x\">"));
-        assert!(!redirects_to_https("HTTP/1.1 302 Found\r\nLocation: /cgi-bin/luci\r\n\r\n"));
+        assert!(!redirects_to_https(
+            "HTTP/1.1 200 OK\r\n\r\n<a href=\"https://x\">"
+        ));
+        assert!(!redirects_to_https(
+            "HTTP/1.1 302 Found\r\nLocation: /cgi-bin/luci\r\n\r\n"
+        ));
     }
 
     #[test]
     fn router_mark_matches_the_agent() {
         // Router shell: printf '%s' "befe0dc8-..." | md5sum | cut -c1-16
-        assert_eq!(router_mark("BEFE0DC8-F668-5434-847A-1D108CE7D224"), "5848f5aac4a78e07");
+        assert_eq!(
+            router_mark("BEFE0DC8-F668-5434-847A-1D108CE7D224"),
+            "5848f5aac4a78e07"
+        );
         assert_eq!(
             parse_mark("HTTP/1.0 200 OK\r\n\r\ntobevpn-router b5eda37d94f713a3\n"),
             Some("b5eda37d94f713a3".to_string())

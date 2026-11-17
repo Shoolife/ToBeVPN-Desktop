@@ -535,11 +535,18 @@ fn binary_outdated(binary: &Binary, facts: &HashMap<String, String>) -> bool {
         // to it (hev.version), never with an older build than the router
         // has. A router from before that file: by the build's MD5.
         None => {
-            let md5 = facts.get(&format!("md5_{}", binary.name)).map(String::as_str).unwrap_or("");
+            let md5 = facts
+                .get(&format!("md5_{}", binary.name))
+                .map(String::as_str)
+                .unwrap_or("");
             if md5.is_empty() {
                 return true;
             }
-            match facts.get("hev_version").map(String::as_str).filter(|v| !v.is_empty()) {
+            match facts
+                .get("hev_version")
+                .map(String::as_str)
+                .filter(|v| !v.is_empty())
+            {
                 Some(current) => version_tuple(current) < version_tuple(HEV_VERSION),
                 None => Some(md5) != binary.md5,
             }
@@ -631,7 +638,11 @@ impl Session {
             .map_err(|_| "router did not answer on SSH".to_string())?
     }
 
-    async fn run_inner(&self, command: &str, stdin: Option<&[u8]>) -> Result<(String, u32), String> {
+    async fn run_inner(
+        &self,
+        command: &str,
+        stdin: Option<&[u8]>,
+    ) -> Result<(String, u32), String> {
         let mut channel = self
             .handle
             .channel_open_session()
@@ -776,14 +787,19 @@ async fn connect(
         None
     } else {
         // The router the command is for (its host key), else the address's pin.
-        let wanted = fingerprint.map(str::to_string).or_else(|| PINS.lock().unwrap().get(host).cloned());
+        let wanted = fingerprint
+            .map(str::to_string)
+            .or_else(|| PINS.lock().unwrap().get(host).cloned());
         match wanted {
             // Only the pinned router, and only if it is still a paired one.
             Some(pinned) => known_hosts(app)
                 .get(host)
                 .filter(|keys| keys.contains(&pinned))
                 .map(|_| vec![pinned]),
-            None => known_hosts(app).get(host).cloned().filter(|keys| !keys.is_empty()),
+            None => known_hosts(app)
+                .get(host)
+                .cloned()
+                .filter(|keys| !keys.is_empty()),
         }
     };
     if !pairing && expected.is_none() {
@@ -820,15 +836,23 @@ async fn connect(
     ))
 }
 
-async fn open(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&str>) -> Result<Session, String> {
+async fn open(
+    app: &AppHandle,
+    host: &str,
+    user: &str,
+    fingerprint: Option<&str>,
+) -> Result<Session, String> {
     let (mut session, _) = connect(app, host, false, fingerprint).await?;
     let key = PrivateKeyWithHashAlg::new(Arc::new(app_key(app)?), None);
     // Keepalives start only after the login: until then a router that went
     // away would hold the call forever.
-    let auth = tokio::time::timeout(SSH_TIMEOUT, session.handle.authenticate_publickey(user, key))
-        .await
-        .map_err(|_| "router did not answer on SSH".to_string())?
-        .map_err(|error| format!("ssh auth: {error}"))?;
+    let auth = tokio::time::timeout(
+        SSH_TIMEOUT,
+        session.handle.authenticate_publickey(user, key),
+    )
+    .await
+    .map_err(|_| "router did not answer on SSH".to_string())?
+    .map_err(|error| format!("ssh auth: {error}"))?;
     if !auth.success() {
         return Err("router rejected the app key".into());
     }
@@ -869,18 +893,25 @@ pub async fn router_host_key(app: AppHandle, host: String) -> Option<String> {
     fingerprint
 }
 
-
 /// Returns the host key the router showed, to pin it for this link.
-async fn pair(app: &AppHandle, host: String, user: String, password: String) -> Result<Option<String>, String> {
+async fn pair(
+    app: &AppHandle,
+    host: String,
+    user: String,
+    password: String,
+) -> Result<Option<String>, String> {
     let app = app.clone();
     let (mut session, fingerprint) = connect(&app, &host, true, None).await?;
     if let Some(fingerprint) = &fingerprint {
         log(&app, "info", format!("new router host key {fingerprint}"));
     }
-    let auth = tokio::time::timeout(SSH_TIMEOUT, session.handle.authenticate_password(&user, password))
-        .await
-        .map_err(|_| "router did not answer on SSH".to_string())?
-        .map_err(|error| format!("ssh auth: {error}"))?;
+    let auth = tokio::time::timeout(
+        SSH_TIMEOUT,
+        session.handle.authenticate_password(&user, password),
+    )
+    .await
+    .map_err(|_| "router did not answer on SSH".to_string())?
+    .map_err(|error| format!("ssh auth: {error}"))?;
     if !auth.success() {
         return Err("wrong router login or password".into());
     }
@@ -895,7 +926,10 @@ async fn pair(app: &AppHandle, host: String, user: String, password: String) -> 
     // Each computer marks its key with its own id, and replaces only its own
     // line (by its key): pairing a second computer does not lock the first
     // one out. The agent's uninstall still finds every "tobevpn-…router" key.
-    let comment = format!("{KEY_COMMENT_PREFIX}-{}-router", &sha256_hex(blob.as_bytes())[..8]);
+    let comment = format!(
+        "{KEY_COMMENT_PREFIX}-{}-router",
+        &sha256_hex(blob.as_bytes())[..8]
+    );
     let line = format!("{kind} {blob} {comment}\n");
     let command = format!(
         "umask 077; if [ \"$(id -u)\" = 0 ] && [ -d /etc/dropbear ]; then f=/etc/dropbear/authorized_keys; \
@@ -1248,7 +1282,12 @@ async fn outdated_components(
     };
     // By version, not by content: a newer agent put there by the phone app
     // is not "updated" back to this app's older one.
-    Ok((needed, current, agent_version(&agent) < agent_version(AGENT_SCRIPT), sites))
+    Ok((
+        needed,
+        current,
+        agent_version(&agent) < agent_version(AGENT_SCRIPT),
+        sites,
+    ))
 }
 
 /// Whether the router runs older components than this app carries. Uses
@@ -1358,14 +1397,27 @@ fn check_space<T>(free_kb: u64, downloads: &[(T, Vec<u8>)]) -> Result<(), String
     if downloads.is_empty() {
         return Ok(());
     }
-    let needed_kb = downloads.iter().map(|(_, content)| content.len() as u64).sum::<u64>() / 1024 + SPACE_MARGIN_KB;
+    let needed_kb = downloads
+        .iter()
+        .map(|(_, content)| content.len() as u64)
+        .sum::<u64>()
+        / 1024
+        + SPACE_MARGIN_KB;
     if free_kb < needed_kb {
-        return Err(format!("not enough space on the router: {} MB free", free_kb / 1024));
+        return Err(format!(
+            "not enough space on the router: {} MB free",
+            free_kb / 1024
+        ));
     }
     Ok(())
 }
 
-async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&str>) -> Result<RouterStatus, String> {
+async fn update(
+    app: &AppHandle,
+    host: &str,
+    user: &str,
+    fingerprint: Option<&str>,
+) -> Result<RouterStatus, String> {
     progress(app, "connect");
     let session = open(app, host, user, fingerprint).await?;
     progress(app, "check");
@@ -1412,11 +1464,16 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
         write_ru_sites(&session, sites).await?;
         // The config may lack the sites rule (written while the list was
         // missing): turned on with the list, or the bypass stays off.
-        if let Ok((text, _)) = session.run("cat /opt/tobevpn/xray.json 2>/dev/null", None).await {
+        if let Ok((text, _)) = session
+            .run("cat /opt/tobevpn/xray.json 2>/dev/null", None)
+            .await
+        {
             if let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&text) {
                 apply_ru_direct(&mut config, true);
                 if let Ok(json) = serde_json::to_vec_pretty(&config) {
-                    session.write_file("/opt/tobevpn/xray.json", &json, "600").await?;
+                    session
+                        .write_file("/opt/tobevpn/xray.json", &json, "600")
+                        .await?;
                 }
             }
         }
@@ -1433,7 +1490,10 @@ async fn update(app: &AppHandle, host: &str, user: &str, fingerprint: Option<&st
     // The new files are in place either way: a start that fails shows as the
     // router's state (failed), not as an update that did not happen.
     let (started, _) = session
-        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; else echo kept=1; fi"), None)
+        .run(
+            &format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; else echo kept=1; fi"),
+            None,
+        )
         .await?;
     log_output(app, &started);
     let status = session
@@ -1600,7 +1660,12 @@ pub async fn router_snapshot(
         .await?;
     let status = parse_status(&output);
     if !status.installed {
-        return Ok(RouterSnapshot { status, host_key: session.fingerprint.clone(), network: None, traffic: None });
+        return Ok(RouterSnapshot {
+            status,
+            host_key: session.fingerprint.clone(),
+            network: None,
+            traffic: None,
+        });
     }
     let devices = session
         .run_ok("/opt/tobevpn/tobevpn-router.sh devices", None)
@@ -1609,11 +1674,19 @@ pub async fn router_snapshot(
         devices: parse_devices(&devices),
         slots: parse_slots(&devices),
     };
-    let traffic = match session.run("/opt/tobevpn/tobevpn-router.sh traffic", None).await {
+    let traffic = match session
+        .run("/opt/tobevpn/tobevpn-router.sh traffic", None)
+        .await
+    {
         Ok((text, 0)) => Some(parse_traffic(&text)),
         _ => None,
     };
-    Ok(RouterSnapshot { status, host_key: session.fingerprint.clone(), network: Some(network), traffic })
+    Ok(RouterSnapshot {
+        status,
+        host_key: session.fingerprint.clone(),
+        network: Some(network),
+        traffic,
+    })
 }
 
 /// Earlier versions sent every device without a choice through the router's
@@ -1794,7 +1867,6 @@ fn parse_traffic(text: &str) -> Vec<TrafficHour> {
         .collect()
 }
 
-
 fn parse_slots(text: &str) -> Vec<RouterSlot> {
     text.lines()
         .filter_map(|line| line.strip_prefix("slot="))
@@ -1850,7 +1922,11 @@ fn parse_devices(text: &str) -> Vec<RouterDevice> {
             .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
             .map_or(u32::MAX, u32::from)
     };
-    devices.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| ip_key(&a.ip).cmp(&ip_key(&b.ip))));
+    devices.sort_by(|a, b| {
+        b.online
+            .cmp(&a.online)
+            .then_with(|| ip_key(&a.ip).cmp(&ip_key(&b.ip)))
+    });
     devices
 }
 
@@ -1885,7 +1961,10 @@ pub async fn router_set_servers(
         // stopped stays stopped (the new config is used at its next start).
         // The new files are on the router either way: a start that fails
         // shows in the status (failed), not as a change that did not happen.
-        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
+        .run(
+            &format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"),
+            None,
+        )
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -1907,7 +1986,8 @@ pub struct SlotServer {
 /// account's link is reset these change, and an app sees from the router's
 /// slots that its servers must be written again.
 fn credential_key(server: &ServerConfig) -> String {
-    sha256_hex(format!("{}|{}|{}", server.uuid, server.address, server.port).as_bytes())[..16].to_string()
+    sha256_hex(format!("{}|{}|{}", server.uuid, server.address, server.port).as_bytes())[..16]
+        .to_string()
 }
 
 /// The router's subscription link and its id in the account, as the router
@@ -1936,7 +2016,10 @@ pub async fn router_subscription_link(
             .map(|value| value.trim().trim_matches('\'').to_string())
             .filter(|value| !value.is_empty())
     };
-    Ok(value("SUB_URL").map(|url| RouterSubscription { url, hwid: value("HWID") }))
+    Ok(value("SUB_URL").map(|url| RouterSubscription {
+        url,
+        hwid: value("HWID"),
+    }))
 }
 
 /// The router's servers written again with `servers`' credentials (its own
@@ -1994,7 +2077,13 @@ pub async fn router_rewrite_servers(
         let next: String = conf
             .lines()
             .filter(|old| !old.is_empty())
-            .map(|old| if old.starts_with("SUB_URL=") { line.as_str() } else { old })
+            .map(|old| {
+                if old.starts_with("SUB_URL=") {
+                    line.as_str()
+                } else {
+                    old
+                }
+            })
             .map(|old| format!("{old}\n"))
             .collect();
         session
@@ -2004,7 +2093,10 @@ pub async fn router_rewrite_servers(
     // The new files are on the router either way: a start that fails shows
     // in the status (failed), not as a change that did not happen.
     session
-        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
+        .run(
+            &format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"),
+            None,
+        )
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -2336,7 +2428,10 @@ pub async fn router_set_ru_direct(
         // stopped stays stopped (the new config is used at its next start).
         // The new files are on the router either way: a start that fails
         // shows in the status (failed), not as a change that did not happen.
-        .run(&format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"), None)
+        .run(
+            &format!("if {AGENT_RUNNING}; then {RESTART_ON_ROUTER}; fi"),
+            None,
+        )
         .await?;
     let (output, _) = session
         .run("/opt/tobevpn/tobevpn-router.sh status", None)
@@ -2865,10 +2960,7 @@ mod tests {
             "bad host; rm -rf /".to_string(),
             String::new(),
         ];
-        assert_eq!(
-            server_list(&hosts),
-            "192.0.2.10\nde.example.com\n"
-        );
+        assert_eq!(server_list(&hosts), "192.0.2.10\nde.example.com\n");
     }
 
     #[test]
@@ -2892,7 +2984,9 @@ mod tests {
         assert_eq!(devices[0].slot, 2);
         assert_eq!(devices[1].slot, 0);
         assert_eq!(
-            parse_slots("slot=0|de2|Германия 2|0123456789abcdef\nslot=9|x|y\nslot=2|nl2|Нидерланды 2\n"),
+            parse_slots(
+                "slot=0|de2|Германия 2|0123456789abcdef\nslot=9|x|y\nslot=2|nl2|Нидерланды 2\n"
+            ),
             vec![
                 RouterSlot {
                     slot: 0,
