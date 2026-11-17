@@ -9,6 +9,18 @@
   font-display: swap;
 }
 
+/* Older WebKitGTK (Astra Linux 1.7) cannot draw the color layers (COLR) of
+   the bundled flags and leaves them blank; serverDisplay.ts then sets
+   data-flag-font="system" and the flags come from the system emoji font. */
+:root[data-flag-font="system"] {
+  font-family: "ToBeVPN Plan Emoji", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+
+:root[data-flag-font="system"] .chip-flag,
+:root[data-flag-font="system"] .display-preview-server__flag {
+  font-family: "Noto Color Emoji", "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+}
+
 /* The Corporate plan name supplied by the panel ends in U+1F9E6. Without a
    bundled glyph Linux uses Noto Color Emoji while Windows uses Segoe UI Emoji,
    so the same plan gets a visibly different icon. This one-glyph Noto subset

@@ -41,16 +41,54 @@ export function areCountryFlagsReady(): boolean {
   return false;
 }
 
+/**
+ * Whether the bundled flags font draws in color here. Its flags are color
+ * layers (COLR) that older WebKitGTK builds (Astra Linux 1.7) cannot draw:
+ * they leave the flag blank. One flag is drawn on a canvas and looked at.
+ */
+function bundledFlagsDrawInColor(): boolean {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = 32;
+    canvas.height = 32;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return true;
+    context.font = '24px "Twemoji Country Flags"';
+    context.textBaseline = "top";
+    context.fillStyle = "#000";
+    context.fillText(COUNTRY_FLAGS_TEST_TEXT, 0, 0);
+    const pixels = context.getImageData(0, 0, 32, 32).data;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const r = pixels[i];
+      const g = pixels[i + 1];
+      const b = pixels[i + 2];
+      if (pixels[i + 3] > 0 && (r !== g || g !== b)) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Without color flags from the bundled font the system emoji font is used
+ *  (App.css, data-flag-font="system"). */
+function useSystemFlagsIfNeeded(): void {
+  if (!bundledFlagsDrawInColor()) {
+    document.documentElement.dataset.flagFont = "system";
+  }
+}
+
 export function ensureCountryFlagsReady(): Promise<boolean> {
-  if (areCountryFlagsReady()) return Promise.resolve(true);
+  if (countryFlagsReadyPromise) return countryFlagsReadyPromise;
   if (typeof document === "undefined" || !document.fonts) {
     countryFlagsReady = true;
     return Promise.resolve(true);
   }
 
-  countryFlagsReadyPromise ??= document.fonts
+  countryFlagsReadyPromise = document.fonts
     .load(COUNTRY_FLAGS_FONT, COUNTRY_FLAGS_TEST_TEXT)
     .then(() => {
+      useSystemFlagsIfNeeded();
       countryFlagsReady = true;
       return true;
     })
