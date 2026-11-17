@@ -16,6 +16,12 @@ const UPDATE_ENDPOINT: &str =
 /// The Arch packages of the same release, in a manifest of their own.
 const ARCH_UPDATE_ENDPOINT: &str =
     "https://github.com/Shoolife/ToBeVPN-Desktop/releases/latest/download/latest-arch.json";
+/// The build for older systems (WebKitGTK API 4.0 and glibc 2.28, as on
+/// Astra Linux 1.7) cannot run the regular .deb, so it updates from a
+/// manifest of its own.
+const LEGACY_UPDATE_ENDPOINT: &str =
+    "https://github.com/Shoolife/ToBeVPN-Desktop/releases/latest/download/latest-legacy.json";
+const LEGACY_BUILD: bool = cfg!(feature = "webkit-4-0");
 /// The name of the Arch package from the releases; installed from the AUR
 /// (tobevpn-desktop-bin) the app is updated by the AUR helper instead.
 const ARCH_PACKAGE_NAME: &str = "tobevpn-desktop";
@@ -214,15 +220,25 @@ fn install_latest_signed_update(expected_version: &str) -> Result<(), String> {
         PackageManager::Dpkg => false,
         PackageManager::Pacman(Some(name)) if name == ARCH_PACKAGE_NAME => true,
         PackageManager::Pacman(Some(name)) => {
-            return Err(format!("ToBeVPN is installed from the AUR ({name}): update it with your AUR helper"))
+            return Err(format!(
+                "ToBeVPN is installed from the AUR ({name}): update it with your AUR helper"
+            ))
         }
-        PackageManager::Pacman(None) => return Err("the installed ToBeVPN package could not be identified".into()),
+        PackageManager::Pacman(None) => {
+            return Err("the installed ToBeVPN package could not be identified".into())
+        }
     };
 
     let client = update_download::http_client()?;
 
     let manifest_response = client
-        .get(if pacman { ARCH_UPDATE_ENDPOINT } else { UPDATE_ENDPOINT })
+        .get(if pacman {
+            ARCH_UPDATE_ENDPOINT
+        } else if LEGACY_BUILD {
+            LEGACY_UPDATE_ENDPOINT
+        } else {
+            UPDATE_ENDPOINT
+        })
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|e| format!("fetch update manifest: {e}"))?;
@@ -329,9 +345,13 @@ fn install_pacman_package(bytes: &[u8], expected_version: &str) -> Result<(), St
     }
     // "1.2.3-1": the release's version, then pacman's own package release.
     let version = field("Version");
-    let upstream = version.rsplit_once('-').map_or(version.as_str(), |(upstream, _)| upstream);
+    let upstream = version
+        .rsplit_once('-')
+        .map_or(version.as_str(), |(upstream, _)| upstream);
     if normalize_version(upstream) != normalize_version(expected_version) {
-        return Err(format!("package version mismatch: expected {expected_version}, got {version}"));
+        return Err(format!(
+            "package version mismatch: expected {expected_version}, got {version}"
+        ));
     }
 
     let output = StdCommand::new("/usr/bin/pacman")
@@ -344,7 +364,11 @@ fn install_pacman_package(bytes: &[u8], expected_version: &str) -> Result<(), St
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() { format!("pacman failed: {}", output.status) } else { stderr })
+        Err(if stderr.is_empty() {
+            format!("pacman failed: {}", output.status)
+        } else {
+            stderr
+        })
     }
 }
 
@@ -408,7 +432,14 @@ fn select_platform(manifest: &UpdateManifest, pacman: bool) -> Result<UpdatePlat
         let deb_target = format!("linux-{arch}-deb");
         let plain_target = format!("linux-{arch}");
         let pacman_target = format!("linux-{arch}-pacman");
-        let targets: Vec<&String> = if pacman { vec![&pacman_target] } else { vec![&deb_target, &plain_target] };
+        let legacy_target = format!("linux-{arch}-deb-legacy");
+        let targets: Vec<&String> = if pacman {
+            vec![&pacman_target]
+        } else if LEGACY_BUILD {
+            vec![&legacy_target]
+        } else {
+            vec![&deb_target, &plain_target]
+        };
         for target in targets {
             if let Some(platform) = platforms.get(target.as_str()) {
                 return Ok(UpdatePlatform {

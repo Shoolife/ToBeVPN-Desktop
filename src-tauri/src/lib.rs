@@ -1,6 +1,8 @@
 mod autostart;
 mod diagnostics;
 mod health;
+#[cfg(all(target_os = "linux", feature = "webkit-4-0"))]
+mod legacy_webkit;
 #[cfg(target_os = "linux")]
 pub mod linux_update;
 mod notifications;
@@ -229,7 +231,9 @@ const WINDOW_CORNER_RADIUS: i32 = 14;
 /// honours): the corners outside the curve are cut away. With a compositor the
 /// page's own transparent rounding is used and the outline is removed.
 #[cfg(target_os = "linux")]
-fn update_window_shape<W: gtk::prelude::IsA<gtk::Widget> + gtk::prelude::IsA<gtk::Window>>(window: &W) {
+fn update_window_shape<W: gtk::prelude::IsA<gtk::Widget> + gtk::prelude::IsA<gtk::Window>>(
+    window: &W,
+) {
     use gtk::prelude::*;
     let Some(gdk_window) = window.window() else {
         return;
@@ -256,7 +260,8 @@ fn update_window_shape<W: gtk::prelude::IsA<gtk::Widget> + gtk::prelude::IsA<gtk
     // Each row of the corner curve, mirrored for the bottom edge.
     for row in 0..radius {
         let dy = radius as f64 - row as f64 - 0.5;
-        let inset = (radius as f64 - (radius as f64 * radius as f64 - dy * dy).max(0.0).sqrt()).round() as i32;
+        let inset = (radius as f64 - (radius as f64 * radius as f64 - dy * dy).max(0.0).sqrt())
+            .round() as i32;
         add(inset, row, width - 2 * inset, 1);
         add(inset, height - 1 - row, width - 2 * inset, 1);
     }
@@ -1019,7 +1024,11 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
         && std::env::var("XDG_CURRENT_DESKTOP")
-            .map(|desktop| desktop.split(':').any(|part| part.eq_ignore_ascii_case("fly")))
+            .map(|desktop| {
+                desktop
+                    .split(':')
+                    .any(|part| part.eq_ignore_ascii_case("fly"))
+            })
             .unwrap_or(false)
     {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
@@ -1076,7 +1085,8 @@ pub fn run() {
                         let handle = app.handle().clone();
                         let shaped = gtk_window.clone();
                         screen.connect_composited_changed(move |screen| {
-                            let _ = handle.emit("window-composited-changed", screen.is_composited());
+                            let _ =
+                                handle.emit("window-composited-changed", screen.is_composited());
                             update_window_shape(&shaped);
                         });
                     }

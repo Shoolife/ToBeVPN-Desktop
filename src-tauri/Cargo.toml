@@ -82,3 +82,9 @@ windows = { version = "0.61", features = [
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = "2"
+
+[features]
+# The build for systems with only WebKitGTK API 4.0 and glibc 2.28 (Astra
+# Linux 1.7): made by packaging/legacy/build.sh, it updates from its own
+# manifest.
+webkit-4-0 = []
