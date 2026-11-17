@@ -99,7 +99,7 @@ impl Arch {
 }
 
 /// Xray build carried by this app: the fallback when GitHub cannot be read.
-const PINNED_XRAY_VERSION: &str = "26.10.31";
+const PINNED_XRAY_VERSION: &str = "26.11.9";
 
 fn pinned_xray(arch: Arch) -> Binary {
     let (download_sha256, sha256, md5) = match arch {
