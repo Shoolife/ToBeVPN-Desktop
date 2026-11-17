@@ -342,6 +342,16 @@ jobs:
           # only canonical distribution point.
           retention-days: 7
 
+      # This release's frontend for build-legacy.yml: the .deb for older
+      # systems rebuilds only the app binary, around the same frontend.
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ToBeVPN-linux-dist
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
   build-windows:
     needs: audit
     runs-on: windows-latest

@@ -1,0 +1,150 @@
+name: build-legacy
+run-name: Legacy .deb for ${{ github.event.workflow_run.head_branch || inputs.tag }}
+
+# The .deb for older systems (WebKitGTK only with API 4.0, glibc 2.28: Astra
+# Linux 1.7), made once the main build has published a release: the app
+# binary is rebuilt on Astra Linux 1.7 itself (a debootstrap of its official
+# repository) and swapped into the release's regular .deb, see
+# packaging/legacy/build.sh. Kept apart from build.yml so the two can change
+# independently.
+on:
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to package (e.g. v1.0.99)'
+        required: true
+        type: string
+      run_id:
+        description: 'ID of the build run of that tag (its frontend artifact is used)'
+        required: true
+        type: string
+
+jobs:
+  legacy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+      RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      ASTRA: https://dl.astralinux.ru/astra/stable/1.7_x86-64
+      ASTRA_ROOT: /srv/astra17
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Release .deb and frontend
+        run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*) ;; *) echo "::error::Not a release tag: $TAG"; exit 1 ;; esac
+          VERSION="${TAG#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p build
+          gh release download "$TAG" --pattern "ToBeVPN_${VERSION}_amd64.deb" --dir build
+          test -s "build/ToBeVPN_${VERSION}_amd64.deb"
+          rm -rf dist
+          gh run download "$RUN_ID" --name ToBeVPN-linux-dist --dir dist
+          test -f dist/index.html
+
+      - name: Inject backend hostnames
+        # The same values as the release build (build.yml): the binary
+        # carries tauri.conf.json and the capabilities.
+        env:
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST || 'example.invalid' }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST || 'example.invalid' }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
+        run: bash scripts/inject-backend-host.sh
+
+      - name: Astra Linux 1.7 build root
+        run: |
+          set -euo pipefail
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y debootstrap >/dev/null
+          T=$(mktemp -d)
+          # Astra's own debootstrap knows the 1.7 suite; the archive key is
+          # the one of Astra's keyring package.
+          curl -fsSL --retry 5 -o "$T/ds.deb" \
+            "$ASTRA/repository-base/pool/main/d/debootstrap/debootstrap_1.0.132astra4+ci1_all.deb"
+          curl -fsSL --retry 5 -o "$T/kr.deb" \
+            https://dl.astralinux.ru/astra/stable/1.8_x86-64/main-repository/pool/main/a/astra-archive-keyring/astra-archive-keyring_2023.12_all.deb
+          dpkg-deb -x "$T/ds.deb" "$T/ds"
+          dpkg-deb -x "$T/kr.deb" "$T/kr"
+          sudo DEBOOTSTRAP_DIR="$T/ds/usr/share/debootstrap" "$T/ds/usr/sbin/debootstrap" \
+            --arch=amd64 --variant=minbase --components=main,contrib,non-free \
+            --keyring="$T/kr/usr/share/keyrings/astra-archive.gpg" \
+            --include=ca-certificates,apt-transport-https \
+            1.7_x86-64 "$ASTRA_ROOT" "$ASTRA/repository-base"
+          printf 'deb %s/repository-base/ 1.7_x86-64 main contrib non-free\ndeb %s/repository-extended/ 1.7_x86-64 main contrib non-free\n' \
+            "$ASTRA" "$ASTRA" | sudo tee "$ASTRA_ROOT/etc/apt/sources.list" >/dev/null
+          echo 'Acquire::Retries "5";' | sudo tee "$ASTRA_ROOT/etc/apt/apt.conf.d/80retries" >/dev/null
+          sudo cp -L /etc/resolv.conf "$ASTRA_ROOT/etc/resolv.conf"
+          for d in dev dev/pts proc sys; do sudo mount --bind "/$d" "$ASTRA_ROOT/$d"; done
+          sudo mkdir -p "$ASTRA_ROOT/src"
+          sudo mount --bind "$GITHUB_WORKSPACE" "$ASTRA_ROOT/src"
+          sudo chroot "$ASTRA_ROOT" /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
+            DEBIAN_FRONTEND=noninteractive bash -euc '
+              apt-get -qq update
+              apt-get -qq install -y build-essential pkg-config curl python3 binutils \
+                libwebkit2gtk-4.0-dev libjavascriptcoregtk-4.0-dev libsoup2.4-dev \
+                libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev >/dev/null
+              curl -fsSL --retry 5 https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
+              pkg-config --modversion webkit2gtk-4.0 libsoup-2.4 glib-2.0
+              ldd --version | head -1'
+
+      - name: Build the legacy .deb
+        run: |
+          set -euo pipefail
+          sudo cp "build/ToBeVPN_${VERSION}_amd64.deb" "$ASTRA_ROOT/root/"
+          sudo chroot "$ASTRA_ROOT" /usr/bin/env -i PATH=/root/.cargo/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/root bash -euc "cd /src && packaging/legacy/build.sh /root/ToBeVPN_${VERSION}_amd64.deb /root/out"
+          sudo cp "$ASTRA_ROOT/root/out/ToBeVPN_${VERSION}_amd64_legacy.deb" build/
+          sudo chown "$(id -u):$(id -g)" "build/ToBeVPN_${VERSION}_amd64_legacy.deb"
+          dpkg-deb -f "build/ToBeVPN_${VERSION}_amd64_legacy.deb" Package Version Depends
+
+      - name: Sign for the in-app updater
+        # The same key as the other packages: the app verifies the .deb with
+        # the public key it carries before installing it.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          DEB="build/ToBeVPN_${VERSION}_amd64_legacy.deb"
+          npx --yes @tauri-apps/cli@2 signer sign "$DEB"
+          test -s "$DEB.sig"
+          URL="https://github.com/${GH_REPO}/releases/download/${TAG}/$(basename "$DEB")"
+          # The updater plugin's check reads linux-x86_64(-deb); the app's own
+          # installer takes linux-x86_64-deb-legacy (linux_update.rs).
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg signature "$(cat "$DEB.sig")" \
+            --arg url "$URL" \
+            '{version: $version, pub_date: $pub_date,
+              platforms: {
+                "linux-x86_64-deb-legacy": {signature: $signature, url: $url},
+                "linux-x86_64-deb": {signature: $signature, url: $url},
+                "linux-x86_64": {signature: $signature, url: $url}}}' > build/latest-legacy.json
+          jq -e . build/latest-legacy.json > /dev/null
+          cat build/latest-legacy.json
+
+      - name: Attach to the release
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" --clobber \
+            "build/ToBeVPN_${VERSION}_amd64_legacy.deb" \
+            "build/ToBeVPN_${VERSION}_amd64_legacy.deb.sig" \
+            build/latest-legacy.json

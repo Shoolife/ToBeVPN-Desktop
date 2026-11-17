@@ -108,6 +108,10 @@ for dep in GLIB_2_0:glib-2.0 GOBJECT_2_0:gobject-2.0 GIO_2_0:gio-2.0; do
 done
 # tauri/custom-protocol is what the Tauri CLI adds for a release: the app
 # then serves the bundled dist/ instead of the dev server's address.
+# The updater checks this build's own manifest: it learns of a release only
+# once the release has its legacy .deb (made after the regular one).
+LEGACY_MANIFEST=https://github.com/Shoolife/ToBeVPN-Desktop/releases/latest/download/latest-legacy.json
+export TAURI_CONFIG="{\"plugins\":{\"updater\":{\"endpoints\":[\"$LEGACY_MANIFEST\"]}}}"
 cargo build --release --features webkit-4-0,tauri/custom-protocol
 BIN="$ROOT/src-tauri/target/release/tobevpn-desktop"
 
