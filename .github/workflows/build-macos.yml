@@ -95,7 +95,8 @@ jobs:
           mkdir -p smoke
           "$APP/Contents/MacOS/tobevpn-desktop" > smoke/app.log 2>&1 &
           APP_PID=$!
-          sleep 20
+          # Rosetta translates the whole Intel process on its first start.
+          if [ "${{ matrix.arch }}" = x64 ]; then sleep 90; else sleep 20; fi
           screencapture -x smoke/screen.png || true
           if kill -0 "$APP_PID" 2>/dev/null; then
             echo "The app is running"
