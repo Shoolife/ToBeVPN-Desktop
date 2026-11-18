@@ -32,7 +32,8 @@
         "font-src": "'self' data: tauri: ipc:"
       }
     },
-    "withGlobalTauri": false
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
