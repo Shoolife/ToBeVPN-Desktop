@@ -8,6 +8,9 @@
 //! and an expiring signed CDN link cannot break a slow download. The
 //! minisign signature of the assembled package is verified as before.
 
+// macOS has no package update of its own yet: only the TLS setup is used there.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use minisign_verify::{PublicKey, Signature};
 use reqwest::header::{CONTENT_RANGE, RANGE};
