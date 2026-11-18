@@ -177,7 +177,15 @@ fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
     let _ = window.set_background_color(Some(tauri::utils::config::Color(0, 0, 0, 0)));
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+/// The app draws its own title bar, as on Windows and Linux; macOS keeps its
+/// window shadow, which follows the window's rounded shape.
+#[cfg(target_os = "macos")]
+fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
+    let _ = window.set_decorations(false);
+    let _ = window.set_background_color(Some(tauri::utils::config::Color(0, 0, 0, 0)));
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn apply_platform_window_chrome(window: &tauri::WebviewWindow) {
     let _ = window.set_decorations(true);
 }
