@@ -19,7 +19,7 @@ jq --arg iface "$IFACE" '
   .log = {loglevel: "debug", access: ""}
   | .dns.servers = ["localhost"]
   | .outbounds |= map(if .tag == "proxy"
-      then {tag: "proxy", protocol: "freedom", settings: {domainStrategy: "UseIP"},
+      then {tag: "proxy", protocol: "freedom", settings: {domainStrategy: "UseIPv4"},
             streamSettings: {sockopt: {interface: $iface}}}
       else . end)' "$OUT/app.json" > "$OUT/xray.json"
 
