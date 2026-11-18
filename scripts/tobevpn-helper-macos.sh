@@ -24,6 +24,7 @@ ROUTE_FILE="$STATE_DIR/route"
 BYPASS_FILE="$STATE_DIR/bypass"
 DNS_FILE="$STATE_DIR/dns"
 LOG_FILE="$STATE_DIR/tun2socks.log"
+SCOPED_FILE="$STATE_DIR/scoped-default"
 
 valid_ipv4() {
     echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
@@ -92,8 +93,31 @@ cleanup() {
         done
         rm -f "$BYPASS_FILE"
     fi
+    if [ -f "$SCOPED_FILE" ]; then
+        route -n delete -ifscope "$(cat "$SCOPED_FILE")" default >/dev/null 2>&1 || true
+        rm -f "$SCOPED_FILE"
+    fi
     restore_dns
     rm -f "$ROUTE_FILE"
+}
+
+# A socket bound to the physical interface (Xray's direct exit, IP_BOUND_IF)
+# is routed by that interface's own scoped routes. Without a scoped default
+# there it falls back to the tunnel's 0/1 and 128/1, which belong to another
+# interface, and every connect fails with "network is unreachable". macOS
+# adds such a route only with several active interfaces; one of ours is
+# added when missing and removed again on stop.
+add_scoped_default() {
+    local GW="$1" IFACE="$2"
+    if netstat -rn -f inet | awk -v i="$IFACE" '$1 == "default" && $3 ~ /I/ && $4 == i {found=1} END {exit !found}'; then
+        return 0
+    fi
+    if [ -n "$GW" ]; then
+        route -n add -ifscope "$IFACE" default "$GW" >/dev/null 2>&1 || return 0
+    else
+        route -n add -ifscope "$IFACE" default -interface "$IFACE" >/dev/null 2>&1 || return 0
+    fi
+    echo "$IFACE" > "$SCOPED_FILE"
 }
 
 mkdir -p "$STATE_DIR"
@@ -147,6 +171,8 @@ case "${1:-}" in
 
     ifconfig "$TUN_NAME" "$TUN_ADDR" "$TUN_ADDR" up
     ifconfig "$TUN_NAME" inet6 "$TUN_ADDR6" prefixlen 64 >/dev/null 2>&1 || true
+
+    add_scoped_default "$GW" "$IFACE"
 
     # The server and the app's direct destinations keep the physical route.
     for IP in "$SERVER_IP" "$@"; do
