@@ -13,8 +13,11 @@ echo "Physical interface: $IFACE"
 
 (cd src-tauri && TOBEVPN_DUMP_XRAY_CONFIG="$OUT/app.json" TOBEVPN_DIRECT_INTERFACE="$IFACE" \
     cargo test --locked --lib dumps_auto_routing_config_for_ci -- --ignored -q)
+# The test has no VPN server for DNS: Xray asks the system resolver, whose
+# servers (1.1.1.1, 8.8.8.8, set by the helper) are kept off the tunnel below.
 jq --arg iface "$IFACE" '
   .log = {loglevel: "debug", access: ""}
+  | .dns.servers = ["localhost"]
   | .outbounds |= map(if .tag == "proxy"
       then {tag: "proxy", protocol: "freedom", settings: {domainStrategy: "UseIP"},
             streamSettings: {sockopt: {interface: $iface}}}
@@ -28,7 +31,7 @@ sudo mkdir -p /Library/PrivilegedHelperTools
 sudo install -o root -g wheel -m 755 scripts/tobevpn-helper-macos.sh /Library/PrivilegedHelperTools/app.tobevpn.helper
 sudo install -o root -g wheel -m 755 "src-tauri/bin/tun2socks-$TRIPLE" /Library/PrivilegedHelperTools/app.tobevpn.tun2socks
 # The documentation address of the test config stands for the VPN server.
-sudo /Library/PrivilegedHelperTools/app.tobevpn.helper start 203.0.113.10 2>&1 | tee "$OUT/helper.log"
+sudo /Library/PrivilegedHelperTools/app.tobevpn.helper start 203.0.113.10 1.1.1.1 8.8.8.8 2>&1 | tee "$OUT/helper.log"
 sleep 2
 # Without the tunnel every site would still open: make sure traffic goes in.
 VIA=$(route -n get 1.1.1.1 | awk '/interface:/ {print $2}')
@@ -50,9 +53,14 @@ for URL in https://www.ozon.ru https://mail.ru https://www.avito.ru https://ya.r
   case "$RESULT" in 000*) FAILED=1 ;; esac
 done
 
+# UDP through the tunnel and Xray's interface-bound exit (QUIC, games): a DNS
+# query to a server that is not kept off the tunnel.
+echo "== UDP through the tunnel (dig @9.9.9.9 ya.ru)" | tee -a "$OUT/curl.txt"
+dig +time=5 +tries=1 @9.9.9.9 ya.ru A +short 2>&1 | tee -a "$OUT/curl.txt" || true
+
 sudo /Library/PrivilegedHelperTools/app.tobevpn.helper stop | tee -a "$OUT/helper.log"
 kill "$XRAY_PID" 2>/dev/null || true
 echo "== after stop"; curl -s -o /dev/null -m 20 -w "%{http_code}\n" https://ya.ru | tee -a "$OUT/curl.txt"
-grep -E "tunneling request|taking detour|failed|error" "$OUT/xray.log" | head -60 > "$OUT/xray-routing.txt" || true
+grep -E "taking detour|failed" "$OUT/xray.log" | grep -v "udp:1.1.1.1:53\|mask.icloud" | head -80 > "$OUT/xray-routing.txt" || true
 cat "$OUT/xray-routing.txt"
 exit "$FAILED"
