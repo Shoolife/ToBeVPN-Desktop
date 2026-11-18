@@ -60,6 +60,13 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked --all-targets
 
+      - name: Tunnel test (automatic routing)
+        # The VPN path on a real Mac: helper, tun2socks, routes, DNS and
+        # Xray's routing rules, with Russian sites leaving directly.
+        if: matrix.arch == 'arm64'
+        continue-on-error: true
+        run: bash scripts/ci-macos-tunnel-test.sh
+
       - name: Inject backend hostnames
         env:
           BOT_API_HOST: ${{ secrets.BOT_API_HOST || 'example.invalid' }}
@@ -115,6 +122,7 @@ jobs:
           path: |
             src-tauri/target/${{ matrix.triple }}/release/bundle/dmg/*.dmg
             smoke/
+            tunnel-test/
           if-no-files-found: warn
           # Built clients carry runtime configuration: short-lived only.
           retention-days: 3
