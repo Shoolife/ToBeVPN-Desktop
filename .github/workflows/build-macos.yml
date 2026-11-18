@@ -1,8 +1,9 @@
 name: build-macos
 run-name: macOS build of ${{ github.ref_name }}
 
-# The macOS (Apple Silicon) app: an unsigned .dmg for testing, built on a
-# GitHub macOS runner, then started there once with a screenshot of its
+# The macOS app for Apple Silicon and for Intel Macs: unsigned .dmg files for
+# testing, built on a GitHub macOS (Apple Silicon) runner, the Intel one by
+# cross-compiling, then each started there once with a screenshot of its
 # window. Kept apart from build.yml until the macOS client is released.
 on:
   push:
@@ -14,6 +15,14 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            triple: aarch64-apple-darwin
+          - arch: x64
+            triple: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
@@ -26,21 +35,26 @@ jobs:
         with:
           toolchain: 1.94.1
           components: rustfmt, clippy
+          targets: ${{ matrix.triple }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.arch }}
 
       - name: Sidecars and routing data
         env:
           GH_TOKEN: ${{ github.token }}
+          MACOS_ARCH: ${{ matrix.arch }}
         run: bash scripts/ci-macos-assets.sh
 
       - name: Install npm deps
         run: npm ci
 
       - name: Check Rust core
+        # Once, on the runner's own architecture.
+        if: matrix.arch == 'arm64'
         working-directory: src-tauri
         run: |
           cargo clippy --locked --all-targets -- -D warnings
@@ -56,7 +70,7 @@ jobs:
         run: bash scripts/inject-backend-host.sh
 
       - name: Build .app and .dmg
-        run: npx tauri build --bundles app,dmg
+        run: npx tauri build --bundles app,dmg --target ${{ matrix.triple }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -68,10 +82,15 @@ jobs:
 
       - name: Start the app once
         # The runner has a logged-in desktop: the app is started from the
-        # built bundle, left for 20 s, then its window is captured.
+        # built bundle, left for 20 s, then its window is captured. The Intel
+        # build runs through Rosetta, when the runner has it.
         run: |
           set -euo pipefail
-          APP=$(ls -d src-tauri/target/release/bundle/macos/*.app | head -1)
+          if [ "${{ matrix.arch }}" = x64 ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "No Rosetta on this runner: the Intel build is not started"
+            exit 0
+          fi
+          APP=$(ls -d src-tauri/target/${{ matrix.triple }}/release/bundle/macos/*.app | head -1)
           ls "$APP/Contents/MacOS" "$APP/Contents/Resources/bin" || true
           mkdir -p smoke
           "$APP/Contents/MacOS/tobevpn-desktop" > smoke/app.log 2>&1 &
@@ -91,9 +110,9 @@ jobs:
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         if: always()
         with:
-          name: ToBeVPN-macos
+          name: ToBeVPN-macos-${{ matrix.arch }}
           path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.triple }}/release/bundle/dmg/*.dmg
             smoke/
           if-no-files-found: warn
           # Built clients carry runtime configuration: short-lived only.

@@ -15,5 +15,9 @@
   "macos_arm64": {
     "asset": "Xray-macos-arm64-v8a.zip",
     "sha256": "233f0c66681cd0726f81a6b2b6ed6a5710869e312047b522e46ed53035bebd26"
+  },
+  "macos_x64": {
+    "asset": "Xray-macos-64.zip",
+    "sha256": "488963e676e06f5e48547f9dd38116aaca8de4234959b4272ae8f284e658dfd0"
   }
 }
