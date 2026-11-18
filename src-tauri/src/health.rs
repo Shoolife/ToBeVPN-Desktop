@@ -15,11 +15,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 
 const RUN_STATE_FILE: &str = "run-state.json";
+// Process sampling exists for Linux and Windows only.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const SAMPLE_EVERY: Duration = Duration::from_secs(120);
 const STALL_CHECK_EVERY: Duration = Duration::from_secs(5);
 const STALL_AFTER_SECS: u64 = 10;
 /// Memory (main + WebKit) and CPU that make a sample a warning.
+// Process sampling exists for Linux and Windows only.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const WARN_RSS_MB: u64 = 900;
+// Process sampling exists for Linux and Windows only.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const WARN_CPU_PERCENT: f64 = 30.0;
 
 static RUN_STATE_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -144,6 +150,8 @@ fn install_panic_hook() {
 
 // ------------------------------------------------------------- sampling ---
 
+// Process sampling exists for Linux and Windows only.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Default, Clone, Copy)]
 struct ProcSample {
     rss_kb: u64,

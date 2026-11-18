@@ -441,6 +441,7 @@ fn clean_device_model_part(value: &str) -> Option<String> {
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn compose_vendor_model(vendor: Option<String>, model: Option<String>) -> Option<String> {
     let model = model?;
     match vendor {
@@ -455,6 +456,7 @@ fn compose_vendor_model(vendor: Option<String>, model: Option<String>) -> Option
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn looks_like_model_code(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
@@ -465,6 +467,7 @@ fn looks_like_model_code(value: &str) -> bool {
         && value.chars().any(|ch| ch.is_ascii_digit())
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn prefer_human_model(
     product_name: Option<String>,
     product_version: Option<String>,

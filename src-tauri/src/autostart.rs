@@ -71,7 +71,10 @@ pub fn set_autostart_enabled(_app: tauri::AppHandle, enabled: bool) -> Result<()
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    Err("Autostart is supported only on Windows and Linux".into())
+    {
+        let _ = enabled;
+        Err("Autostart is supported only on Windows and Linux".into())
+    }
 }
 
 #[cfg(target_os = "windows")]
