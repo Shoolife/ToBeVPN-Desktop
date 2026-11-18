@@ -18,7 +18,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+# macos-private-api: the frameless, transparent window on macOS (app.macOSPrivateApi
+# in tauri.conf.json; tauri-build wants feature and config alike everywhere).
+tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
@@ -66,8 +68,6 @@ notify-rust = "4.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
-# The frameless, transparent window (tauri.macos.conf.json: macOSPrivateApi).
-tauri = { version = "2", features = ["macos-private-api"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
