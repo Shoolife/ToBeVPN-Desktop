@@ -1150,4 +1150,18 @@ mod tests {
             "h.example"
         );
     }
+
+    /// For CI (build-macos.yml): the app's own config in the automatic mode,
+    /// written where TOBEVPN_DUMP_XRAY_CONFIG says, its direct traffic bound
+    /// to TOBEVPN_DIRECT_INTERFACE. The proxy is a documentation address that
+    /// never answers: only the direct path is tested.
+    #[test]
+    #[ignore]
+    fn dumps_auto_routing_config_for_ci() {
+        let path = std::env::var("TOBEVPN_DUMP_XRAY_CONFIG").expect("TOBEVPN_DUMP_XRAY_CONFIG");
+        let mut server = test_server();
+        server.routing_mode = "blocked_only".into();
+        server.direct_interface = std::env::var("TOBEVPN_DIRECT_INTERFACE").unwrap_or_default();
+        std::fs::write(path, build_xray_config(&server)).expect("write config");
+    }
 }
