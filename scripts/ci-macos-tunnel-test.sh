@@ -34,8 +34,8 @@ sudo install -o root -g wheel -m 755 "src-tauri/bin/tun2socks-$TRIPLE" /Library/
 sudo /Library/PrivilegedHelperTools/app.tobevpn.helper start 203.0.113.10 1.1.1.1 8.8.8.8 2>&1 | tee "$OUT/helper.log"
 sleep 2
 # Without the tunnel every site would still open: make sure traffic goes in.
-VIA=$(route -n get 1.1.1.1 | awk '/interface:/ {print $2}')
-echo "1.1.1.1 goes through: $VIA"
+VIA=$(route -n get 9.9.9.9 | awk '/interface:/ {print $2}')
+echo "9.9.9.9 goes through: $VIA"
 if [ "$VIA" != utun199 ]; then
   echo "::error::The tunnel did not come up"
   tail -20 /var/run/tobevpn/tun2socks.log 2>/dev/null || true
