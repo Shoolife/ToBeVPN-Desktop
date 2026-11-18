@@ -298,21 +298,15 @@ pub(crate) const RU_DIRECT_DOMAIN_GROUPS: &[&str] = &[
 
 /// Build the full xray-core JSON config.
 /// Mirrors TV's VpnConfig.kt but without the TUN inbound (tun2socks handles that).
-/// macOS: Xray binds a socket to the physical interface (the direct exit's
-/// sockopt.interface) only when it opens it for one IPv4 family: IPv6 goes
-/// through IPV6_BOUND_IF, useless without IPv6 there, and UDP sockets are
-/// dual-stack, so the binding misses and their packets are lost ("network is
-/// unreachable"). Direct traffic therefore resolves IPv4 only, and only its TCP
-/// leaves directly; UDP of those sites (QUIC, calls) goes through the tunnel.
+/// macOS: the direct exit is bound to the physical interface, and for an IPv6
+/// destination Xray binds with IPV6_BOUND_IF, which leads nowhere on the
+/// common network without IPv6. Direct traffic therefore resolves IPv4 only.
+/// (That the bound exit can connect at all takes the helper's scoped default
+/// route on that interface.)
 fn limit_direct_exit_for_macos(config: &mut Value) {
     if let Some(outbounds) = config["outbounds"].as_array_mut() {
         for outbound in outbounds.iter_mut().filter(|o| o["tag"] == "direct") {
             outbound["settings"]["domainStrategy"] = json!("UseIPv4");
-        }
-    }
-    if let Some(rules) = config["routing"]["rules"].as_array_mut() {
-        for rule in rules.iter_mut().filter(|r| r["outboundTag"] == "direct") {
-            rule["network"] = json!("tcp");
         }
     }
 }
@@ -1367,28 +1361,18 @@ mod tests {
     }
 
     #[test]
-    fn macos_direct_exit_is_ipv4_tcp_only() {
+    fn macos_direct_exit_resolves_ipv4_only() {
         let mut server = test_server();
         server.routing_mode = "blocked_only".into();
-        server.direct_domains = vec!["example.ru".into()];
         server.direct_interface = "en0".into();
         let mut config: Value = serde_json::from_str(&build_xray_config(&server)).unwrap();
+        let rules_before = config["routing"].clone();
         limit_direct_exit_for_macos(&mut config);
         assert_eq!(
             config["outbounds"][1]["settings"]["domainStrategy"],
             "UseIPv4"
         );
-        let rules = config["routing"]["rules"].as_array().unwrap();
-        let direct: Vec<&Value> = rules
-            .iter()
-            .filter(|r| r["outboundTag"] == "direct")
-            .collect();
-        assert!(direct.len() >= 2);
-        assert!(direct.iter().all(|r| r["network"] == "tcp"));
-        // DNS and everything else are untouched.
-        assert!(rules
-            .iter()
-            .filter(|r| r["outboundTag"] == "proxy")
-            .all(|r| r.get("network").is_none_or(|n| n == "tcp,udp")));
+        assert_eq!(config["outbounds"][0]["tag"], "proxy");
+        assert_eq!(config["routing"], rules_before);
     }
 }
