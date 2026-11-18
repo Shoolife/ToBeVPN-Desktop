@@ -24,11 +24,20 @@ XRAY_LOCATION_ASSET=src-tauri/bin "src-tauri/bin/xray-$TRIPLE" run -c "$OUT/xray
 XRAY_PID=$!
 sleep 2
 
+sudo mkdir -p /Library/PrivilegedHelperTools
 sudo install -o root -g wheel -m 755 scripts/tobevpn-helper-macos.sh /Library/PrivilegedHelperTools/app.tobevpn.helper
 sudo install -o root -g wheel -m 755 "src-tauri/bin/tun2socks-$TRIPLE" /Library/PrivilegedHelperTools/app.tobevpn.tun2socks
 # The documentation address of the test config stands for the VPN server.
-sudo /Library/PrivilegedHelperTools/app.tobevpn.helper start 203.0.113.10 | tee "$OUT/helper.log"
+sudo /Library/PrivilegedHelperTools/app.tobevpn.helper start 203.0.113.10 2>&1 | tee "$OUT/helper.log"
 sleep 2
+# Without the tunnel every site would still open: make sure traffic goes in.
+VIA=$(route -n get 1.1.1.1 | awk '/interface:/ {print $2}')
+echo "1.1.1.1 goes through: $VIA"
+if [ "$VIA" != utun199 ]; then
+  echo "::error::The tunnel did not come up"
+  tail -20 /var/run/tobevpn/tun2socks.log 2>/dev/null || true
+  exit 1
+fi
 {
   echo "== routes"; netstat -rn -f inet | head -25
   echo "== DNS"; scutil --dns | grep nameserver | sort -u
