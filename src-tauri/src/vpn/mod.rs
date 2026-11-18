@@ -55,6 +55,10 @@ pub mod manager;
 #[path = "manager_windows.rs"]
 pub mod manager;
 
+#[cfg(target_os = "macos")]
+#[path = "manager_macos.rs"]
+pub mod manager;
+
 #[cfg(target_os = "windows")]
 mod windows_routes;
 

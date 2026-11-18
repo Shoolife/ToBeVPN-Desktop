@@ -1,0 +1,100 @@
+name: build-macos
+run-name: macOS build of ${{ github.ref_name }}
+
+# The macOS (Apple Silicon) app: an unsigned .dmg for testing, built on a
+# GitHub macOS runner, then started there once with a screenshot of its
+# window. Kept apart from build.yml until the macOS client is released.
+on:
+  push:
+    branches: [macos]
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.94.1
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Sidecars and routing data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci-macos-assets.sh
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Check Rust core
+        working-directory: src-tauri
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --all-targets
+
+      - name: Inject backend hostnames
+        env:
+          BOT_API_HOST: ${{ secrets.BOT_API_HOST || 'example.invalid' }}
+          PANEL_HOST: ${{ secrets.PANEL_HOST || 'example.invalid' }}
+          SUBSCRIPTION_HOST: ${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
+        run: bash scripts/inject-backend-host.sh
+
+      - name: Build .app and .dmg
+        run: npx tauri build --bundles app,dmg
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_BOT_API_URL: https://${{ secrets.BOT_API_HOST || 'example.invalid' }}/
+          VITE_PANEL_URL: https://${{ secrets.PANEL_HOST || 'example.invalid' }}
+          VITE_SUBSCRIPTION_URL: https://${{ secrets.SUBSCRIPTION_HOST || 'example.invalid' }}/
+          VITE_FALLBACK_BOT_DOMAIN: ${{ secrets.FALLBACK_BOT_DOMAIN || 'https://example.invalid/' }}
+          VITE_FALLBACK_SUBS_DOMAIN: ${{ secrets.FALLBACK_SUBS_DOMAIN || 'https://example.invalid/' }}
+
+      - name: Start the app once
+        # The runner has a logged-in desktop: the app is started from the
+        # built bundle, left for 20 s, then its window is captured.
+        run: |
+          set -euo pipefail
+          APP=$(ls -d src-tauri/target/release/bundle/macos/*.app | head -1)
+          ls "$APP/Contents/MacOS" "$APP/Contents/Resources/bin" || true
+          mkdir -p smoke
+          "$APP/Contents/MacOS/tobevpn-desktop" > smoke/app.log 2>&1 &
+          APP_PID=$!
+          sleep 20
+          screencapture -x smoke/screen.png || true
+          if kill -0 "$APP_PID" 2>/dev/null; then
+            echo "The app is running"
+            kill "$APP_PID" || true
+          else
+            echo "::error::The app exited on its own"
+            tail -50 smoke/app.log
+            exit 1
+          fi
+          tail -30 smoke/app.log
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        if: always()
+        with:
+          name: ToBeVPN-macos
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            smoke/
+          if-no-files-found: warn
+          # Built clients carry runtime configuration: short-lived only.
+          retention-days: 3

@@ -11,5 +11,9 @@
   "windows": {
     "asset": "Xray-windows-64.zip",
     "sha256": "1262522266337b824f07beb8e1375786b437683b3890105469088f8e17e0a69d"
+  },
+  "macos_arm64": {
+    "asset": "Xray-macos-arm64-v8a.zip",
+    "sha256": "233f0c66681cd0726f81a6b2b6ed6a5710869e312047b522e46ed53035bebd26"
   }
 }
