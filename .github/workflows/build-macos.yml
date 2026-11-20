@@ -12,7 +12,7 @@ on:
 
 jobs:
   macos:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     strategy:
@@ -21,8 +21,12 @@ jobs:
         include:
           - arch: arm64
             triple: aarch64-apple-darwin
+            runner: macos-latest
+          # A real Intel Mac: the Intel build is built and started natively,
+          # not through Rosetta.
           - arch: x64
             triple: x86_64-apple-darwin
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
@@ -93,18 +97,15 @@ jobs:
         # build runs through Rosetta, when the runner has it.
         run: |
           set -euo pipefail
-          if [ "${{ matrix.arch }}" = x64 ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
-            echo "No Rosetta on this runner: the Intel build is not started"
-            exit 0
-          fi
           APP=$(ls -d src-tauri/target/${{ matrix.triple }}/release/bundle/macos/*.app | head -1)
           ls "$APP/Contents/MacOS" "$APP/Contents/Resources/bin" || true
           mkdir -p smoke
           "$APP/Contents/MacOS/tobevpn-desktop" > smoke/app.log 2>&1 &
           APP_PID=$!
-          # Rosetta translates the whole Intel process on its first start.
-          if [ "${{ matrix.arch }}" = x64 ]; then sleep 90; else sleep 20; fi
+          sleep 30
           screencapture -x smoke/screen.png || true
+          # How macOS itself starts it, as a user would (Finder / open).
+          ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | tail -5 || true
           if kill -0 "$APP_PID" 2>/dev/null; then
             echo "The app is running"
             kill "$APP_PID" || true
@@ -114,6 +115,21 @@ jobs:
             exit 1
           fi
           tail -30 smoke/app.log
+          # Then as a user starts it: through Launch Services (Finder, open).
+          sleep 3
+          cp -R "$APP" /tmp/ToBeVPN.app
+          xattr -dr com.apple.quarantine /tmp/ToBeVPN.app 2>/dev/null || true
+          open /tmp/ToBeVPN.app 2>&1 | tee smoke/open.log
+          sleep 30
+          screencapture -x smoke/screen-open.png || true
+          if pgrep -f /tmp/ToBeVPN.app/Contents/MacOS/tobevpn-desktop >/dev/null; then
+            echo "Started through open"
+            pkill -f /tmp/ToBeVPN.app/Contents/MacOS/tobevpn-desktop || true
+          else
+            echo "::error::open did not start the app"
+            log show --last 2m --predicate 'process == "launchd" OR subsystem == "com.apple.launchservices"' 2>/dev/null | grep -i tobevpn | tail -20 || true
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         if: always()
