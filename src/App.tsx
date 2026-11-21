@@ -77,6 +77,7 @@ import {
   saveOutlinedText,
   WINDOW_SCALE_BASE,
 } from "./session/interfaceScale";
+import KeeneticOfferDialog from "./components/KeeneticOfferDialog";
 import "./App.css";
 
 export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "speedtest-history" | "settings-transfer" | "devices" | "router" | "routing" | "referrals" | "promocodes";
@@ -1213,6 +1214,10 @@ export default function App({
         >
           {renderScreen(currentScreen)}
         </div>
+        <KeeneticOfferDialog
+          active={!browserPreview && !updateRequired && currentScreen === "home" && !prevScreen}
+          onOpen={() => goForward("router")}
+        />
         {/* Overlay above every screen. We portal it onto a dedicated
             #overlay-root sibling of #root (declared in index.html) so it
             sits outside the .app container's overflow:hidden and the
