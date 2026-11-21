@@ -62,20 +62,74 @@ function normalizeDomainValue(value: unknown): string | null {
   return input;
 }
 
-function isIpLiteral(host: string): boolean {
-  return /^\d+$/.test(host.split(".").pop() ?? "") || host.startsWith("[");
+function parseIpv4(text: string): number | null {
+  const parts = text.split(".");
+  if (parts.length !== 4 || parts.some((part) => !/^(0|[1-9]\d{0,2})$/.test(part) || Number(part) > 255)) {
+    return null;
+  }
+  return parts.reduce((value, part) => value * 256 + Number(part), 0);
 }
 
-/** Whether the input is an IP address rather than a site name. */
-export function looksLikeIpAddress(value: string): boolean {
-  const input = value.trim().toLowerCase();
-  if (!input) return false;
+/** Eight 16-bit groups, via the URL parser (it knows every IPv6 spelling). */
+function parseIpv6(text: string): number[] | null {
+  if (!text.includes(":") || !/^[0-9a-f:.]+$/.test(text)) return null;
+  let host: string;
   try {
-    const parsed = new URL(input.includes("://") ? input : `https://${input}`);
-    return isIpLiteral(parsed.hostname);
+    host = new URL(`http://[${text}]/`).hostname.slice(1, -1);
   } catch {
-    return /^[\d.:[\]]+$/.test(input);
+    return null;
   }
+  const [head, tail] = host.includes("::") ? host.split("::") : [host, null];
+  const groups = (part: string) => (part ? part.split(":").map((group) => parseInt(group, 16)) : []);
+  const left = groups(head);
+  const right = tail === null ? [] : groups(tail);
+  const missing = 8 - left.length - right.length;
+  if (tail === null ? left.length !== 8 : missing < 0) return null;
+  return [...left, ...new Array<number>(Math.max(0, missing)).fill(0), ...right];
+}
+
+function formatIpv6(groups: number[]): string {
+  return new URL(`http://[${groups.map((group) => group.toString(16)).join(":")}]/`).hostname.slice(1, -1);
+}
+
+/**
+ * An address or subnet as the VPN core takes it: "203.0.113.5",
+ * "10.0.0.0/8", "2001:db8::/32" (host bits cleared). Null for anything else.
+ */
+export function normalizeRoutingIp(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const input = value.trim().toLowerCase().replace(/^\[/, "").replace(/\](?=\/|$)/, "");
+  if (!input) return null;
+  const [address, prefixText, extra] = input.split("/");
+  if (extra !== undefined || (prefixText !== undefined && !/^\d{1,3}$/.test(prefixText))) return null;
+  const v4 = parseIpv4(address);
+  if (v4 !== null) {
+    const prefix = prefixText === undefined ? 32 : Number(prefixText);
+    if (prefix > 32) return null;
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+    const network = (v4 & mask) >>> 0;
+    const text = [24, 16, 8, 0].map((shift) => (network >>> shift) & 255).join(".");
+    return prefix === 32 ? text : `${text}/${prefix}`;
+  }
+  const v6 = parseIpv6(address);
+  if (v6 === null) return null;
+  const prefix = prefixText === undefined ? 128 : Number(prefixText);
+  if (prefix > 128) return null;
+  const masked = v6.map((group, index) => {
+    const bits = Math.min(16, Math.max(0, prefix - index * 16));
+    return bits === 16 ? group : bits === 0 ? 0 : group & ((0xffff << (16 - bits)) & 0xffff);
+  });
+  const text = formatIpv6(masked);
+  return prefix === 128 ? text : `${text}/${prefix}`;
+}
+
+/** A site, an address or a subnet for the "always direct / via VPN" lists. */
+function normalizeExceptionValue(value: unknown): string | null {
+  return normalizeRoutingIp(value) ?? normalizeDomainValue(value);
+}
+
+function isIpLiteral(host: string): boolean {
+  return /^\d+$/.test(host.split(".").pop() ?? "") || host.startsWith("[");
 }
 
 // --- Display of internationalised names (RFC 3492 punycode) ---
@@ -135,11 +189,15 @@ export function displayRoutingDomain(domain: string): string {
     .join(".");
 }
 
-function normalizeDomainList(value: unknown, limit = MAX_DOMAINS_PER_LIST): string[] {
+function normalizeDomainList(
+  value: unknown,
+  limit = MAX_DOMAINS_PER_LIST,
+  normalize: (item: unknown) => string | null = normalizeDomainValue,
+): string[] {
   if (!Array.isArray(value)) return [];
   const out = new Set<string>();
   for (const item of value) {
-    const domain = normalizeDomainValue(item);
+    const domain = normalize(item);
     if (domain) out.add(domain);
     if (out.size >= limit) break;
   }
@@ -177,6 +235,8 @@ function normalizeSettings(value: unknown): RoutingSettings {
       parsed.vpnDomains,
       parsed.proxyDomainExceptions,
     ),
+    MAX_DOMAINS_PER_LIST,
+    normalizeExceptionValue,
   );
   const proxySet = new Set(proxyDomains);
   return {
@@ -209,6 +269,8 @@ function normalizeSettings(value: unknown): RoutingSettings {
         parsed.bypassDomains,
         parsed.directDomainExceptions,
       ),
+      MAX_DOMAINS_PER_LIST,
+      normalizeExceptionValue,
     ).filter((domain) => !proxySet.has(domain)),
     proxyDomains,
   };
@@ -233,6 +295,11 @@ function readStoredSettings(): { settings: RoutingSettings; shouldPersist: boole
 
 export function normalizeRoutingDomain(value: string): string | null {
   return normalizeDomainValue(value);
+}
+
+/** An entry of the "always direct / via VPN" lists: a site, an address or a subnet. */
+export function normalizeRoutingException(value: string): string | null {
+  return normalizeExceptionValue(value);
 }
 
 export function loadRoutingSettings(): RoutingSettings {

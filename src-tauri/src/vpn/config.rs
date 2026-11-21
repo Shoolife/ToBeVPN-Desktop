@@ -619,7 +619,95 @@ fn build_dns() -> Value {
     })
 }
 
+/// An address or subnet from the user's exception lists, as Xray takes it:
+/// "203.0.113.5", "10.0.0.0/8", "2001:db8::/32" (host bits cleared), with
+/// its prefix length for ordering. None for anything else (a domain).
+fn normalize_ip_entry(raw: &str) -> Option<(String, u8)> {
+    let raw = raw.trim().trim_start_matches('[');
+    let (address, prefix) = match raw.split_once('/') {
+        Some((address, prefix)) => (address.trim_end_matches(']'), Some(prefix)),
+        None => (raw.trim_end_matches(']'), None),
+    };
+    let address: std::net::IpAddr = address.parse().ok()?;
+    let max = if address.is_ipv4() { 32 } else { 128 };
+    let prefix = match prefix {
+        Some(prefix) => prefix.parse::<u8>().ok().filter(|prefix| *prefix <= max)?,
+        None => max,
+    };
+    let network = match address {
+        std::net::IpAddr::V4(v4) => {
+            let bits = u32::from(v4) & u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
+            std::net::IpAddr::V4(bits.into())
+        }
+        std::net::IpAddr::V6(v6) => {
+            let bits = u128::from(v6) & u128::MAX.checked_shl(u32::from(128 - prefix)).unwrap_or(0);
+            std::net::IpAddr::V6(bits.into())
+        }
+    };
+    Some(if prefix == max {
+        (network.to_string(), prefix)
+    } else {
+        (format!("{network}/{prefix}"), prefix)
+    })
+}
+
+/// IP rules where the narrowest subnet wins, whatever list it is in, like
+/// the domain rules: "always VPN" for 10.1.2.3 beats "always direct" for
+/// 10.0.0.0/8. An entry present in both lists counts as `first_tag`.
+fn longest_match_ip_rules(
+    first: &[String],
+    first_tag: &str,
+    second: &[String],
+    second_tag: &str,
+) -> Vec<Value> {
+    let mut entries: Vec<(String, u8, usize, &str)> = Vec::new();
+    let mut seen = HashSet::new();
+    for (list, (raws, tag)) in [(first, first_tag), (second, second_tag)]
+        .into_iter()
+        .enumerate()
+    {
+        for (entry, prefix) in raws.iter().filter_map(|raw| normalize_ip_entry(raw)) {
+            if seen.insert(entry.clone()) {
+                entries.push((entry, prefix, list, tag));
+            }
+        }
+    }
+    // Narrowest first. IPv4 and IPv6 never match the same address, so a
+    // /32 next to a /64 is only a stable order.
+    entries.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let mut rules: Vec<Value> = Vec::new();
+    let mut current: Option<(u8, &str, Vec<String>)> = None;
+    for (entry, prefix, _, tag) in entries {
+        match &mut current {
+            Some((current_prefix, current_tag, list))
+                if *current_prefix == prefix && *current_tag == tag =>
+            {
+                list.push(entry);
+            }
+            _ => {
+                if let Some((_, done_tag, list)) = current.take() {
+                    rules.push(json!({ "type": "field", "ip": list, "outboundTag": done_tag }));
+                }
+                current = Some((prefix, tag, vec![entry]));
+            }
+        }
+    }
+    if let Some((_, done_tag, list)) = current {
+        rules.push(json!({ "type": "field", "ip": list, "outboundTag": done_tag }));
+    }
+    rules
+}
+
 fn normalize_domain(raw: &str) -> Option<String> {
+    if normalize_ip_entry(raw).is_some() {
+        return None;
+    }
     let domain = raw
         .trim()
         .trim_start_matches("*.")
@@ -719,6 +807,17 @@ fn build_routing(server: &ServerConfig) -> Value {
         &server.direct_domains,
         "direct",
     ));
+    // Addresses and subnets from the same lists. Xray matches them against
+    // the destination address, which sniffing replaces with the site's name
+    // (routeOnly: false): IPOnDemand below resolves such a name for them.
+    let ip_rules = longest_match_ip_rules(
+        &server.proxy_domains,
+        "proxy",
+        &server.direct_domains,
+        "direct",
+    );
+    let has_ip_rules = !ip_rules.is_empty();
+    rules.extend(ip_rules);
 
     if server.routing_mode == "blocked_only" || server.routing_mode == "selective" {
         rules.push(json!({
@@ -760,9 +859,11 @@ fn build_routing(server: &ServerConfig) -> Value {
     }
 
     json!({
-        // No rule matches on IP, so resolving unmatched domains first
-        // (IPIfNonMatch) only delayed new connections.
-        "domainStrategy": "AsIs",
+        // Without the user's IP rules no rule matches on IP, and resolving
+        // names (IPIfNonMatch) only delayed new connections. With them, a
+        // connection the sniffer named is resolved when it reaches an IP
+        // rule; the answer is cached.
+        "domainStrategy": if has_ip_rules { "IPOnDemand" } else { "AsIs" },
         "rules": rules
     })
 }
@@ -1149,5 +1250,83 @@ mod tests {
             ss["tcpSettings"]["header"]["request"]["headers"]["Host"][0],
             "h.example"
         );
+    }
+
+    #[test]
+    fn user_ip_entries_become_ip_rules_narrowest_first() {
+        let mut server = test_server();
+        server.routing_mode = "all_vpn".into();
+        server.direct_domains = vec![
+            "10.0.0.0/8".into(),
+            "203.0.113.5".into(),
+            "example.org".into(),
+        ];
+        server.proxy_domains = vec!["10.1.2.3".into(), "2001:DB8::1/32".into()];
+        let routing = build_routing(&server);
+        assert_eq!(routing["domainStrategy"], "IPOnDemand");
+        let rules = routing["rules"].as_array().unwrap();
+        let ip_rules: Vec<(Vec<String>, String)> = rules
+            .iter()
+            .filter_map(|rule| {
+                let ips = rule["ip"].as_array()?;
+                Some((
+                    ips.iter()
+                        .map(|ip| ip.as_str().unwrap().to_string())
+                        .collect(),
+                    rule["outboundTag"].as_str().unwrap().to_string(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            ip_rules,
+            // Grouped by prefix length; an IPv6 /32 beside IPv4 /32 hosts is
+            // harmless, the two families never match the same address.
+            vec![
+                (
+                    vec!["10.1.2.3".to_string(), "2001:db8::/32".to_string()],
+                    "proxy".to_string()
+                ),
+                (vec!["203.0.113.5".to_string()], "direct".to_string()),
+                (vec!["10.0.0.0/8".to_string()], "direct".to_string()),
+            ]
+        );
+        // The domain stays a domain rule, and no address becomes "domain:".
+        let domains: Vec<&str> = rules
+            .iter()
+            .filter_map(|rule| rule["domain"].as_array())
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(domains, vec!["domain:example.org"]);
+    }
+
+    #[test]
+    fn without_ip_entries_names_are_not_resolved() {
+        let mut server = test_server();
+        server.direct_domains = vec!["example.org".into()];
+        assert_eq!(build_routing(&server)["domainStrategy"], "AsIs");
+    }
+
+    #[test]
+    fn ip_entries_are_normalized_or_refused() {
+        assert_eq!(
+            normalize_ip_entry("10.1.2.3/8"),
+            Some(("10.0.0.0/8".into(), 8))
+        );
+        assert_eq!(
+            normalize_ip_entry(" 1.2.3.4 "),
+            Some(("1.2.3.4".into(), 32))
+        );
+        assert_eq!(
+            normalize_ip_entry("[2001:db8::1]"),
+            Some(("2001:db8::1".into(), 128))
+        );
+        assert_eq!(
+            normalize_ip_entry("0.0.0.0/0"),
+            Some(("0.0.0.0/0".into(), 0))
+        );
+        assert_eq!(normalize_ip_entry("1.2.3.4/33"), None);
+        assert_eq!(normalize_ip_entry("1.2.3"), None);
+        assert_eq!(normalize_ip_entry("example.com"), None);
     }
 }

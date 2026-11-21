@@ -8,9 +8,9 @@ import {
   displayRoutingDomain,
   isWithinDomain,
   loadRoutingSettings,
-  looksLikeIpAddress,
   MAX_DOMAINS_PER_LIST,
   normalizeRoutingDomain,
+  normalizeRoutingException,
   saveRoutingSettings,
   type RoutingSettings,
 } from "../session/routingSettings";
@@ -34,7 +34,7 @@ function sameSettings(left: RoutingSettings, right: RoutingSettings): boolean {
   );
 }
 
-type DomainAddError = "routing_invalid_domain" | "routing_ip_not_supported" | "routing_list_full";
+type DomainAddError = "routing_invalid_entry" | "routing_list_full";
 
 function DomainEditor({
   title,
@@ -74,7 +74,7 @@ function DomainEditor({
           onKeyDown={(event) => {
             if (event.key === "Enter") submit();
           }}
-          placeholder="example.com"
+          placeholder={t("routing_entry_placeholder")}
           spellCheck={false}
           autoCapitalize="none"
         />
@@ -82,8 +82,8 @@ function DomainEditor({
           type="button"
           onClick={submit}
           disabled={!value.trim()}
-          aria-label={t("routing_add_domain")}
-          title={t("routing_add_domain")}
+          aria-label={t("routing_add_entry")}
+          title={t("routing_add_entry")}
         >
           +
         </button>
@@ -97,8 +97,8 @@ function DomainEditor({
               <button
                 type="button"
                 onClick={() => onRemove(domain)}
-                aria-label={t("routing_remove_domain")}
-                title={t("routing_remove_domain")}
+                aria-label={t("routing_remove_entry")}
+                title={t("routing_remove_entry")}
               >
                 ×
               </button>
@@ -258,10 +258,8 @@ export default function RoutingScreen({ onBack }: { onBack: () => void }) {
     action: "add" | "remove",
     rawDomain: string,
   ): DomainAddError | null => {
-    const domain = normalizeRoutingDomain(rawDomain);
-    if (!domain) {
-      return looksLikeIpAddress(rawDomain) ? "routing_ip_not_supported" : "routing_invalid_domain";
-    }
+    const domain = normalizeRoutingException(rawDomain);
+    if (!domain) return "routing_invalid_entry";
     if (
       action === "add" &&
       !draft[target].includes(domain) &&
