@@ -1,3 +1,5 @@
+import CopyNotification, { useCopyNotification } from "../components/CopyNotification";
+import { onHomeConnectNotice } from "../session/homePause";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { exit } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -597,6 +599,12 @@ export default function HomeScreen({
 
   // The home router may already send this computer through the VPN.
   const routerVpn = useRouterProtection();
+  // A connect by hand at home with "Pause VPN at home" on: it stays on.
+  const { notice: homeNotice, showNotification: showHomeNotice } = useCopyNotification();
+  useEffect(
+    () => onHomeConnectNotice(() => showHomeNotice(t("pause_at_home_connect_notice"), 5000)),
+    [showHomeNotice],
+  );
   const routerOnly = routerVpn.active && !connected && !activating && !disconnecting;
 
   const statusText = activating
@@ -621,6 +629,7 @@ export default function HomeScreen({
 
   return (
     <div className="home-root">
+      <CopyNotification notice={homeNotice} />
       {paymentSuccessVisible && <PaymentSuccessBanner onDismiss={dismissPaymentSuccess} />}
       <div className="home-topbar">
         <div className="home-topbar__brand">

@@ -22,7 +22,7 @@ export function useCopyNotification() {
     [],
   );
 
-  const showNotification = useCallback((message: string) => {
+  const showNotification = useCallback((message: string, durationMs = NOTICE_DURATION_MS) => {
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
       const nextNotice = {
         id: ++noticeIdRef.current,
@@ -34,7 +34,7 @@ export function useCopyNotification() {
           current?.id === nextNotice.id ? null : current,
         );
         timerRef.current = null;
-      }, NOTICE_DURATION_MS);
+      }, durationMs);
   }, []);
 
   const copyWithNotification = useCallback(

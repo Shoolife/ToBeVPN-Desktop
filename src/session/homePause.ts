@@ -47,6 +47,22 @@ let paused: { server: ServerVpnConfig; gateway: string | null } | null = null;
 /** A connect by hand while paused: no pause on this network until it changes. */
 let declinedGateway: string | null = null;
 let missedChecks = 0;
+/** A connect by hand is being looked at: no pause meanwhile. */
+let holdUntil = 0;
+const noticeListeners = new Set<() => void>();
+
+/**
+ * A connect by hand at home that the pause leaves alone (Home tells so at the
+ * bottom, as on the phone).
+ */
+export function onHomeConnectNotice(listener: () => void): () => void {
+  noticeListeners.add(listener);
+  return () => noticeListeners.delete(listener);
+}
+
+function announceStayingOn() {
+  noticeListeners.forEach((listener) => listener());
+}
 let ourConnect = false;
 let running = false;
 let nudgeTimer: number | null = null;
@@ -106,7 +122,7 @@ async function check(): Promise<void> {
       return;
     }
     const runtime = getVpnRuntime();
-    if (!enabled || !runtime.connected) return;
+    if (!enabled || !runtime.connected || Date.now() < holdUntil) return;
     const gateway = await currentGateway();
     // Without a known network leaving it could not be told: no pause.
     if (gateway === null || gateway === declinedGateway) return;
@@ -137,13 +153,28 @@ export function startHomePauseWatch(): void {
   let wasConnected = getVpnRuntime().connected;
   subscribeVpnRuntime(() => {
     const connected = getVpnRuntime().connected;
-    if (connected && !wasConnected) {
-      if (paused && !ourConnect) {
+    if (connected && !wasConnected && !ourConnect) {
+      if (paused) {
         // Connected by hand while paused: wanted here after all.
         declinedGateway = paused.gateway;
         paused = null;
-      } else if (!ourConnect) {
-        nudge();
+        announceStayingOn();
+      } else if (isPauseAtHomeEnabled()) {
+        // Connected by hand at home behind the router's VPN: stays on until
+        // the network changes, and Home says so. Elsewhere nothing changes.
+        holdUntil = Date.now() + 30_000;
+        void (async () => {
+          try {
+            const protection = await checkRouterProtection();
+            if (!protection.active) return;
+            const gateway = await currentGateway();
+            if (gateway === null) return;
+            declinedGateway = gateway;
+            announceStayingOn();
+          } finally {
+            holdUntil = 0;
+          }
+        })();
       }
     }
     wasConnected = connected;
