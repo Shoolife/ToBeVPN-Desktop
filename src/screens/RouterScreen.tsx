@@ -2,6 +2,7 @@ import { createPortal } from "react-dom";
 import FadeText from "../components/FadeText";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { formatDecimal, t, tf, type StringKey } from "../i18n";
 import { countryFlagForUi, serverDisplayName } from "../components/serverDisplay";
 import { periodRanges } from "../session/stats";
@@ -71,6 +72,8 @@ import {
 } from "../session/router";
 import "./DevicesScreen.css";
 import "./RouterScreen.css";
+
+const SUPPORT_URL = "https://t.me/meow_meow_vpn?direct";
 
 /** As on the subscription sheet: its slide-down and drag threshold. */
 const SHEET_CLOSE_MS = 420;
@@ -828,6 +831,25 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
             </>
           ) : (
             <>
+              {info.firmware === "keenetic" && !reconnect ? (
+                // Keenetic: nothing to install yet; its owners are invited
+                // to test Keenetic support instead.
+                <>
+                  <div className="devices-section-title">{t("router_vpn_section")}</div>
+                  <div className="router-panel">
+                    <p className="router-panel__text"><strong>{t("router_keenetic_test_title")}</strong></p>
+                    <p className="router-panel__text">{t("router_keenetic_test_description")}</p>
+                    <button
+                      type="button"
+                      className="router-button router-button--primary"
+                      onClick={() => void openUrl(SUPPORT_URL).catch(() => {})}
+                    >
+                      {t("support_contact_button")}
+                    </button>
+                  </div>
+                </>
+              ) : (
+              <>
               <div className="devices-section-title">{t("router_vpn_section")}</div>
               <SmoothHeight>
               <div className="router-panel">
@@ -962,6 +984,8 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                 )}
               </div>
               </SmoothHeight>
+              </>
+              )}
             </>
           )}
           </>
