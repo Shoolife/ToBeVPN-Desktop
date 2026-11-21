@@ -113,18 +113,26 @@ function easeInOutCubic(t: number): number {
  * Scrolls so that `row` ends up in the middle of its scrolling area, with a
  * gentle start and stop (as on the phone). Returns what stops it midway.
  */
-function glideToCenter(row: HTMLElement): (() => void) | null {
+function glideToCenter(row: HTMLElement, onArrive: () => void): (() => void) | null {
+  const arrive = () => requestAnimationFrame(onArrive);
   const scroller = scrollParent(row);
-  if (!scroller) return null;
+  if (!scroller) {
+    arrive();
+    return null;
+  }
   const box = scroller.getBoundingClientRect();
   const target = row.getBoundingClientRect();
   const wanted = scroller.scrollTop + (target.top + target.height / 2) - (box.top + box.height / 2);
   const end = Math.max(0, Math.min(wanted, scroller.scrollHeight - scroller.clientHeight));
   const start = scroller.scrollTop;
   const distance = end - start;
-  if (Math.abs(distance) < 1) return null;
+  if (Math.abs(distance) < 1) {
+    arrive();
+    return null;
+  }
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     scroller.scrollTop = end;
+    arrive();
     return null;
   }
   // Longer trips take a little longer, never abruptly fast or dragging.
@@ -135,6 +143,7 @@ function glideToCenter(row: HTMLElement): (() => void) | null {
     const progress = Math.min(1, (now - began) / duration);
     scroller.scrollTop = start + distance * easeInOutCubic(progress);
     if (progress < 1) frame = requestAnimationFrame(step);
+    else onArrive();
   };
   frame = requestAnimationFrame(step);
   return () => cancelAnimationFrame(frame);
@@ -168,16 +177,22 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   // The bar clicked last: the list scrolls to its row and lights it up (as
   // on the phone). Another period clears it.
   const [picked, setPicked] = useState<number | null>(null);
+  // The row the list has arrived at: its outline plays (fades in, pulses).
+  const [arrived, setArrived] = useState<number | null>(null);
   const rowRefs = useRef(new Map<number, HTMLDivElement>());
-  useEffect(() => setPicked(null), [period]);
+  useEffect(() => {
+    setPicked(null);
+    setArrived(null);
+  }, [period]);
   const stopGlide = useRef<(() => void) | null>(null);
   useEffect(() => () => stopGlide.current?.(), []);
   const pickSlot = (index: number) => {
     const row = rowRefs.current.get(index);
     if (!row) return;
     setPicked(index);
+    setArrived(null);
     stopGlide.current?.();
-    stopGlide.current = glideToCenter(row);
+    stopGlide.current = glideToCenter(row, () => setArrived(index));
   };
 
   useEffect(() => {
@@ -411,7 +426,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 if (element) rowRefs.current.set(index, element);
                 else rowRefs.current.delete(index);
               }}
-              className={`stats-row ${picked === index ? "stats-row--picked" : ""}`}
+              className={`stats-row ${picked === index ? "stats-row--picked" : ""} ${arrived === index ? "stats-row--outlined" : ""}`}
             >
               <div className="stats-row__top">
                 <span className="stats-row__period">{formatRowLabel(stat.period, period)}</span>
