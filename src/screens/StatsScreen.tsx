@@ -192,7 +192,14 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
     setPicked(index);
     setArrived(null);
     stopGlide.current?.();
-    stopGlide.current = glideToCenter(row, () => setArrived(index));
+    // The room below the list (rendered with the pick) is laid out first, so
+    // the last rows can come to the middle too.
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        stopGlide.current = glideToCenter(row, () => setArrived(index));
+      });
+    });
+    stopGlide.current = () => cancelAnimationFrame(frame);
   };
 
   useEffect(() => {
@@ -362,7 +369,10 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
               <div className="stats-chart__gridline" />
               <div className="stats-chart__gridline" />
             </div>
-            <div className="stats-chart__bars" onMouseLeave={() => setHovered(null)}>
+            <div
+              className={`stats-chart__bars ${picked !== null ? "stats-chart__bars--picking" : ""}`}
+              onMouseLeave={() => setHovered(null)}
+            >
               {hovered !== null && stats[hovered] && slotBytes[hovered] > 0 && (
                 <span
                   className="stats-chart__tip"
@@ -390,7 +400,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 return (
                   <div
                     key={i}
-                    className={`stats-chart__bar-wrapper ${hovered === i ? "stats-chart__bar-wrapper--hovered" : ""} ${picked === i ? "stats-chart__bar-wrapper--picked" : ""} ${slotBytes[i] > 0 ? "stats-chart__bar-wrapper--clickable" : ""}`}
+                    className={`stats-chart__bar-wrapper ${hovered === i ? "stats-chart__bar-wrapper--hovered" : ""} ${picked === i ? "stats-chart__bar-wrapper--picked" : ""} ${arrived === i ? "stats-chart__bar-wrapper--outlined" : ""} ${slotBytes[i] > 0 ? "stats-chart__bar-wrapper--clickable" : ""}`}
                     onMouseEnter={() => setHovered(i)}
                     onClick={() => pickSlot(i)}
                   >
@@ -448,6 +458,8 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
             </div>
           );
         })}
+        {/* Room for the last rows to stand in the middle while one is picked. */}
+        {picked !== null && <div className="stats-tail-room" aria-hidden="true" />}
         </div>
       </ScrollEdgeAffordance>
     </div>

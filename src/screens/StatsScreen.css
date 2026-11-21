@@ -439,9 +439,35 @@
   cursor: pointer;
 }
 
-.stats-chart__bar-wrapper--picked .stats-chart__bar {
-  outline: 1.5px solid var(--text-muted);
+/* While a bar is picked the others step back; its outline plays with its
+   row's (fades in on arrival, pulses twice, stays). */
+.stats-chart__bars--picking .stats-chart__bar-wrapper:not(.stats-chart__bar-wrapper--picked) .stats-chart__bar {
+  opacity: 0.4;
+}
+
+.stats-chart__bar-wrapper .stats-chart__bar {
+  transition: height 750ms cubic-bezier(0.4, 0, 0.2, 1), opacity 300ms cubic-bezier(0.4, 0, 0.2, 1), filter 120ms;
+}
+
+.stats-chart__bar-wrapper--outlined .stats-chart__bar {
+  outline: 1.5px solid rgba(33, 150, 243, 1);
   outline-offset: 1px;
+  animation: stats-bar-outline 1540ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@keyframes stats-bar-outline {
+  0% { outline-color: rgba(33, 150, 243, 0); }
+  17% { outline-color: rgba(33, 150, 243, 1); }
+  38% { outline-color: rgba(33, 150, 243, 0.35); }
+  58% { outline-color: rgba(33, 150, 243, 1); }
+  79% { outline-color: rgba(33, 150, 243, 0.35); }
+  100% { outline-color: rgba(33, 150, 243, 1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stats-chart__bar-wrapper--outlined .stats-chart__bar {
+    animation: none;
+  }
 }
 
 .stats-row {
@@ -472,4 +498,10 @@
   .stats-row--outlined {
     animation: none;
   }
+}
+
+/* Below the rows while one is picked: the last ones can scroll to the middle. */
+.stats-tail-room {
+  height: 45vh;
+  flex: none;
 }
