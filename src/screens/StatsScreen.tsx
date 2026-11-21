@@ -400,7 +400,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 return (
                   <div
                     key={i}
-                    className={`stats-chart__bar-wrapper ${hovered === i ? "stats-chart__bar-wrapper--hovered" : ""} ${picked === i ? "stats-chart__bar-wrapper--picked" : ""} ${arrived === i ? "stats-chart__bar-wrapper--outlined" : ""} ${slotBytes[i] > 0 ? "stats-chart__bar-wrapper--clickable" : ""}`}
+                    className={`stats-chart__bar-wrapper ${hovered === i ? "stats-chart__bar-wrapper--hovered" : ""} ${picked === i ? "stats-chart__bar-wrapper--picked" : ""} ${slotBytes[i] > 0 ? "stats-chart__bar-wrapper--clickable" : ""}`}
                     onMouseEnter={() => setHovered(i)}
                     onClick={() => pickSlot(i)}
                   >
@@ -436,7 +436,8 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 if (element) rowRefs.current.set(index, element);
                 else rowRefs.current.delete(index);
               }}
-              className={`stats-row ${picked === index ? "stats-row--picked" : ""} ${arrived === index ? "stats-row--outlined" : ""}`}
+              className={`stats-row stats-row--clickable ${picked === index ? "stats-row--picked" : ""} ${arrived === index ? "stats-row--outlined" : ""}`}
+              onClick={() => pickSlot(index)}
             >
               <div className="stats-row__top">
                 <span className="stats-row__period">{formatRowLabel(stat.period, period)}</span>
@@ -459,7 +460,9 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
           );
         })}
         {/* Room for the last rows to stand in the middle while one is picked. */}
-        {picked !== null && <div className="stats-tail-room" aria-hidden="true" />}
+        {picked !== null && picked !== nonZeroStats[nonZeroStats.length - 1]?.index && (
+          <div className="stats-tail-room" aria-hidden="true" />
+        )}
         </div>
       </ScrollEdgeAffordance>
     </div>
