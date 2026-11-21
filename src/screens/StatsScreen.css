@@ -485,12 +485,6 @@
   }
 }
 
-/* Below the rows while one is picked: the last ones can scroll to the middle. */
-.stats-tail-room {
-  height: 45vh;
-  flex: none;
-}
-
 .stats-row--clickable {
   cursor: pointer;
 }

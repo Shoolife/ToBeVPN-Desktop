@@ -196,14 +196,9 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
     setArrived(null);
     setFromBar(viaBar);
     stopGlide.current?.();
-    // The room below the list (rendered with the pick) is laid out first, so
-    // the last rows can come to the middle too.
-    let frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(() => {
-        stopGlide.current = glideToCenter(row, () => setArrived(index));
-      });
-    });
-    stopGlide.current = () => cancelAnimationFrame(frame);
+    // Rows at the end only come as far as the screen scrolls: no empty room
+    // under the last one.
+    stopGlide.current = glideToCenter(row, () => setArrived(index));
   };
 
   useEffect(() => {
@@ -463,10 +458,6 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
             </div>
           );
         })}
-        {/* Room for the last rows to stand in the middle while one is picked. */}
-        {picked !== null && picked !== nonZeroStats[nonZeroStats.length - 1]?.index && (
-          <div className="stats-tail-room" aria-hidden="true" />
-        )}
         </div>
       </ScrollEdgeAffordance>
     </div>
