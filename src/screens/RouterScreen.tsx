@@ -836,7 +836,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                 // to test Keenetic support instead.
                 <>
                   <div className="devices-section-title">{t("router_vpn_section")}</div>
-                  <div className="router-panel">
+                  <div className="router-panel router-panel--centered">
                     <p className="router-panel__text"><strong>{t("router_keenetic_test_title")}</strong></p>
                     <p className="router-panel__text">{t("router_keenetic_test_description")}</p>
                     <button

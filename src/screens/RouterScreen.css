@@ -1333,3 +1333,8 @@
   min-height: 0;
   overflow: hidden;
 }
+
+/* The Keenetic testing invitation: its text centred, as on the phone. */
+.router-panel--centered {
+  text-align: center;
+}
