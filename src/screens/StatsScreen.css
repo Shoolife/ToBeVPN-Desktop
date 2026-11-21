@@ -433,3 +433,22 @@
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+/* A click on a bar scrolls to its row and lights it up, as on the phone. */
+.stats-chart__bar-wrapper--clickable {
+  cursor: pointer;
+}
+
+.stats-chart__bar-wrapper--picked .stats-chart__bar {
+  outline: 1.5px solid var(--text-muted);
+  outline-offset: 1px;
+}
+
+.stats-row {
+  transition: background-color 300ms ease, box-shadow 300ms ease;
+}
+
+.stats-row--picked {
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+}

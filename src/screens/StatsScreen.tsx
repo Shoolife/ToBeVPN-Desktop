@@ -1,4 +1,4 @@
-import { useState, useEffect, type CSSProperties } from "react";
+import { useState, useEffect, useRef, type CSSProperties } from "react";
 import FadeText from "../components/FadeText";
 import { formatDecimal, t, getSavedLang } from "../i18n";
 import {
@@ -120,6 +120,17 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   // The bar under the mouse: its traffic shows above the chart, as on the
   // Router screen.
   const [hovered, setHovered] = useState<number | null>(null);
+  // The bar clicked last: the list scrolls to its row and lights it up (as
+  // on the phone). Another period clears it.
+  const [picked, setPicked] = useState<number | null>(null);
+  const rowRefs = useRef(new Map<number, HTMLDivElement>());
+  useEffect(() => setPicked(null), [period]);
+  const pickSlot = (index: number) => {
+    const row = rowRefs.current.get(index);
+    if (!row) return;
+    setPicked(index);
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 
   useEffect(() => {
     setAnimated(false);
@@ -165,7 +176,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   const maxIndex = slotBytes.findIndex((bytes) => bytes === maxBytes && maxBytes > 0);
 
   const nonZeroStats = stats
-    .map((stat, index) => ({ stat, router: routerAt(index), bytes: slotBytes[index] }))
+    .map((stat, index) => ({ stat, index, router: routerAt(index), bytes: slotBytes[index] }))
     .filter((row) => row.bytes > 0);
   const maxRowBytes = nonZeroStats.length > 0 ? Math.max(...nonZeroStats.map((row) => row.bytes)) : 1;
 
@@ -316,8 +327,9 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 return (
                   <div
                     key={i}
-                    className={`stats-chart__bar-wrapper ${hovered === i ? "stats-chart__bar-wrapper--hovered" : ""}`}
+                    className={`stats-chart__bar-wrapper ${hovered === i ? "stats-chart__bar-wrapper--hovered" : ""} ${picked === i ? "stats-chart__bar-wrapper--picked" : ""} ${slotBytes[i] > 0 ? "stats-chart__bar-wrapper--clickable" : ""}`}
                     onMouseEnter={() => setHovered(i)}
+                    onClick={() => pickSlot(i)}
                   >
                     {withRouter && (
                       <div
@@ -342,10 +354,17 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
         <div className="stats-section-title">{periodLabel}</div>
 
         {/* Stat rows */}
-        {nonZeroStats.map(({ stat, router, bytes }, i) => {
+        {nonZeroStats.map(({ stat, index, router, bytes }) => {
           const fraction = bytes / maxRowBytes;
           return (
-            <div key={i} className="stats-row">
+            <div
+              key={index}
+              ref={(element) => {
+                if (element) rowRefs.current.set(index, element);
+                else rowRefs.current.delete(index);
+              }}
+              className={`stats-row ${picked === index ? "stats-row--picked" : ""}`}
+            >
               <div className="stats-row__top">
                 <span className="stats-row__period">{formatRowLabel(stat.period, period)}</span>
                 <span className="stats-row__bytes">{formatBytes(bytes)}</span>
