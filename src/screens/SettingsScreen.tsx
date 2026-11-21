@@ -1,3 +1,5 @@
+import { isPauseAtHomeEnabled, setPauseAtHomeEnabled } from "../session/homePause";
+import { ROUTER_SECTION_AVAILABLE } from "../session/router";
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, saveLang, type Lang, type StringKey } from "../i18n";
@@ -305,6 +307,7 @@ export default function SettingsScreen({
     () => import.meta.env.DEV && new URLSearchParams(window.location.search).get("whatsNew") === "1",
   );
   const [loggingOut, setLoggingOut] = useState(false);
+  const [pauseAtHome, setPauseAtHome] = useState(() => isPauseAtHomeEnabled());
   const [xrayVersion, setXrayVersion] = useState("Xray-core ...");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [avatarLoading, setAvatarLoading] = useState(false);
@@ -1794,6 +1797,32 @@ export default function SettingsScreen({
                 </button>
               </div>
             </div>
+
+            {/* The computer's VPN pauses at home while the router carries it. */}
+            {ROUTER_SECTION_AVAILABLE && (
+              <div className="settings-card">
+                <div className="settings-card__row">
+                  <div className="settings-card__col">
+                    <div className="settings-card__header">{t("pause_at_home_title")}</div>
+                    <div className="settings-card__hint">{t("pause_at_home_hint")}</div>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-switch ${pauseAtHome ? "settings-switch--on" : ""}`}
+                    role="switch"
+                    aria-checked={pauseAtHome}
+                    aria-label={t("pause_at_home_title")}
+                    onClick={() => {
+                      const next = !pauseAtHome;
+                      setPauseAtHomeEnabled(next);
+                      setPauseAtHome(next);
+                    }}
+                  >
+                    <span className="settings-switch__thumb" />
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Devices card */}
             <div className="settings-card settings-card--clickable" onClick={onDevices}>

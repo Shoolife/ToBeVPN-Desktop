@@ -1,3 +1,4 @@
+import { startHomePauseWatch } from "./session/homePause";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App, { type Screen } from "./App";
@@ -28,6 +29,8 @@ if (!browserPreview) {
   void initializeDiagnostics().catch(() => {});
   // Traffic balance alerts (20/10/5% left), as on the phone.
   startTrafficLimitNotifications();
+  // "Pause VPN at home" (Settings), as on the phone.
+  startHomePauseWatch();
 }
 const searchParams = browserPreview
   ? new URLSearchParams(window.location.search)

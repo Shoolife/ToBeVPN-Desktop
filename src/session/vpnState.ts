@@ -1228,6 +1228,11 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/** Called on every change of the VPN state (outside React). */
+export function subscribeVpnRuntime(listener: () => void): () => void {
+  return subscribe(listener);
+}
+
 export function useVpnRuntime(): VpnRuntimeState {
   return useSyncExternalStore(subscribe, getVpnRuntime, getVpnRuntime);
 }
