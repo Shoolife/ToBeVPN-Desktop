@@ -111,6 +111,7 @@ async function check(): Promise<void> {
       const server = paused.server;
       paused = null;
       recordDiagnosticEvent("HomePause", `Leaving home: the VPN resumes (same_network=${sameNetwork})`);
+      notify(t("home_pause_notice_resumed_title"), t("home_pause_notice_resumed_text"));
       ourConnect = true;
       try {
         await connectVpn(server);
@@ -134,7 +135,7 @@ async function check(): Promise<void> {
     missedChecks = 0;
     recordDiagnosticEvent("HomePause", "VPN paused at home behind the router's VPN");
     await disconnectVpn();
-    notify(t("pause_at_home_title"), t("vpn_paused_at_home"));
+    notify(t("home_pause_notice_paused_title"), t("home_pause_notice_paused_text"));
   } finally {
     running = false;
   }
