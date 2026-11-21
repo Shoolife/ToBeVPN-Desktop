@@ -49,19 +49,9 @@ let declinedGateway: string | null = null;
 let missedChecks = 0;
 /** A connect by hand is being looked at: no pause meanwhile. */
 let holdUntil = 0;
-const noticeListeners = new Set<() => void>();
-
-/**
- * A connect by hand at home that the pause leaves alone (Home tells so at the
- * bottom, as on the phone).
- */
-export function onHomeConnectNotice(listener: () => void): () => void {
-  noticeListeners.add(listener);
-  return () => noticeListeners.delete(listener);
-}
-
+/** Connected by hand on the router's network: it stays on there (a system notification). */
 function announceStayingOn() {
-  noticeListeners.forEach((listener) => listener());
+  notify(t("home_pause_notice_staying_title"), t("pause_at_home_connect_notice"));
 }
 let ourConnect = false;
 let running = false;
