@@ -422,7 +422,9 @@ export default function DevicesScreen({
                               ? t("router_card_installed")
                               : router.supported
                                 ? t("router_card_protect_home")
-                                : routerMeta(router)
+                                : router.firmware === "keenetic"
+                                  ? t("router_card_keenetic")
+                                  : routerMeta(router)
                           }`}
                         />
                       </div>

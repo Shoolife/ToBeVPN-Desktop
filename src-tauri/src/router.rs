@@ -25,7 +25,8 @@ pub struct RouterInfo {
     pub gateway: Option<String>,
     /// Model from the login page title, e.g. "SNR-CPE-AX2".
     pub model: Option<String>,
-    /// "easywrt" (SNR's OpenWrt), "openwrt", or None when not recognised.
+    /// "easywrt" (SNR's OpenWrt), "openwrt", "keenetic" (KeeneticOS, which
+    /// ToBeVPN cannot be installed on yet), or None when not recognised.
     pub firmware: Option<String>,
     pub supported: bool,
     /// ToBeVPN's mark on the router (a hash of its device id in the
@@ -101,6 +102,15 @@ pub async fn detect_router() -> RouterInfo {
         root
     };
     let (model, firmware) = identify(&page);
+    // Keenetic (and Netcraze, its Russian name): the login API answers
+    // without a password and names the router in X-NDM-Realm.
+    if firmware.is_none() {
+        if let Some(realm) = get("/auth").await.and_then(|answer| ndm_realm(&answer)) {
+            info.model = (!realm.is_empty()).then_some(realm);
+            info.firmware = Some("keenetic".to_string());
+            return info;
+        }
+    }
     info.supported = model
         .as_deref()
         .is_some_and(|model| SUPPORTED_MODELS.contains(&model));
@@ -152,6 +162,23 @@ async fn https_get(
     .await
     .ok()
     .flatten()
+}
+
+/// The router's name from a KeeneticOS answer to /auth (X-NDM-Realm, e.g.
+/// "Keenetic Giga"): empty when the header is there but empty, None when the
+/// answer is not KeeneticOS's.
+fn ndm_realm(response: &str) -> Option<String> {
+    response
+        .lines()
+        .skip(1)
+        .map(|line| line.trim_end_matches('\r'))
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("x-ndm-realm")
+                .then(|| value.trim().chars().take(64).collect())
+        })
 }
 
 /// Model and firmware family from a router's login page.
@@ -478,6 +505,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn reads_keenetic_realm_from_auth_answer() {
+        let answer = "HTTP/1.1 401 Unauthorized\r\nServer: nginx\r\nX-NDM-Realm: Keenetic Giga\r\nX-NDM-Challenge: ABC\r\n\r\n";
+        assert_eq!(ndm_realm(answer).as_deref(), Some("Keenetic Giga"));
+        assert_eq!(
+            ndm_realm("HTTP/1.1 401 x\r\nx-ndm-realm: Netcraze Hopper\r\n\r\n").as_deref(),
+            Some("Netcraze Hopper")
+        );
+        assert_eq!(
+            ndm_realm("HTTP/1.1 401 x\r\nX-NDM-Realm:\r\n\r\n").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            ndm_realm("HTTP/1.1 404 Not Found\r\nServer: uhttpd\r\n\r\n"),
+            None
+        );
+        // Only among the headers, not in the page.
+        assert_eq!(ndm_realm("HTTP/1.1 200 OK\r\n\r\nX-NDM-Realm: fake"), None);
+    }
 
     #[test]
     fn identifies_snr_easywrt_login_page() {

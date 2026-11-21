@@ -36,6 +36,7 @@ import {
   installRouter,
   routerControl,
   routerFirmwareLabel,
+  isOpenWrtFirmware,
   routerStatus,
   setRouterServers,
   setRouterName,
@@ -590,7 +591,9 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     ? t("router_status_no_network")
     : info.supported
       ? t("router_status_supported")
-      : info.firmware
+      : info.firmware === "keenetic"
+        ? t("router_status_keenetic")
+        : isOpenWrtFirmware(info.firmware)
         ? t("router_status_openwrt_unverified")
         : t("router_status_unknown");
 
@@ -944,17 +947,17 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                   <button
                     type="button"
                     className="router-button router-button--primary"
-                    disabled={!info.firmware || !accountSubscriptionUrl() || servers.length === 0}
+                    disabled={!isOpenWrtFirmware(info.firmware) || !accountSubscriptionUrl() || servers.length === 0}
                     onClick={() => setFormOpen(true)}
                   >
                     {t(reconnect ? "router_connect_button" : "router_install")}
                   </button>
                 )}
-                {!info.firmware && <p className="router-panel__hint">{t("router_install_unsupported")}</p>}
-                {info.firmware && servers.length === 0 && (
+                {!isOpenWrtFirmware(info.firmware) && <p className="router-panel__hint">{t("router_install_unsupported")}</p>}
+                {isOpenWrtFirmware(info.firmware) && servers.length === 0 && (
                   <p className="router-panel__hint">{t("router_servers_loading")}</p>
                 )}
-                {info.firmware && !info.supported && (
+                {isOpenWrtFirmware(info.firmware) && !info.supported && (
                   <p className="router-panel__hint">{t("router_install_compatibility")}</p>
                 )}
               </div>

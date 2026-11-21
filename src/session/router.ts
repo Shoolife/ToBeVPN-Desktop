@@ -16,7 +16,10 @@ export interface RouterInfo {
   gateway: string | null;
   /** Model from the login page, e.g. "SNR-CPE-AX2". */
   model: string | null;
-  /** "easywrt" (SNR's OpenWrt), "openwrt", or null when not recognised. */
+  /**
+   * "easywrt" (SNR's OpenWrt), "openwrt", "keenetic" (KeeneticOS, which
+   * ToBeVPN cannot be installed on yet), or null when not recognised.
+   */
   firmware: string | null;
   /** The installer has been verified on this model. */
   supported: boolean;
@@ -81,7 +84,13 @@ export function getCachedRouter(): RouterInfo | null {
 export function routerFirmwareLabel(firmware: string | null): string | null {
   if (firmware === "easywrt") return "EasyWRT";
   if (firmware === "openwrt") return "OpenWrt";
+  if (firmware === "keenetic") return "KeeneticOS";
   return null;
+}
+
+/** OpenWrt or SNR's EasyWRT: the firmware ToBeVPN installs on. */
+export function isOpenWrtFirmware(firmware: string | null | undefined): boolean {
+  return firmware === "openwrt" || firmware === "easywrt";
 }
 
 /**
