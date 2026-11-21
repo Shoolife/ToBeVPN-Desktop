@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
-import CenterDialog from "./CenterDialog";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { t } from "../i18n";
 import { detectRouter, ROUTER_SECTION_AVAILABLE } from "../session/router";
 
 const OFFERED_KEY = "tobevpn_keenetic_offered";
+/** The settings dialogs' fade-out (SettingsScreen.css). */
+const DIALOG_EXIT_MS = 150;
 
 function alreadyOffered(): boolean {
   try {
@@ -45,29 +47,46 @@ export default function KeeneticOfferDialog({ active, onOpen }: { active: boolea
     };
   }, [active, open]);
 
+  const [closing, setClosing] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+  const close = (after?: () => void) => {
+    if (closing) return;
+    markOffered();
+    setClosing(true);
+    timer.current = window.setTimeout(() => {
+      setOpen(false);
+      setClosing(false);
+      timer.current = null;
+      after?.();
+    }, DIALOG_EXIT_MS);
+  };
+
   if (!open) return null;
-  return (
-    <CenterDialog
-      label={t("keenetic_offer_title")}
-      onClose={() => {
-        markOffered();
-        setOpen(false);
-      }}
-    >
-      {(close) => (
-        <div className="router-uninstall-sheet keenetic-offer">
-          <h2 className="whats-new-dialog__title">{t("keenetic_offer_title")}</h2>
-          <p className="router-uninstall-sheet__text">{t("keenetic_offer_text")}</p>
-          <div className="router-bottom__buttons">
-            <button type="button" className="router-button" onClick={() => close()}>
-              {t("keenetic_offer_later")}
-            </button>
-            <button type="button" className="router-button router-button--primary" onClick={() => close(onOpen)}>
-              {t("keenetic_offer_open")}
-            </button>
-          </div>
+  // The logout window's look: centred title and text, two equal buttons.
+  return createPortal(
+    <div className={`dialog-overlay ${closing ? "dialog-overlay--closing" : ""}`} onClick={() => close()}>
+      <div
+        className="dialog dialog--logout"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("keenetic_offer_title")}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="dialog__title">{t("keenetic_offer_title")}</div>
+        <div className="dialog__message">{t("keenetic_offer_text")}</div>
+        <div className="dialog__actions dialog__actions--logout">
+          <button type="button" className="dialog__btn dialog__btn--secondary" onClick={() => close()}>
+            {t("keenetic_offer_later")}
+          </button>
+          <button type="button" className="dialog__btn dialog__btn--primary" onClick={() => close(onOpen)}>
+            {t("keenetic_offer_open")}
+          </button>
         </div>
-      )}
-    </CenterDialog>
+      </div>
+    </div>,
+    document.getElementById("overlay-root") ?? document.body,
   );
 }

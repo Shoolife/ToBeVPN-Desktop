@@ -1338,8 +1338,3 @@
 .router-panel--centered {
   text-align: center;
 }
-
-/* The one-time Keenetic offer on Home: centred, as on the phone. */
-.keenetic-offer {
-  text-align: center;
-}
