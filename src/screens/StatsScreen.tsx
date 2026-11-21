@@ -95,6 +95,51 @@ const SECTION_FADE_OUT_MS = 220;
 const SECTION_FADE_IN_MS = 420;
 const SECTION_FADE_IN_DELAY_MS = 60;
 
+/** The nearest ancestor that scrolls vertically. */
+function scrollParent(element: HTMLElement): HTMLElement | null {
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    const overflow = getComputedStyle(node).overflowY;
+    if ((overflow === "auto" || overflow === "scroll") && node.scrollHeight > node.clientHeight) return node;
+  }
+  return null;
+}
+
+/** Ease in-out (cubic): starts gently, speeds up, and slows down as gently. */
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/**
+ * Scrolls so that `row` ends up in the middle of its scrolling area, with a
+ * gentle start and stop (as on the phone). Returns what stops it midway.
+ */
+function glideToCenter(row: HTMLElement): (() => void) | null {
+  const scroller = scrollParent(row);
+  if (!scroller) return null;
+  const box = scroller.getBoundingClientRect();
+  const target = row.getBoundingClientRect();
+  const wanted = scroller.scrollTop + (target.top + target.height / 2) - (box.top + box.height / 2);
+  const end = Math.max(0, Math.min(wanted, scroller.scrollHeight - scroller.clientHeight));
+  const start = scroller.scrollTop;
+  const distance = end - start;
+  if (Math.abs(distance) < 1) return null;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    scroller.scrollTop = end;
+    return null;
+  }
+  // Longer trips take a little longer, never abruptly fast or dragging.
+  const duration = Math.min(1000, Math.max(500, 450 + Math.abs(distance) / 3));
+  const began = performance.now();
+  let frame = 0;
+  const step = (now: number) => {
+    const progress = Math.min(1, (now - began) / duration);
+    scroller.scrollTop = start + distance * easeInOutCubic(progress);
+    if (progress < 1) frame = requestAnimationFrame(step);
+  };
+  frame = requestAnimationFrame(step);
+  return () => cancelAnimationFrame(frame);
+}
+
 export default function StatsScreen({ onBack }: { onBack: () => void }) {
   // The chip follows a tap at once; the chart and rows below change to the
   // new period after the old ones faded out, then fade in with their data
@@ -125,11 +170,14 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   const [picked, setPicked] = useState<number | null>(null);
   const rowRefs = useRef(new Map<number, HTMLDivElement>());
   useEffect(() => setPicked(null), [period]);
+  const stopGlide = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopGlide.current?.(), []);
   const pickSlot = (index: number) => {
     const row = rowRefs.current.get(index);
     if (!row) return;
     setPicked(index);
-    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    stopGlide.current?.();
+    stopGlide.current = glideToCenter(row);
   };
 
   useEffect(() => {
