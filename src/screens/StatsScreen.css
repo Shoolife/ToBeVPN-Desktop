@@ -494,3 +494,8 @@
 .stats-row--clickable {
   cursor: pointer;
 }
+
+/* A clicked row: outlined without the pulse (that is for picks from a bar). */
+.stats-row--outlined-still {
+  box-shadow: inset 0 0 0 1.5px rgba(33, 150, 243, 1);
+}

@@ -179,6 +179,9 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   const [picked, setPicked] = useState<number | null>(null);
   // The row the list has arrived at: its outline plays (fades in, pulses).
   const [arrived, setArrived] = useState<number | null>(null);
+  // Whether the last pick came from a bar: only then does the row's outline
+  // pulse (to show where it went); a clicked row is simply outlined.
+  const [fromBar, setFromBar] = useState(false);
   const rowRefs = useRef(new Map<number, HTMLDivElement>());
   useEffect(() => {
     setPicked(null);
@@ -186,11 +189,12 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
   }, [period]);
   const stopGlide = useRef<(() => void) | null>(null);
   useEffect(() => () => stopGlide.current?.(), []);
-  const pickSlot = (index: number) => {
+  const pickSlot = (index: number, viaBar: boolean) => {
     const row = rowRefs.current.get(index);
     if (!row) return;
     setPicked(index);
     setArrived(null);
+    setFromBar(viaBar);
     stopGlide.current?.();
     // The room below the list (rendered with the pick) is laid out first, so
     // the last rows can come to the middle too.
@@ -402,7 +406,7 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                     key={i}
                     className={`stats-chart__bar-wrapper ${hovered === i ? "stats-chart__bar-wrapper--hovered" : ""} ${picked === i ? "stats-chart__bar-wrapper--picked" : ""} ${slotBytes[i] > 0 ? "stats-chart__bar-wrapper--clickable" : ""}`}
                     onMouseEnter={() => setHovered(i)}
-                    onClick={() => pickSlot(i)}
+                    onClick={() => pickSlot(i, true)}
                   >
                     {withRouter && (
                       <div
@@ -436,8 +440,8 @@ export default function StatsScreen({ onBack }: { onBack: () => void }) {
                 if (element) rowRefs.current.set(index, element);
                 else rowRefs.current.delete(index);
               }}
-              className={`stats-row stats-row--clickable ${picked === index ? "stats-row--picked" : ""} ${arrived === index ? "stats-row--outlined" : ""}`}
-              onClick={() => pickSlot(index)}
+              className={`stats-row stats-row--clickable ${picked === index ? "stats-row--picked" : ""} ${arrived === index ? (fromBar ? "stats-row--outlined" : "stats-row--outlined-still") : ""}`}
+              onClick={() => pickSlot(index, false)}
             >
               <div className="stats-row__top">
                 <span className="stats-row__period">{formatRowLabel(stat.period, period)}</span>
