@@ -52,7 +52,7 @@ export default function KeeneticOfferDialog({ active, onOpen }: { active: boolea
   useEffect(() => () => {
     if (timer.current !== null) window.clearTimeout(timer.current);
   }, []);
-  const close = (after?: () => void) => {
+  const close = () => {
     if (closing) return;
     markOffered();
     setClosing(true);
@@ -60,7 +60,6 @@ export default function KeeneticOfferDialog({ active, onOpen }: { active: boolea
       setOpen(false);
       setClosing(false);
       timer.current = null;
-      after?.();
     }, DIALOG_EXIT_MS);
   };
 
@@ -81,7 +80,16 @@ export default function KeeneticOfferDialog({ active, onOpen }: { active: boolea
           <button type="button" className="dialog__btn dialog__btn--secondary" onClick={() => close()}>
             {t("keenetic_offer_later")}
           </button>
-          <button type="button" className="dialog__btn dialog__btn--primary" onClick={() => close(onOpen)}>
+          <button
+            type="button"
+            className="dialog__btn dialog__btn--primary"
+            onClick={() => {
+              // Gone at once, not fading over the router screen coming in.
+              markOffered();
+              setOpen(false);
+              onOpen();
+            }}
+          >
             {t("keenetic_offer_open")}
           </button>
         </div>
