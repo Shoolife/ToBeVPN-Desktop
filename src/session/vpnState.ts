@@ -31,7 +31,7 @@ import {
   loadAutomaticServerSelection,
   saveLastServer,
 } from "./lastServer";
-import { findSameServer, serverSelectionKey, stableServerId } from "./serverSelection";
+import { findSameServer, serverProfileKey, serverSelectionKey, stableServerId } from "./serverSelection";
 import {
   recordServerConnectionFailure,
   recordServerConnectionSuccess,
@@ -55,6 +55,12 @@ const TUNNEL_HEALTH_RETRY_MS = 3_000;
 const TUNNEL_HEALTH_ATTEMPTS = 4;
 const TUNNEL_HEALTH_TIMEOUT_MS = 7_000;
 const TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY = 2;
+/**
+ * A tunnel that has not carried traffic once since it was connected is
+ * restarted after one failed cycle (~30 s) instead of two (~100 s): a host
+ * that never answers (port open, no TLS) is not a passing outage.
+ */
+const TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_FIRST_RECOVERY = 1;
 const TUNNEL_RECOVERY_RESTART_DELAY_MS = 2_000;
 const MANUAL_TUNNEL_RECOVERY_ATTEMPTS = 1;
 const AUTOMATIC_TUNNEL_RECOVERY_ATTEMPTS = 2;
@@ -137,6 +143,8 @@ let healthTimer: number | null = null;
 let connectionGeneration = 0;
 let watchdogRecoveryAttempts = 0;
 let tunnelHealthFailedCycles = 0;
+/** Whether the current tunnel has carried traffic once since it was connected. */
+let tunnelVerifiedSinceConnect = false;
 let lastTunnelTrafficAt: number | null = null;
 let currentServerForRecovery: ServerVpnConfig | null = null;
 let resumeRecoveryInFlight = false;
@@ -173,6 +181,48 @@ function canUseStaleServerConfig(server: ServerVpnConfig): boolean {
     server.address !== "127.0.0.1" &&
     server.address !== "0.0.0.0"
   );
+}
+
+/**
+ * The user's manual choice is a server by name; the subscription may give it
+ * several hosts. The host found for the choice is kept unless it failed the
+ * last full server check (results live a few minutes) or, on a recovery, sits
+ * on the address that just carried no traffic (any SNI there: the address
+ * itself is what failed); then another host of the same server is taken, a
+ * confirmed one first. With no other host the choice stays as is.
+ */
+function pickManualServerHost(
+  selection: Parameters<typeof findSameServer>[0],
+  candidates: VpnServer[],
+  avoidAddress: string | undefined,
+): VpnServer | null {
+  const match = findSameServer(selection, candidates);
+  if (!match) return null;
+  const key = serverSelectionKey(match);
+  const sameServer = key
+    ? candidates.filter((candidate) => serverSelectionKey(candidate) === key)
+    : [match];
+  if (sameServer.length < 2) return match;
+  const delays = getCachedProfileDelays(sameServer);
+  const failedCheck = (candidate: VpnServer) => {
+    const delay = delays.get(serverProfileKey(candidate));
+    return delay !== undefined && delay <= 0;
+  };
+  const avoided = (candidate: VpnServer) =>
+    failedCheck(candidate) || (avoidAddress !== undefined && candidate.address === avoidAddress);
+  if (!avoided(match)) return match;
+  const confirmed = (candidate: VpnServer) => (delays.get(serverProfileKey(candidate)) ?? 0) > 0;
+  const other =
+    sameServer.find((candidate) => !avoided(candidate) && confirmed(candidate)) ??
+    sameServer.find((candidate) => !avoided(candidate));
+  recordDiagnosticEvent(
+    "Servers",
+    other
+      ? `Manual server: another host of the same server chosen; reason=${failedCheck(match) ? "failed_check" : "recovery"}, hosts=${sameServer.length}, confirmed=${confirmed(other)}`
+      : `Manual server: every host of the server is avoided; keeping the chosen one; hosts=${sameServer.length}`,
+    other ? "I" : "W",
+  );
+  return other ?? match;
 }
 
 async function refreshServerConfigAfterAccessCheck(
@@ -232,9 +282,10 @@ async function refreshServerConfigAfterAccessCheck(
       // the same server; the exact variant missing from this response does
       // not mean the chosen server is gone (it showed "No servers available"
       // until a retry happened to return the same variant).
-      findSameServer(
+      pickManualServerHost(
         { name: server.name ?? "", country: server.country, address: server.address, port: server.port, sni: server.sni },
         availableServers,
+        options.avoidCurrentInAuto ? server.address : undefined,
       );
   if (!fresh) {
     throw new Error(t(automatic ? "servers_empty" : "server_selected_unavailable"));
@@ -498,6 +549,7 @@ async function connectVpnInternal(
   let serverStartAttempted = false;
   let nativeStartCompleted = false;
   currentServerForRecovery = serverToStart;
+  tunnelVerifiedSinceConnect = false;
   if (resetWatchdogRecovery) {
     watchdogRecoveryAttempts = 0;
   }
@@ -757,6 +809,7 @@ async function runTunnelHealthLoop(gen: number, source = "PERIODIC"): Promise<vo
       }
       watchdogRecoveryAttempts = 0;
       tunnelHealthFailedCycles = 0;
+      tunnelVerifiedSinceConnect = true;
       if (currentServerForRecovery) {
         void recordServerTunnelHealthy(currentServerForRecovery);
       }
@@ -768,17 +821,21 @@ async function runTunnelHealthLoop(gen: number, source = "PERIODIC"): Promise<vo
       );
       watchdogRecoveryAttempts = 0;
       tunnelHealthFailedCycles = 0;
+      tunnelVerifiedSinceConnect = true;
       if (currentServerForRecovery) {
         void recordServerTunnelHealthy(currentServerForRecovery);
       }
     } else {
       tunnelHealthFailedCycles++;
+      const cyclesBeforeRecovery = tunnelVerifiedSinceConnect
+        ? TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY
+        : TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_FIRST_RECOVERY;
       recordDiagnosticEvent(
         "VPN-Health",
-        `Tunnel health probe failed after all retries; source=${source}, failed_cycle=${tunnelHealthFailedCycles}/${TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY}`,
+        `Tunnel health probe failed after all retries; source=${source}, failed_cycle=${tunnelHealthFailedCycles}/${cyclesBeforeRecovery}, verified_since_connect=${tunnelVerifiedSinceConnect}`,
         "W",
       );
-      if (tunnelHealthFailedCycles >= TUNNEL_HEALTH_FAILED_CYCLES_BEFORE_RECOVERY) {
+      if (tunnelHealthFailedCycles >= cyclesBeforeRecovery) {
         tunnelHealthFailedCycles = 0;
         if (currentServerForRecovery) {
           await recordServerTunnelFailure(currentServerForRecovery);
