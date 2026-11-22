@@ -54,13 +54,13 @@ ToBeVPN — нативный desktop-клиент к VPN-сети с защищ�
     </tr>
     <tr>
       <td align="center"><b>Статистика</b></td>
-      <td align="center"><b>Маршрутизация</b></td>
       <td align="center"><b>Роутер</b></td>
+      <td align="center"><b>Маршрутизация</b></td>
     </tr>
     <tr>
       <td><img src="docs/screenshots/desktop/stats.png" alt="Статистика — ToBeVPN Desktop" width="240" /></td>
-      <td><img src="docs/screenshots/desktop/routing.png" alt="Маршрутизация — ToBeVPN Desktop" width="240" /></td>
       <td><img src="docs/screenshots/desktop/router.png" alt="Роутер — ToBeVPN Desktop" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/routing.png" alt="Маршрутизация — ToBeVPN Desktop" width="240" /></td>
     </tr>
     <tr>
       <td align="center"><b>Тест скорости</b></td>
