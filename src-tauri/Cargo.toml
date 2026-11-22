@@ -37,7 +37,7 @@ tauri-plugin-updater = { version = "2", default-features = false, features = ["r
 tauri-plugin-process = "2"
 machine-uid = "0.6"
 os_info = { version = "3", default-features = false }
-keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = "4.2"
 dirs = "7"
 sha2 = "0.11"
 md5 = "0.8.1"
