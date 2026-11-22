@@ -157,6 +157,9 @@ jobs:
             local repo="$1"
             local asset_name="$2"
             local output="$3"
+            # Optional: where to write the release tag, read from the same
+            # answer the file comes from (the router compares lists by it).
+            local tag_output="${4:-}"
             local metadata
             metadata=$(gh api "repos/${repo}/releases/latest")
             local url
@@ -169,6 +172,10 @@ jobs:
             fi
             curl -fsSL -o "$output" "$url"
             echo "${digest#sha256:}  ${output}" | sha256sum -c -
+            if [ -n "$tag_output" ]; then
+              jq -r '.tag_name' <<<"$metadata" | tr -cd '0-9' > "$tag_output"
+              test -s "$tag_output"
+            fi
           }
 
           extract_plain_category_domains() {
@@ -236,7 +243,8 @@ jobs:
 
           echo "Downloading automatic routing rules..."
           download_verified_release_asset \
-            runetfreedom/russia-v2ray-rules-dat geosite.dat src-tauri/bin/geosite.dat
+            runetfreedom/russia-v2ray-rules-dat geosite.dat src-tauri/bin/geosite.dat \
+            public/routing/geosite-version.txt
           download_verified_release_asset \
             runetfreedom/russia-v2ray-rules-dat geoip.dat src-tauri/bin/geoip.dat
           download_verified_release_asset \
@@ -391,7 +399,9 @@ jobs:
             param(
               [string]$Repository,
               [string]$AssetName,
-              [string]$Output
+              [string]$Output,
+              # Optional: where to write the release tag, from the same answer.
+              [string]$TagOutput = ""
             )
             $release = gh api "repos/$Repository/releases/latest" | ConvertFrom-Json
             $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
@@ -403,6 +413,11 @@ jobs:
             $actual = (Get-FileHash -Algorithm SHA256 $Output).Hash.ToLowerInvariant()
             if ($actual -ne $expected) {
               throw "SHA-256 mismatch for $Repository/$AssetName"
+            }
+            if ($TagOutput) {
+              $tag = ($release.tag_name -replace '[^0-9]', '')
+              if (-not $tag) { throw "No release tag for $Repository" }
+              Set-Content -LiteralPath $TagOutput -Value $tag -NoNewline -Encoding ASCII
             }
           }
 
@@ -489,7 +504,8 @@ jobs:
           Download-VerifiedReleaseAsset `
             -Repository "runetfreedom/russia-v2ray-rules-dat" `
             -AssetName "geosite.dat" `
-            -Output "src-tauri/bin/geosite.dat"
+            -Output "src-tauri/bin/geosite.dat" `
+            -TagOutput "public/routing/geosite-version.txt"
           Download-VerifiedReleaseAsset `
             -Repository "runetfreedom/russia-v2ray-rules-dat" `
             -AssetName "geoip.dat" `

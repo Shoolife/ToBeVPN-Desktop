@@ -29,3 +29,6 @@ dist-ssr
 
 # Stray debug dumps
 fdgdfg.txt
+
+# Written by the release build: the runetfreedom release of the bundled geosite.dat.
+public/routing/geosite-version.txt

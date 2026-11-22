@@ -1274,12 +1274,12 @@ async fn outdated_components(
         .run("cat /opt/tobevpn/tobevpn-router.sh 2>/dev/null", None)
         .await?;
     let sites = if ru_direct_enabled(session).await? {
-        let (digest, _) = session
-            .run(&format!("cat {RU_SITES_DIGEST} 2>/dev/null"), None)
-            .await?;
-        ru_sites(app)
-            .ok()
-            .filter(|sites| digest.trim() != sha256_hex(sites))
+        let (has, router_tag) = router_sites_facts(session).await?;
+        if sites_outdated(has, router_tag, app_sites_tag(app)) {
+            ru_sites(app).ok()
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1464,7 +1464,7 @@ async fn update(
     }
     if let Some(sites) = sites {
         progress(app, "upload:sites");
-        write_ru_sites(&session, sites).await?;
+        write_ru_sites(app, &session, sites).await?;
         // The config may lack the sites rule (written while the list was
         // missing): turned on with the list, or the bypass stays off.
         if let Ok((text, _)) = session
@@ -2135,7 +2135,7 @@ async fn write_servers(
     let sites = if ru_direct {
         match ru_sites(app) {
             Ok(sites) => {
-                write_ru_sites(session, sites).await?;
+                write_ru_sites(app, session, sites).await?;
                 true
             }
             // The router's own list still carries the rule; without any
@@ -2200,6 +2200,63 @@ async fn write_servers(
 const RU_DIRECT_FLAG: &str = "/opt/tobevpn/ru_direct";
 const RU_SITES_PATH: &str = "/opt/tobevpn/geosite.dat";
 const RU_SITES_DIGEST: &str = "/opt/tobevpn/geosite.sha256";
+/// "<release tag> <sha256 of the list>" of the list on the router: the tag of
+/// the runetfreedom release the list was cut from (digits, date and time, so
+/// a larger one is newer). The phone app writes the same file.
+const RU_SITES_VERSION: &str = "/opt/tobevpn/geosite.version";
+
+/// The runetfreedom release this app's list was cut from, as the release
+/// build wrote it next to the routing data the frontend carries; 0 when the
+/// build has none (a local build), and then the app only fills a missing
+/// list and never replaces one.
+fn app_sites_tag(app: &AppHandle) -> u64 {
+    app.asset_resolver()
+        .get("routing/geosite-version.txt".to_string())
+        .and_then(|asset| String::from_utf8(asset.bytes).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// The tag of the router's list from its version file, trusted only while
+/// the list is the one the file describes: an app that does not know the
+/// file may have replaced the list since (0 then).
+fn router_sites_tag(version_file: &str, digest_file: &str) -> u64 {
+    let mut parts = version_file.split_whitespace();
+    let (Some(tag), Some(digest)) = (parts.next(), parts.next()) else {
+        return 0;
+    };
+    if digest != digest_file.trim() {
+        return 0;
+    }
+    tag.parse().unwrap_or(0)
+}
+
+/// Whether this app's list should go to the router: none there, or this
+/// app's is from a newer release. Never an older list over a newer one.
+fn sites_outdated(router_has_list: bool, router_tag: u64, app_tag: u64) -> bool {
+    !router_has_list || app_tag > router_tag
+}
+
+/// The router's list facts: whether it has a list, and the list's tag.
+async fn router_sites_facts(session: &Session) -> Result<(bool, u64), String> {
+    let (out, _) = session
+        .run(
+            &format!(
+                "[ -s {RU_SITES_PATH} ] && echo has=1 || echo has=0; \
+                 echo digest=$(cat {RU_SITES_DIGEST} 2>/dev/null); \
+                 echo version=$(cat {RU_SITES_VERSION} 2>/dev/null)"
+            ),
+            None,
+        )
+        .await?;
+    let facts = parse_key_values(&out);
+    let has = facts.get("has").map(String::as_str) == Some("1");
+    let tag = router_sites_tag(
+        facts.get("version").map(String::as_str).unwrap_or(""),
+        facts.get("digest").map(String::as_str).unwrap_or(""),
+    );
+    Ok((has, tag))
+}
 
 /// Whether Russian sites go around the VPN on this router; on unless the
 /// owner turned it off.
@@ -2290,18 +2347,25 @@ fn trim_geosite(data: &[u8], groups: &[&str]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Puts the list on the router unless the same one is already there.
-async fn write_ru_sites(session: &Session, sites: &[u8]) -> Result<(), String> {
-    let digest = sha256_hex(sites);
-    let (current, _) = session
-        .run(&format!("cat {RU_SITES_DIGEST} 2>/dev/null"), None)
-        .await?;
-    if current.trim() == digest {
+/// Puts the list on the router when it has none or this app's is from a
+/// newer release; a newer list another app put there stays.
+async fn write_ru_sites(app: &AppHandle, session: &Session, sites: &[u8]) -> Result<(), String> {
+    let (has, router_tag) = router_sites_facts(session).await?;
+    let app_tag = app_sites_tag(app);
+    if !sites_outdated(has, router_tag, app_tag) {
         return Ok(());
     }
+    let digest = sha256_hex(sites);
     session.write_file(RU_SITES_PATH, sites, "644").await?;
     session
         .write_file(RU_SITES_DIGEST, format!("{digest}\n").as_bytes(), "644")
+        .await?;
+    session
+        .write_file(
+            RU_SITES_VERSION,
+            format!("{app_tag} {digest}\n").as_bytes(),
+            "644",
+        )
         .await
 }
 
@@ -2408,7 +2472,7 @@ pub async fn router_set_ru_direct(
 ) -> Result<RouterStatus, String> {
     let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
     if enabled {
-        write_ru_sites(&session, ru_sites(&app)?).await?;
+        write_ru_sites(&app, &session, ru_sites(&app)?).await?;
     }
     let (text, _) = session
         .run("cat /opt/tobevpn/xray.json 2>/dev/null", None)
@@ -3020,6 +3084,28 @@ mod tests {
         assert!(assess(&busy).ok);
         busy.insert("own_xray_kb".into(), "0".into());
         assert_eq!(assess(&busy).problems, vec!["memory_free"]);
+    }
+
+    #[test]
+    fn sites_list_only_replaced_by_a_newer_release() {
+        // No list on the router: written whatever the tags.
+        assert!(sites_outdated(false, 0, 0));
+        assert!(sites_outdated(false, 202611221150, 202604010000));
+        // A newer release replaces, an older or the same one does not.
+        assert!(sites_outdated(true, 202604010000, 202611221150));
+        assert!(!sites_outdated(true, 202611221150, 202604010000));
+        assert!(!sites_outdated(true, 202611221150, 202611221150));
+        // A build without a tag never replaces a list.
+        assert!(!sites_outdated(true, 0, 0));
+
+        // The router's tag counts only while the list is the one it names.
+        assert_eq!(
+            router_sites_tag("202611221150 abc123\n", "abc123\n"),
+            202611221150
+        );
+        assert_eq!(router_sites_tag("202611221150 abc123", "def456"), 0);
+        assert_eq!(router_sites_tag("", "abc123"), 0);
+        assert_eq!(router_sites_tag("garbage", "abc123"), 0);
     }
 
     #[test]
