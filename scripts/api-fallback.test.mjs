@@ -2,14 +2,27 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
-import ts from "typescript";
+import { fileURLToPath } from "node:url";
+import { rolldown } from "rolldown";
 
 // Run the production client with an in-memory session and HTTP transport.
 // No real endpoints or credentials are used by these regression tests.
-const source = await readFile(new URL("../src/api/client.ts", import.meta.url), "utf8");
-const compiled = ts.transpileModule(source.replaceAll("import.meta.env.DEV", "false"), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
+// The client is compiled to CommonJS by rolldown (TypeScript 7 has no
+// compiler API to transpile with); every import stays a require() that
+// createClient below answers with test doubles.
+const clientPath = fileURLToPath(new URL("../src/api/client.ts", import.meta.url));
+const source = await readFile(clientPath, "utf8");
+const bundle = await rolldown({
+  input: clientPath,
+  external: (_id, importer) => importer !== undefined,
+  plugins: [{
+    name: "client-source",
+    load: (id) => (id === clientPath ? source.replaceAll("import.meta.env.DEV", "false") : null),
+  }],
+  logLevel: "silent",
+});
+const compiled = (await bundle.generate({ format: "cjs" })).output[0].code;
+await bundle.close();
 const PRIMARY = "https://primary.test/";
 const FALLBACK = "https://fallback.test/function?region=test&u=";
 const tokens = {
