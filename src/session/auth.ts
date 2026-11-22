@@ -1694,7 +1694,7 @@ export async function unlinkOtherDevice(deviceId: string, resetSubscription = tr
     await disconnectVpn().catch(() => {});
     if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
   }
-  await refreshAfterDeviceUnlink(res.data);
+  await refreshAfterDeviceUnlink(res.data, linkReset);
   if (!isSessionWorkIdentityCurrent(operationIdentity)) throw sessionWorkSuperseded();
   if (reconnectServer && linkReset && getSession().userPlan !== "EXPIRED") {
     await reconnectVpnWithFreshSubscription(reconnectServer);
@@ -1703,6 +1703,7 @@ export async function unlinkOtherDevice(deviceId: string, resetSubscription = tr
 
 async function refreshAfterDeviceUnlink(
   data: DeviceUnlinkResponseDto | null | undefined,
+  linkReset: boolean,
 ): Promise<void> {
   const sessionBefore = getSession();
   const oldShortUuid = sessionBefore.shortUuid;
@@ -1718,9 +1719,15 @@ async function refreshAfterDeviceUnlink(
     writeCachedSubscriptionUrl(oldShortUuid, null);
     clearVpnServersMemoryCache(oldShortUuid);
   }
-  if (nextShortUuid) {
+  // Only a reset link (or a new key) makes the cached servers and URL wrong,
+  // as on the phone. A kept link keeps them: the refresh below may fail or
+  // time out while the bot is still busy with the unlink, and must not leave
+  // the app with "No servers available" until the next load.
+  if (nextShortUuid && (linkReset || nextShortUuid !== oldShortUuid)) {
     writeCachedSubscriptionUrl(nextShortUuid, nextUrl);
     clearVpnServersMemoryCache(nextShortUuid);
+  } else if (nextShortUuid && nextUrl) {
+    writeCachedSubscriptionUrl(nextShortUuid, nextUrl);
   }
   clearSubSyncTimestamp();
 
@@ -2380,9 +2387,28 @@ async function enrichVpnServersWithNodes(servers: VpnServer[]): Promise<VpnServe
  * Fetch VPN servers from subscription links (VLESS URLs).
  * Mirrors TV's VpnRepository.refreshServers().
  */
+/**
+ * How a server list refresh ended. "unavailable": the subscription could not
+ * be read (network, timeout, server error), so the list is only what was
+ * cached and may be empty although the account has servers; "empty": the
+ * subscription itself answered with no servers.
+ */
+export type ServerRefreshOutcome = "loaded" | "empty" | "blocked" | "unavailable" | "superseded";
+
+export interface ServerRefreshResult {
+  servers: VpnServer[];
+  outcome: ServerRefreshOutcome;
+}
+
 export async function fetchVpnServers(
   opts: { skipAccessPing?: boolean } = {},
 ): Promise<VpnServer[]> {
+  return (await fetchVpnServersWithOutcome(opts)).servers;
+}
+
+export async function fetchVpnServersWithOutcome(
+  opts: { skipAccessPing?: boolean } = {},
+): Promise<ServerRefreshResult> {
   const session = getSession();
   const { shortUuid } = session;
   const expectedGeneration = getSessionGeneration();
@@ -2397,8 +2423,8 @@ export async function fetchVpnServers(
   };
   const currentCache = () => getCachedVpnServers();
   const debug = import.meta.env.DEV;
-  if (!shortUuid) return [];
-  if (isBrowserPreviewRuntime()) return getCachedVpnServers();
+  if (!shortUuid) return { servers: [], outcome: "empty" };
+  if (isBrowserPreviewRuntime()) return { servers: getCachedVpnServers(), outcome: "loaded" };
   recordDiagnosticEvent(
     "Servers",
     `Server list refresh started; access_ping=${!opts.skipAccessPing}`,
@@ -2407,23 +2433,23 @@ export async function fetchVpnServers(
   if (getSubscriptionUsageBlocked()) {
     recordDiagnosticEvent("Servers", "Server list cleared because access is blocked", "W");
     clearVpnServersMemoryCache(shortUuid);
-    return [];
+    return { servers: [], outcome: "blocked" };
   }
 
   const blocked = opts.skipAccessPing
     ? getSubscriptionUsageBlocked()
     : await pingHwidOnly().catch(() => getSubscriptionUsageBlocked());
-  if (!isCurrent()) return currentCache();
+  if (!isCurrent()) return { servers: currentCache(), outcome: "superseded" };
   if (blocked) {
     recordDiagnosticEvent("Servers", "Server list refresh stopped because access is blocked", "W");
     clearVpnServersMemoryCache(shortUuid);
-    return [];
+    return { servers: [], outcome: "blocked" };
   }
 
   const subscriptionUrl = await readSubscriptionUrl(shortUuid);
-  if (!isCurrent()) return currentCache();
+  if (!isCurrent()) return { servers: currentCache(), outcome: "superseded" };
   const profile = await fetchSubscriptionProfile(subscriptionUrl, shortUuid);
-  if (!isCurrent()) return currentCache();
+  if (!isCurrent()) return { servers: currentCache(), outcome: "superseded" };
   if (profile) {
     setSubscriptionUsageBlocked(shortUuid, profile.isUsageBlocked);
     setUpdateRequired(profile.isUpdateRequired);
@@ -2436,7 +2462,7 @@ export async function fetchVpnServers(
     }
     if (profile.isUsageBlocked) {
       clearVpnServersMemoryCache(shortUuid);
-      return [];
+      return { servers: [], outcome: "blocked" };
     }
     if (debug) console.log("[fetchVpnServers] profile links count:", profile.links.length);
   }
@@ -2447,7 +2473,7 @@ export async function fetchVpnServers(
       `Subscription profile unavailable; cached_servers=${getCachedVpnServers().length}`,
       "W",
     );
-    return getCachedVpnServers();
+    return { servers: getCachedVpnServers(), outcome: "unavailable" };
   }
 
   const links = profile.links;
@@ -2458,10 +2484,10 @@ export async function fetchVpnServers(
     if (profile.isSuccessful) {
       recordDiagnosticEvent("Servers", "Successful subscription response contains no servers", "W");
       clearVpnServersMemoryCache(shortUuid);
-      return [];
+      return { servers: [], outcome: "empty" };
     }
     recordDiagnosticEvent("Servers", "Unsuccessful empty response ignored; retaining cached servers", "W");
-    return getCachedVpnServers();
+    return { servers: getCachedVpnServers(), outcome: "unavailable" };
   }
 
   const servers = prepareVpnServersForCache(
@@ -2496,7 +2522,7 @@ export async function fetchVpnServers(
     metadataTask,
     SERVER_METADATA_TIMEOUT_MS,
   );
-  if (!isCurrent()) return currentCache();
+  if (!isCurrent()) return { servers: currentCache(), outcome: "superseded" };
   if (enriched) {
     if (isCurrent() && vpnServersCacheGeneration === generation) {
       writeVpnServersMemoryCache(shortUuid, enriched);
@@ -2507,11 +2533,11 @@ export async function fetchVpnServers(
       `Server availability metadata applied; online=${onlineCount}, total=${enriched.length}`,
       "D",
     );
-    return cloneVpnServers(enriched);
+    return { servers: cloneVpnServers(enriched), outcome: "loaded" };
   }
 
   recordDiagnosticEvent("Servers", "Server metadata timed out; using parsed server list", "W");
-  return cloneVpnServers(servers);
+  return { servers: cloneVpnServers(servers), outcome: "loaded" };
 }
 
 export type { Session };

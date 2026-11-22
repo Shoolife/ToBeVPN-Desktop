@@ -8,7 +8,7 @@ import {
   serverDisplayName,
 } from "../components/serverDisplay";
 import {
-  fetchVpnServers,
+  fetchVpnServersWithOutcome,
   getCachedVpnServers,
   isAvailableVpnServer,
   subscribeVpnServers,
@@ -65,6 +65,14 @@ function pingColor(ping: number): string {
 function loadErrorText(error: unknown): string {
   console.warn("[servers] load failed", error);
   return t("servers_load_error_details");
+}
+
+/**
+ * When the subscription cannot be read and nothing is cached, the screen says
+ * so and tries again by itself: 3 s, 6 s, 12 s, then every 30 s while open.
+ */
+function serverRetryDelayMs(attempt: number): number {
+  return Math.min(30_000, 3_000 * 2 ** attempt);
 }
 
 /** How long the Refresh check waits for the bot's subscription sync. */
@@ -327,6 +335,9 @@ export default function ServersScreen({
       : USER_SERVER_LIST_VIEW;
   const pingGenRef = useRef(0);
   const loadGenRef = useRef(0);
+  const retryTimerRef = useRef<number | null>(null);
+  const retryAttemptRef = useRef(0);
+  const loadRef = useRef<(opts?: { force?: boolean }) => Promise<void>>(async () => {});
   const mountedRef = useRef(true);
   const listRef = useRef<HTMLDivElement>(null);
   const [listTopFade, setListTopFade] = useState(false);
@@ -359,6 +370,7 @@ export default function ServersScreen({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
       loadGenRef.current += 1;
       pingGenRef.current += 1;
       if (probeGenRef.current > 0) cancelServerProbe();
@@ -577,6 +589,10 @@ export default function ServersScreen({
     : findSameServer(selectedServer, servers.filter(isAvailableVpnServer));
 
   const load = useCallback(async (opts: { force?: boolean } = {}) => {
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
     const generation = ++loadGenRef.current;
     const isCurrent = () => mountedRef.current && generation === loadGenRef.current;
     if (previewServers) {
@@ -605,8 +621,22 @@ export default function ServersScreen({
       const subscriptionSynced = opts.force
         ? syncSubscription({ force: true }).catch(() => {})
         : null;
-      const fetchedServers = await fetchVpnServers();
+      const { servers: fetchedServers, outcome } = await fetchVpnServersWithOutcome();
       if (!isCurrent()) return;
+      // The subscription could not be read and there is nothing to show:
+      // say so instead of "No servers available", and try again by itself.
+      if (outcome === "unavailable" && fetchedServers.length === 0 && getCachedVpnServers().length === 0) {
+        setServers([]);
+        setError(t("servers_load_retrying"));
+        const delay = serverRetryDelayMs(retryAttemptRef.current);
+        retryAttemptRef.current += 1;
+        retryTimerRef.current = window.setTimeout(() => {
+          retryTimerRef.current = null;
+          if (mountedRef.current) void loadRef.current();
+        }, delay);
+        return;
+      }
+      retryAttemptRef.current = 0;
       if (opts.force) {
         await Promise.race([
           subscriptionSynced,
@@ -635,6 +665,7 @@ export default function ServersScreen({
       if (isCurrent()) setServerLoading(false);
     }
   }, [automaticServerSelection, onAutomaticRefreshed, previewServers, runProfileCheck, showServers]);
+  loadRef.current = load;
 
   useEffect(() => {
     load();
