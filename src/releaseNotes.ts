@@ -18,29 +18,34 @@ export const CURRENT_RELEASE_NOTES: ReleaseNotesEntry = {
   version: __APP_VERSION__,
   highlights: [
     {
+      icon: "bolt",
+      titleKey: "whats_new_faster_connect_title",
+      descriptionKey: "whats_new_faster_connect_description",
+    },
+    {
+      icon: "refresh",
+      titleKey: "whats_new_faster_recovery_title",
+      descriptionKey: "whats_new_faster_recovery_description",
+    },
+    {
+      icon: "dns",
+      titleKey: "whats_new_servers_kept_title",
+      descriptionKey: "whats_new_servers_kept_description",
+    },
+    {
       icon: "router",
-      titleKey: "whats_new_pause_home_title",
-      descriptionKey: "whats_new_pause_home_description",
+      titleKey: "whats_new_router_servers_pc_title",
+      descriptionKey: "whats_new_router_servers_pc_description",
     },
     {
-      icon: "altRoute",
-      titleKey: "whats_new_ip_exceptions_title",
-      descriptionKey: "whats_new_ip_exceptions_description",
-    },
-    {
-      icon: "dataUsage",
-      titleKey: "whats_new_stats_click_title",
-      descriptionKey: "whats_new_stats_click_description",
-    },
-    {
-      icon: "devices",
-      titleKey: "whats_new_keenetic_title",
-      descriptionKey: "whats_new_keenetic_description",
+      icon: "public",
+      titleKey: "whats_new_ru_sites_pc_title",
+      descriptionKey: "whats_new_ru_sites_pc_description",
     },
     {
       icon: "autoAwesome",
-      titleKey: "whats_new_calm_numbers_title",
-      descriptionKey: "whats_new_calm_numbers_description",
+      titleKey: "whats_new_components_title",
+      descriptionKey: "whats_new_components_description",
     },
   ],
 };
