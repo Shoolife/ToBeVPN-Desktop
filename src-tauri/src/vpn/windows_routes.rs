@@ -425,6 +425,12 @@ fn set_interface_metric(
 
     row.UseAutomaticMetric = false;
     row.Metric = metric;
+    // GetIpInterfaceEntry fills SitePrefixLength (64 on Windows 11), but
+    // SetIpInterfaceEntry rejects any non-zero value for IPv4 with
+    // ERROR_INVALID_PARAMETER (87), so the IPv4 metric was never applied.
+    if family == AF_INET {
+        row.SitePrefixLength = 0;
+    }
     let status = unsafe { SetIpInterfaceEntry(&mut row) };
     if status == ERROR_SUCCESS {
         Ok(())
