@@ -10,6 +10,7 @@ import { isBrowserPreviewRuntime } from "./browserPreview";
 import { getSession } from "./store";
 import type { ServerVpnConfig } from "./vpn";
 import { fetchDevices, getCachedVpnServers, unlinkOtherDevice } from "./auth";
+import { recordDiagnosticEvent } from "./diagnostics";
 
 export interface RouterInfo {
   /** Default gateway, e.g. "192.168.1.1"; null without a network. */
@@ -977,6 +978,38 @@ export function routerDeviceLabel(device: RouterDevice, lanNames: Record<string,
  * Hosts of every server of the account. The router always reaches them
  * directly, so a device running its own ToBeVPN is not tunnelled twice.
  */
+const SERVER_HOSTS_SYNC_MS = 30 * 60_000;
+let serverHostsSyncedAt = 0;
+let serverHostsSyncInFlight = false;
+
+/**
+ * Adds the subscription's servers missing from the router's direct list, at
+ * most every half hour (as the phone does from Home). Without it a server
+ * added to the subscription after the router's setup is reached through the
+ * router's own tunnel — VPN inside VPN — and may not work from this computer.
+ * Nothing is sent before the subscription's servers are known.
+ */
+export async function syncRouterServerHosts(link: RouterLink): Promise<void> {
+  const now = Date.now();
+  if (serverHostsSyncInFlight) return;
+  if (serverHostsSyncedAt !== 0 && now - serverHostsSyncedAt < SERVER_HOSTS_SYNC_MS) return;
+  if (getCachedVpnServers().length === 0) return;
+  serverHostsSyncInFlight = true;
+  try {
+    const result = await linkInvoke<{ kept: number; added: number }>(link, "router_sync_server_hosts", {
+      serverHosts: accountServerHosts(),
+    });
+    serverHostsSyncedAt = now;
+    recordDiagnosticEvent(
+      "Router",
+      `Router server list checked: kept=${result.kept} added=${result.added}`,
+      result.added > 0 ? "I" : "D",
+    );
+  } finally {
+    serverHostsSyncInFlight = false;
+  }
+}
+
 function accountServerHosts(): string[] {
   const servers = getCachedVpnServers().map((server) => server.address);
   return [...new Set([...servers, ...serviceHosts()].filter(Boolean))];

@@ -11,7 +11,9 @@ import {
   ROUTER_SECTION_AVAILABLE,
   routerSnapshot,
   routerDeviceSlot,
+  syncRouterServerHosts,
 } from "./router";
+import { recordDiagnosticEvent } from "./diagnostics";
 
 /** Whether the home router already sends this computer through the VPN. */
 export interface RouterProtection {
@@ -53,6 +55,12 @@ export async function checkRouterProtection(): Promise<RouterProtection> {
     if (status.installed) {
       const repaired = await repairRouterCredentialsInBackground(link);
       if (repaired.kind === "updated") ({ status, network } = await routerSnapshot(link));
+      // The subscription's servers the router does not send direct yet are
+      // added (at most every half hour), so this computer's own VPN reaches
+      // a server added after the router's setup.
+      void syncRouterServerHosts(link).catch((error) =>
+        recordDiagnosticEvent("Router", `Router server list sync failed: ${String(error)}`, "W"),
+      );
     }
     if (!status.installed || !status.running || !status.clientIp || !network) return NONE;
     const me = network.devices.find((device) => device.ip === status.clientIp);

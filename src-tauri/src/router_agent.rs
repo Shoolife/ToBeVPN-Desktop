@@ -2446,6 +2446,71 @@ pub async fn router_set_ru_direct(
 
 /// ToBeVPN server hosts, one per line; anything but a plain host name or
 /// address is dropped, as the router agent passes them to resolveip.
+/// What a sync of the router's direct list found: hosts already there and
+/// hosts it added.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct ServerHostsSync {
+    pub kept: usize,
+    pub added: usize,
+}
+
+/// The router's direct list (`current`, the file as read) with the hosts of
+/// `wanted` that are missing from it; None when nothing is missing. Hosts are
+/// only added, never removed: a server another app of the account added stays.
+fn merge_server_list(current: &str, wanted: &[String]) -> (Option<String>, ServerHostsSync) {
+    let present: Vec<String> = current
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let wanted = server_list(wanted);
+    let missing = wanted
+        .lines()
+        .filter(|host| !present.iter().any(|line| line == host))
+        .count();
+    let counts = ServerHostsSync {
+        kept: present.len(),
+        added: missing,
+    };
+    if missing == 0 {
+        return (None, counts);
+    }
+    let merged: Vec<String> = present
+        .into_iter()
+        .chain(wanted.lines().map(str::to_string))
+        .collect();
+    (Some(server_list(&merged)), counts)
+}
+
+/// Adds the subscription's servers missing from the router's direct list
+/// (/opt/tobevpn/servers), as the phone does from Home: a server added to the
+/// subscription after the router's setup is then reached directly by this
+/// computer's own VPN instead of through the router's tunnel. The router's
+/// agent reads the file again by itself.
+#[tauri::command]
+pub async fn router_sync_server_hosts(
+    app: AppHandle,
+    host: String,
+    user: String,
+    fingerprint: Option<String>,
+    server_hosts: Vec<String>,
+) -> Result<ServerHostsSync, String> {
+    if server_list(&server_hosts).is_empty() {
+        return Ok(ServerHostsSync { kept: 0, added: 0 });
+    }
+    let session = open(&app, &host, &user, fingerprint.as_deref()).await?;
+    let (current, _) = session
+        .run("cat /opt/tobevpn/servers 2>/dev/null", None)
+        .await?;
+    let (merged, counts) = merge_server_list(&current, &server_hosts);
+    if let Some(list) = merged {
+        session
+            .write_file("/opt/tobevpn/servers", list.as_bytes(), "644")
+            .await?;
+    }
+    Ok(counts)
+}
+
 fn server_list(hosts: &[String]) -> String {
     let mut list: Vec<&str> = hosts
         .iter()
@@ -2955,6 +3020,35 @@ mod tests {
         assert!(assess(&busy).ok);
         busy.insert("own_xray_kb".into(), "0".into());
         assert_eq!(assess(&busy).problems, vec!["memory_free"]);
+    }
+
+    #[test]
+    fn merge_server_list_only_adds_missing_hosts() {
+        let current = "192.0.2.10\nde.example.com\n";
+        let wanted = vec![
+            "de.example.com".to_string(),
+            "198.51.100.7".to_string(),
+            "bad host; rm -rf /".to_string(),
+        ];
+        let (merged, counts) = merge_server_list(current, &wanted);
+        assert_eq!(counts, ServerHostsSync { kept: 2, added: 1 });
+        assert_eq!(
+            merged.unwrap(),
+            "192.0.2.10\n198.51.100.7\nde.example.com\n"
+        );
+
+        // Nothing missing: nothing to write. A host only the router has stays.
+        let (merged, counts) = merge_server_list(
+            "192.0.2.10\nde.example.com\nonly-on-router.example\n",
+            &["de.example.com".to_string()],
+        );
+        assert_eq!(merged, None);
+        assert_eq!(counts, ServerHostsSync { kept: 3, added: 0 });
+
+        // An empty or missing file on the router gets the whole list.
+        let (merged, counts) = merge_server_list("", &["192.0.2.10".to_string()]);
+        assert_eq!(merged.unwrap(), "192.0.2.10\n");
+        assert_eq!(counts, ServerHostsSync { kept: 0, added: 1 });
     }
 
     #[test]
