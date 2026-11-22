@@ -405,7 +405,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
     if (generation !== generationRef.current) return;
     // Newer components in this app than on the router: offered with a button.
     if (currentLink && nextStatus?.installed) {
-      void routerUpdateCheckCached(currentLink)
+      void routerUpdateCheckCached(currentLink, { force: refresh })
         .then((update) => {
           if (generation === generationRef.current) setUpdate(update);
         })
