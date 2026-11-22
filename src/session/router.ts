@@ -817,12 +817,16 @@ const updateChecks = new Map<string, { at: number; result: RouterUpdate }>();
 
 /**
  * The update check at most every half hour per router: it logs in and may
- * ask GitHub. The last answer is given meanwhile.
+ * ask GitHub. The last answer is given meanwhile, except on a refresh the
+ * user asked for: another app may have updated the router since.
  */
-export async function routerUpdateCheckCached(link: RouterLink): Promise<RouterUpdate> {
+export async function routerUpdateCheckCached(
+  link: RouterLink,
+  options: { force?: boolean } = {},
+): Promise<RouterUpdate> {
   const key = link.id ?? link.host;
   const last = updateChecks.get(key);
-  if (last && Date.now() - last.at < UPDATE_CHECK_EVERY_MS) return last.result;
+  if (!options.force && last && Date.now() - last.at < UPDATE_CHECK_EVERY_MS) return last.result;
   const result = await routerUpdateCheck(link);
   updateChecks.set(key, { at: Date.now(), result });
   return result;
