@@ -44,13 +44,23 @@ ToBeVPN — нативный desktop-клиент к VPN-сети с защищ�
   <table>
     <tr>
       <td align="center"><b>Главный экран</b></td>
-      <td align="center"><b>Подписка</b></td>
       <td align="center"><b>Серверы</b></td>
+      <td align="center"><b>Подписка</b></td>
     </tr>
     <tr>
-      <td><img src="docs/screenshots/home.png" alt="Главный экран ToBeVPN" width="240" /></td>
-      <td><img src="docs/screenshots/subscription.png" alt="Экран подписки ToBeVPN" width="240" /></td>
-      <td><img src="docs/screenshots/servers.png" alt="Экран выбора сервера ToBeVPN" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/home.png" alt="Главный экран — ToBeVPN Desktop" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/servers.png" alt="Серверы — ToBeVPN Desktop" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/subscription.png" alt="Подписка — ToBeVPN Desktop" width="240" /></td>
+    </tr>
+    <tr>
+      <td align="center"><b>Статистика</b></td>
+      <td align="center"><b>Маршрутизация</b></td>
+      <td align="center"><b>Роутер</b></td>
+    </tr>
+    <tr>
+      <td><img src="docs/screenshots/desktop/stats.png" alt="Статистика — ToBeVPN Desktop" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/routing.png" alt="Маршрутизация — ToBeVPN Desktop" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/router.png" alt="Роутер — ToBeVPN Desktop" width="240" /></td>
     </tr>
     <tr>
       <td align="center"><b>Тест скорости</b></td>
@@ -58,9 +68,9 @@ ToBeVPN — нативный desktop-клиент к VPN-сети с защищ�
       <td align="center"><b>Настройки</b></td>
     </tr>
     <tr>
-      <td><img src="docs/screenshots/speedtest.png" alt="История теста скорости ToBeVPN" width="240" /></td>
-      <td><img src="docs/screenshots/referrals.png" alt="Экран рефералов ToBeVPN" width="240" /></td>
-      <td><img src="docs/screenshots/settings.png" alt="Экран настроек ToBeVPN" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/speedtest.png" alt="Тест скорости — ToBeVPN Desktop" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/referrals.png" alt="Рефералы — ToBeVPN Desktop" width="240" /></td>
+      <td><img src="docs/screenshots/desktop/settings.png" alt="Настройки — ToBeVPN Desktop" width="240" /></td>
     </tr>
   </table>
 </div>
