@@ -140,6 +140,13 @@ impl VpnManager {
     /// A tunnel left by a crashed run (its routes would black-hole traffic)
     /// is taken down at start.
     pub async fn cleanup_stale_state(&self) {
+        let (bin, config) = (self.resolve_bin("xray"), cache_dir().join("xray.json"));
+        let stale = tokio::task::spawn_blocking(move || super::stop_stale_xray(&bin, &config))
+            .await
+            .unwrap_or(0);
+        if stale > 0 {
+            diagnostic_macos!("Stopped {stale} VPN core process(es) left by a previous run");
+        }
         let tun_up = std::process::Command::new("/sbin/ifconfig")
             .arg(TUN_NAME)
             .output()
@@ -282,6 +289,15 @@ impl VpnManager {
 
         // 2. Xray-core as this user.
         let xray_bin = self.resolve_bin("xray");
+        let stale = {
+            let (bin, config) = (xray_bin.clone(), config_path.clone());
+            tokio::task::spawn_blocking(move || super::stop_stale_xray(&bin, &config))
+                .await
+                .unwrap_or(0)
+        };
+        if stale > 0 {
+            diagnostic_macos!("Stopped {stale} VPN core process(es) left by a previous run");
+        }
         let mut xray_child = Command::new(&xray_bin)
             .arg("run")
             .arg("-config")
