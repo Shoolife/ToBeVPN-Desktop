@@ -11,31 +11,36 @@ where
 
 #[tauri::command]
 pub fn launched_from_autostart() -> bool {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     {
         args_contain_autostart(std::env::args())
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     false
 }
 
-#[cfg(target_os = "linux")]
-pub fn linux_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
-    tauri_plugin_autostart::Builder::new()
+/// Linux: an XDG autostart entry. macOS: a LaunchAgent in
+/// ~/Library/LaunchAgents (no administrator rights, no login item prompt).
+/// Both start the app with AUTOSTART_ARG.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    let builder = tauri_plugin_autostart::Builder::new()
         .app_name("ToBeVPN")
-        .arg(AUTOSTART_ARG)
-        .build()
+        .arg(AUTOSTART_ARG);
+    #[cfg(target_os = "macos")]
+    let builder = builder.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+    builder.build()
 }
 
 #[tauri::command]
 pub fn get_autostart_enabled(_app: tauri::AppHandle) -> Result<bool, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use tauri_plugin_autostart::ManagerExt;
         _app.autolaunch()
             .is_enabled()
-            .map_err(|error| format!("Could not read Linux autostart state: {error}"))
+            .map_err(|error| format!("Could not read autostart state: {error}"))
     }
 
     #[cfg(target_os = "windows")]
@@ -43,13 +48,13 @@ pub fn get_autostart_enabled(_app: tauri::AppHandle) -> Result<bool, String> {
         windows::is_enabled()
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    Err("Autostart is supported only on Windows and Linux".into())
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    Err("Autostart is supported only on Windows, Linux and macOS".into())
 }
 
 #[tauri::command]
 pub fn set_autostart_enabled(_app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use tauri_plugin_autostart::ManagerExt;
         let manager = _app.autolaunch();
@@ -58,7 +63,7 @@ pub fn set_autostart_enabled(_app: tauri::AppHandle, enabled: bool) -> Result<()
         } else {
             manager.disable()
         }
-        .map_err(|error| format!("Could not update Linux autostart: {error}"))
+        .map_err(|error| format!("Could not update autostart: {error}"))
     }
 
     #[cfg(target_os = "windows")]
@@ -70,10 +75,10 @@ pub fn set_autostart_enabled(_app: tauri::AppHandle, enabled: bool) -> Result<()
         }
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = enabled;
-        Err("Autostart is supported only on Windows and Linux".into())
+        Err("Autostart is supported only on Windows, Linux and macOS".into())
     }
 }
 
