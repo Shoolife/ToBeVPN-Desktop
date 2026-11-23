@@ -237,9 +237,7 @@ fn proc_sample(pid: u32) -> Option<ProcSample> {
     // Task times are in Mach absolute time units (not nanoseconds on Apple
     // Silicon).
     let mut timebase = libc::mach_timebase_info { numer: 0, denom: 0 };
-    unsafe {
-        libc::mach_timebase_info(&mut timebase)
-    };
+    unsafe { libc::mach_timebase_info(&mut timebase) };
     let (numer, denom) = if timebase.denom == 0 {
         (1, 1)
     } else {
@@ -262,7 +260,9 @@ fn webkit_children() -> Vec<(u32, String)> {
 
 #[cfg(target_os = "macos")]
 fn open_files() -> usize {
-    std::fs::read_dir("/dev/fd").map(|dir| dir.count()).unwrap_or(0)
+    std::fs::read_dir("/dev/fd")
+        .map(|dir| dir.count())
+        .unwrap_or(0)
 }
 
 fn start_sampler() {

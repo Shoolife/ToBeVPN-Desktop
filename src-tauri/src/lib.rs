@@ -1065,8 +1065,11 @@ pub fn run() {
             // acquired by another thread", and the app closed).
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || show_main_window(&handle));
-            if cfg!(any(target_os = "windows", target_os = "linux", target_os = "macos"))
-                && autostart::args_contain_autostart(argv.iter())
+            if cfg!(any(
+                target_os = "windows",
+                target_os = "linux",
+                target_os = "macos"
+            )) && autostart::args_contain_autostart(argv.iter())
             {
                 let _ = app.emit("autostart-connect-requested", ());
             }

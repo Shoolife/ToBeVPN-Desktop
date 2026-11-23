@@ -522,9 +522,11 @@ mod tests {
         );
         let tunnel = "destination: default\n    gateway: 198.18.0.1\n  interface: utun199\n";
         assert_eq!(super::parse_route_get(tunnel), None);
-        assert_eq!(super::parse_route_get("route: writing to routing socket: not in table"), None);
+        assert_eq!(
+            super::parse_route_get("route: writing to routing socket: not in table"),
+            None
+        );
     }
-
 
     #[test]
     fn sees_a_redirect_to_https() {
