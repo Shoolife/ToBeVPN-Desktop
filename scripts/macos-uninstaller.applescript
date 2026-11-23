@@ -56,7 +56,7 @@ on run
 		"launchctl bootout gui/$(id -u)/ToBeVPN 2>/dev/null || true; " & ¬
 		"rm -f \"$HOME/Library/LaunchAgents/ToBeVPN.plist\"; " & ¬
 		"rm -rf \"$HOME/Applications/ToBeVPN.app\" " & ¬
-		"\"$HOME/Library/Application Support/com.tobevpn.desktop\" " & ¬
+		"\"$HOME/Library/Application Support/com.tobevpn.desktop\" \"$HOME/Library/Application Support/ToBeVPN\" " & ¬
 		"\"$HOME/Library/Caches/tobevpn\" \"$HOME/Library/Caches/com.tobevpn.desktop\" " & ¬
 		"\"$HOME/Library/WebKit/com.tobevpn.desktop\" " & ¬
 		"\"$HOME/Library/Preferences/com.tobevpn.desktop.plist\" " & ¬
