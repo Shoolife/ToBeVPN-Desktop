@@ -269,8 +269,12 @@ pub async fn probe_server_profiles(
 
     let results = take_results(&results);
     let verified = results.values().filter(|delay| **delay > 0).count();
+    // A run replaced by a newer one or stopped (the screen closed) reports
+    // nothing more: its servers were not checked, not found unavailable.
+    let cancelled = RUN_GENERATION.load(Ordering::SeqCst) != generation;
     write_check_log(format!(
-        "ToBeVPN server check: total={total} verified={verified} timeout_ms={} bypass_interface={} elapsed_ms={}",
+        "ToBeVPN server check: total={total} verified={verified} checked={} cancelled={cancelled} timeout_ms={} bypass_interface={} elapsed_ms={}",
+        results.len(),
         timeout.as_millis(),
         bypass_interface.as_deref().unwrap_or("-"),
         check_started.elapsed().as_millis()
@@ -278,7 +282,9 @@ pub async fn probe_server_profiles(
     diagnostics::record_native(
         "ServerProbe",
         &format!(
-            "Xray profile check completed: total={total}, verified={verified}, timeout_ms={}",
+            "Xray profile check {}: total={total}, checked={}, verified={verified}, timeout_ms={}",
+            if cancelled { "cancelled" } else { "completed" },
+            results.len(),
             timeout.as_millis()
         ),
     );

@@ -171,9 +171,11 @@ export async function probeServerProfiles(
       apply(Number(index), delay, { completed: delivered.size + 1, total: candidates.length });
     }
     const verified = Array.from(results.values()).filter((delay) => delay > 0).length;
+    // Fewer results than servers: the check was stopped or replaced, and
+    // the rest were not checked (not found unavailable).
     recordDiagnosticEvent(
       "Servers-Check",
-      `Xray profile check completed; servers=${candidates.length}, verified=${verified}`,
+      `Xray profile check ${results.size < candidates.length ? "stopped" : "completed"}; servers=${candidates.length}, checked=${results.size}, verified=${verified}`,
       "D",
     );
     return results;
