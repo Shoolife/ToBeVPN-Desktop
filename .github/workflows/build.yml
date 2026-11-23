@@ -634,9 +634,36 @@ jobs:
     permissions:
       contents: read
 
+  # From the Linux .deb of this run, for a release only: the Arch package
+  # and the .deb for Astra Linux 1.7. Their files go out with the release.
+  build-arch:
+    name: Arch Linux
+    needs: build-linux
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/build-arch.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+    # What build-arch.yml asks for (it attaches to a release when started by
+    # hand); called from here it only builds.
+    permissions:
+      contents: write
+
+  build-legacy:
+    name: Astra Linux 1.7
+    needs: build-linux
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/build-legacy.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+    permissions:
+      contents: write
+      actions: read
+
   release:
     name: Выпуск на GitHub
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux, build-windows, build-macos, build-arch, build-legacy]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     permissions:
@@ -751,29 +778,19 @@ jobs:
             dist/ToBeVPN-windows-exe/*.exe.sig
             dist/ToBeVPN-macos-arm64-release/*
             dist/ToBeVPN-macos-x64-release/*
+            dist/ToBeVPN-arch/*
+            dist/ToBeVPN-legacy/*
             latest.json
           body_path: release-notes.md
 
-  # After the release: the Arch package from its .deb, and the .deb for
-  # Astra Linux 1.7 around its frontend; each attaches its files and its own
-  # latest-*.json to the same release.
-  build-arch:
-    name: Arch Linux
-    needs: release
-    uses: ./.github/workflows/build-arch.yml
-    with:
-      tag: ${{ github.ref_name }}
-    secrets: inherit
-    permissions:
-      contents: write
-
-  build-legacy:
-    name: Astra Linux 1.7
-    needs: release
-    uses: ./.github/workflows/build-legacy.yml
-    with:
-      tag: ${{ github.ref_name }}
-    secrets: inherit
-    permissions:
-      contents: write
-      actions: read
+      # The AUR package downloads the .deb from the release, so it goes out
+      # only now that the release exists.
+      - name: Push to the AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then echo "No AUR key: skipped"; exit 0; fi
+          mkdir -p aur
+          tar -C aur -xzf dist/ToBeVPN-arch/aur-tobevpn-desktop-bin-*.tar.gz
+          bash scripts/push-aur.sh aur "${GITHUB_REF_NAME#v}"

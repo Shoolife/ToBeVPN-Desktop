@@ -1,9 +1,10 @@
 name: build-arch
 run-name: Arch package for ${{ inputs.tag }}
 
-# The Arch Linux package of a release, made from that release's signed .deb.
-# build.yml calls it once the release is published; started by hand it
-# repackages the given tag again.
+# The Arch Linux package made from the release's signed .deb. build.yml calls
+# it before the release, with the .deb of the same run, and the release job
+# publishes its files and pushes the AUR package; started by hand for a
+# published tag it takes the .deb from that release and attaches to it.
 on:
   workflow_call:
     inputs:
@@ -39,14 +40,26 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
-      - name: Release .deb
+      - name: Version
         run: |
           set -euo pipefail
           case "$TAG" in v[0-9]*) ;; *) echo "::error::Not a release tag: $TAG"; exit 1 ;; esac
-          VERSION="${TAG#v}"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
           mkdir -p build
-          gh release download "$TAG" --pattern "ToBeVPN_${VERSION}_amd64.deb" --dir build
+
+      - if: github.event_name != 'workflow_dispatch'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: ToBeVPN-linux-deb
+          path: build
+
+      - name: Release .deb
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            gh release download "$TAG" --pattern "ToBeVPN_${VERSION}_amd64.deb" --dir build
+          fi
+          rm -f build/*.sig
           test -s "build/ToBeVPN_${VERSION}_amd64.deb"
 
       - name: Build the Arch package
@@ -99,7 +112,22 @@ jobs:
           su builder -c "cd aur && makepkg --printsrcinfo > .SRCINFO"
           tar -C aur -czf "build/aur-tobevpn-desktop-bin-${VERSION}.tar.gz" PKGBUILD .SRCINFO package.sh tobevpn-desktop.install
 
+      # Called by build.yml: the release job publishes these and pushes the
+      # AUR package once the release exists.
+      - if: github.event_name != 'workflow_dispatch'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ToBeVPN-arch
+          path: |
+            build/*.pkg.tar.zst
+            build/*.pkg.tar.zst.sig
+            build/latest-arch.json
+            build/aur-tobevpn-desktop-bin-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Attach to the release
+        if: github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
           gh release upload "$TAG" --clobber \
@@ -109,20 +137,5 @@ jobs:
             "build/aur-tobevpn-desktop-bin-${VERSION}.tar.gz"
 
       - name: Push to the AUR
-        if: env.AUR_SSH_PRIVATE_KEY != ''
-        run: |
-          set -euo pipefail
-          pacman -S --noconfirm --needed openssh
-          install -dm700 ~/.ssh
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
-          git clone ssh://aur@aur.archlinux.org/tobevpn-desktop-bin.git aur-repo
-          cp aur/PKGBUILD aur/.SRCINFO aur/package.sh aur/tobevpn-desktop.install aur-repo/
-          cd aur-repo
-          git config user.name "ToBeVPN release"
-          git config user.email "noreply@github.com"
-          git add -A
-          git diff --cached --quiet || git commit -m "Update to ${VERSION}"
-          git push origin HEAD:master
+        if: github.event_name == 'workflow_dispatch' && env.AUR_SSH_PRIVATE_KEY != ''
+        run: bash scripts/push-aur.sh aur
