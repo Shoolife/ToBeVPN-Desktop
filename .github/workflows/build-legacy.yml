@@ -1,16 +1,17 @@
 name: build-legacy
-run-name: Legacy .deb for ${{ github.event.workflow_run.head_branch || inputs.tag }}
+run-name: Legacy .deb for ${{ inputs.tag }}
 
 # The .deb for older systems (WebKitGTK only with API 4.0, glibc 2.28: Astra
-# Linux 1.7), made once the main build has published a release: the app
-# binary is rebuilt on Astra Linux 1.7 itself (a debootstrap of its official
-# repository) and swapped into the release's regular .deb, see
-# packaging/legacy/build.sh. Kept apart from build.yml so the two can change
-# independently.
+# Linux 1.7): the app binary is rebuilt on Astra Linux 1.7 itself (a
+# debootstrap of its official repository) and swapped into the release's
+# regular .deb, see packaging/legacy/build.sh. build.yml calls it once the
+# release is published; started by hand it rebuilds the given tag again.
 on:
-  workflow_run:
-    workflows: [build]
-    types: [completed]
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -24,17 +25,13 @@ on:
 
 jobs:
   legacy:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       startsWith(github.event.workflow_run.head_branch, 'v'))
+    name: Astra Linux 1.7 (legacy .deb)
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       actions: read
     env:
-      TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
-      RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+      TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
       ASTRA: https://dl.astralinux.ru/astra/stable/1.7_x86-64
@@ -53,9 +50,24 @@ jobs:
           mkdir -p build
           gh release download "$TAG" --pattern "ToBeVPN_${VERSION}_amd64.deb" --dir build
           test -s "build/ToBeVPN_${VERSION}_amd64.deb"
-          rm -rf dist
-          gh run download "$RUN_ID" --name ToBeVPN-linux-dist --dir dist
-          test -f dist/index.html
+
+      # The release build's frontend: from this run when build.yml calls it,
+      # from the given build run when started by hand.
+      - if: github.event_name != 'workflow_dispatch'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: ToBeVPN-linux-dist
+          path: dist
+
+      - if: github.event_name == 'workflow_dispatch'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: ToBeVPN-linux-dist
+          path: dist
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - run: test -f dist/index.html
 
       - name: Inject backend hostnames
         # The same values as the release build (build.yml): the binary

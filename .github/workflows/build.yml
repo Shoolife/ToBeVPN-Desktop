@@ -352,7 +352,7 @@ jobs:
           # only canonical distribution point.
           retention-days: 7
 
-      # This release's frontend for build-legacy.yml: the .deb for older
+      # This release's frontend for the Astra Linux 1.7 job (build-legacy.yml): the .deb for older
       # systems rebuilds only the app binary, around the same frontend.
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
@@ -753,3 +753,27 @@ jobs:
             dist/ToBeVPN-macos-x64-release/*
             latest.json
           body_path: release-notes.md
+
+  # After the release: the Arch package from its .deb, and the .deb for
+  # Astra Linux 1.7 around its frontend; each attaches its files and its own
+  # latest-*.json to the same release.
+  build-arch:
+    name: Arch Linux
+    needs: release
+    uses: ./.github/workflows/build-arch.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+    permissions:
+      contents: write
+
+  build-legacy:
+    name: Astra Linux 1.7
+    needs: release
+    uses: ./.github/workflows/build-legacy.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+    permissions:
+      contents: write
+      actions: read

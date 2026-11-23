@@ -1,14 +1,15 @@
 name: build-arch
-run-name: Arch package for ${{ github.event.workflow_run.head_branch || inputs.tag }}
+run-name: Arch package for ${{ inputs.tag }}
 
-# The Arch Linux package of a release, made from that release's signed .deb
-# once the main build has published it (a release made with GITHUB_TOKEN
-# starts no other workflow, workflow_run does). Kept apart from build.yml so
-# the two can change independently.
+# The Arch Linux package of a release, made from that release's signed .deb.
+# build.yml calls it once the release is published; started by hand it
+# repackages the given tag again.
 on:
-  workflow_run:
-    workflows: [build]
-    types: [completed]
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -18,16 +19,13 @@ on:
 
 jobs:
   arch:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       startsWith(github.event.workflow_run.head_branch, 'v'))
+    name: Arch Linux (.pkg.tar.zst)
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     permissions:
       contents: write
     env:
-      TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+      TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
       # At job level so the AUR step's `if` can see whether it is set (a
