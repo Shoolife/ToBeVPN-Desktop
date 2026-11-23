@@ -149,7 +149,8 @@ jobs:
           mkdir -p release
           cp "$BUNDLE"/macos/*.app.tar.gz "release/ToBeVPN_${VERSION}_${ARCH}.app.tar.gz"
           cp "$BUNDLE"/macos/*.app.tar.gz.sig "release/ToBeVPN_${VERSION}_${ARCH}.app.tar.gz.sig"
-          cp "$BUNDLE"/dmg/*.dmg "release/ToBeVPN_${VERSION}_${ARCH}.dmg"
+          # Our own .dmg: the app plus "Удалить ToBeVPN" (scripts/macos-dmg.sh).
+          bash scripts/macos-dmg.sh "$BUNDLE/macos/ToBeVPN.app" "release/ToBeVPN_${VERSION}_${ARCH}.dmg"
           test -s "release/ToBeVPN_${VERSION}_${ARCH}.app.tar.gz.sig"
           ls -la release
 

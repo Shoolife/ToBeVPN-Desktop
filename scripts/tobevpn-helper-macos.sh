@@ -206,8 +206,18 @@ case "${1:-}" in
     cleanup
     echo "STOPPED"
     ;;
+  uninstall)
+    # Everything the one-time install put in the system, the tunnel first;
+    # the sudoers rule last but one, then this file (bash keeps reading it).
+    cleanup
+    rm -rf "$STATE_DIR"
+    rm -f "$TUN2SOCKS"
+    rm -f /etc/sudoers.d/tobevpn
+    rm -f "$0"
+    echo "UNINSTALLED"
+    ;;
   *)
-    echo "ERROR: usage: $0 start|bypass|stop" >&2
+    echo "ERROR: usage: $0 start|bypass|stop|uninstall" >&2
     exit 1
     ;;
 esac
