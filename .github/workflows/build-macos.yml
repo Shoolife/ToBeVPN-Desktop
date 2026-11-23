@@ -134,11 +134,16 @@ jobs:
 
       - name: Release files
         # Tauri names the updater archive ToBeVPN.app.tar.gz for both archs;
-        # the release needs one per arch, named like the .dmg.
-        if: startsWith(github.ref, 'refs/tags/v')
+        # the release needs one per arch, named like the .dmg. A manual run
+        # hands them over too (to add a Mac build to a published release).
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION=$(jq -r .version package.json)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "$VERSION" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::package.json version $VERSION does not match tag $GITHUB_REF_NAME"
+            exit 1
+          fi
           ARCH=$([ "${{ matrix.arch }}" = arm64 ] && echo aarch64 || echo x64)
           BUNDLE=src-tauri/target/${{ matrix.triple }}/release/bundle
           mkdir -p release
@@ -148,7 +153,7 @@ jobs:
           test -s "release/ToBeVPN_${VERSION}_${ARCH}.app.tar.gz.sig"
           ls -la release
 
-      - if: startsWith(github.ref, 'refs/tags/v')
+      - if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ToBeVPN-macos-${{ matrix.arch }}-release
