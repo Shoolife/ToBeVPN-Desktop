@@ -111,7 +111,7 @@ jobs:
         run: cargo audit
 
   build-linux:
-    name: Ubuntu / Debian (.deb)
+    name: Ubuntu / Debian / Astra 1.8 (.deb)
     needs: audit
     runs-on: ubuntu-22.04
     steps:
