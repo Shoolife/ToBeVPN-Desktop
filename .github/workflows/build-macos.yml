@@ -11,6 +11,7 @@ on:
 
 jobs:
   macos:
+    name: ${{ matrix.label }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -19,11 +20,13 @@ jobs:
       matrix:
         include:
           - arch: arm64
+            label: Apple Silicon
             triple: aarch64-apple-darwin
             runner: macos-latest
           # A real Intel Mac: the Intel build is built and started natively,
           # not through Rosetta.
           - arch: x64
+            label: Intel
             triple: x86_64-apple-darwin
             runner: macos-15-intel
     steps:

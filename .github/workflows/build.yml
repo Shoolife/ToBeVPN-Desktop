@@ -23,6 +23,7 @@ jobs:
   # dependency tree. Catches incidents like postcss XSS / rustls-webpki CRL
   # panic that we patched manually during the recent audit.
   audit:
+    name: Проверка зависимостей
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -110,6 +111,7 @@ jobs:
         run: cargo audit
 
   build-linux:
+    name: Linux (.deb)
     needs: audit
     runs-on: ubuntu-22.04
     steps:
@@ -361,6 +363,7 @@ jobs:
           retention-days: 7
 
   build-windows:
+    name: Windows (.exe)
     needs: audit
     runs-on: windows-latest
     steps:
@@ -624,6 +627,7 @@ jobs:
   # GitHub Release. Branch/PR/manual builds validate compilation without
   # uploading distributable binaries.
   build-macos:
+    name: macOS
     needs: audit
     uses: ./.github/workflows/build-macos.yml
     secrets: inherit
@@ -631,6 +635,7 @@ jobs:
       contents: read
 
   release:
+    name: Выпуск на GitHub
     needs: [build-linux, build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
