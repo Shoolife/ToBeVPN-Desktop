@@ -1,14 +1,15 @@
 name: build-macos
 run-name: macOS build of ${{ github.ref_name }}
 
-# The macOS app for Apple Silicon and for Intel Macs: unsigned .dmg files for
-# testing, built on a GitHub macOS (Apple Silicon) runner, the Intel one by
-# cross-compiling, then each started there once with a screenshot of its
-# window. Kept apart from build.yml until the macOS client is released.
+# The macOS app for Apple Silicon and for Intel Macs, each built and started
+# once on its own runner. build.yml calls it for a release tag: then each
+# arch also hands over its .dmg and its signed updater archive
+# (ToBeVPN_<version>_<arch>.app.tar.gz + .sig) for the release and latest.json.
 on:
   push:
     branches: [macos]
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   macos:
@@ -130,6 +131,30 @@ jobs:
             log show --last 2m --predicate 'process == "launchd" OR subsystem == "com.apple.launchservices"' 2>/dev/null | grep -i tobevpn | tail -20 || true
             exit 1
           fi
+
+      - name: Release files
+        # Tauri names the updater archive ToBeVPN.app.tar.gz for both archs;
+        # the release needs one per arch, named like the .dmg.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCH=$([ "${{ matrix.arch }}" = arm64 ] && echo aarch64 || echo x64)
+          BUNDLE=src-tauri/target/${{ matrix.triple }}/release/bundle
+          mkdir -p release
+          cp "$BUNDLE"/macos/*.app.tar.gz "release/ToBeVPN_${VERSION}_${ARCH}.app.tar.gz"
+          cp "$BUNDLE"/macos/*.app.tar.gz.sig "release/ToBeVPN_${VERSION}_${ARCH}.app.tar.gz.sig"
+          cp "$BUNDLE"/dmg/*.dmg "release/ToBeVPN_${VERSION}_${ARCH}.dmg"
+          test -s "release/ToBeVPN_${VERSION}_${ARCH}.app.tar.gz.sig"
+          ls -la release
+
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ToBeVPN-macos-${{ matrix.arch }}-release
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         if: always()

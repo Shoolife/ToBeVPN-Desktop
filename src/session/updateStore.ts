@@ -393,7 +393,7 @@ export async function startUpdateDownload(): Promise<void> {
   const info = current.info;
   recordDiagnosticEvent(
     "Update",
-    `Application update installation started; version=${info.version}, platform=${isLinuxDesktop() ? "linux" : "windows"}`,
+    `Application update installation started; version=${info.version}, platform=${updatePlatform()}`,
   );
   setState({
     kind: "downloading",
@@ -430,7 +430,9 @@ export async function startUpdateDownload(): Promise<void> {
 
   // Windows: the parallel download first (much faster on a throttled
   // connection); the plugin's own single-stream download stays as fallback.
-  {
+  // macOS goes straight to the plugin, which replaces the .app bundle in
+  // place; the app then relaunches.
+  if (updatePlatform() === "windows") {
     const stopProgress = await trackNativeProgress(generation, info);
     try {
       // On success the installer starts and this process exits.
@@ -612,4 +614,12 @@ async function trackNativeProgress(generation: number, info: DesktopUpdateInfo):
 
 function isLinuxDesktop(): boolean {
   return navigator.userAgent.toLowerCase().includes("linux");
+}
+
+/** For the diagnostics log only: the install path differs per platform. */
+function updatePlatform(): string {
+  const agent = navigator.userAgent.toLowerCase();
+  if (agent.includes("linux")) return "linux";
+  if (agent.includes("mac os") || agent.includes("macintosh")) return "macos";
+  return "windows";
 }
