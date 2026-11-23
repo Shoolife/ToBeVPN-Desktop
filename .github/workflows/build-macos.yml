@@ -6,8 +6,6 @@ run-name: macOS build of ${{ github.ref_name }}
 # arch also hands over its .dmg and its signed updater archive
 # (ToBeVPN_<version>_<arch>.app.tar.gz + .sig) for the release and latest.json.
 on:
-  push:
-    branches: [macos]
   workflow_dispatch:
   workflow_call:
 

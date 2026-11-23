@@ -624,6 +624,7 @@ jobs:
   # GitHub Release. Branch/PR/manual builds validate compilation without
   # uploading distributable binaries.
   build-macos:
+    needs: audit
     uses: ./.github/workflows/build-macos.yml
     secrets: inherit
     permissions:
