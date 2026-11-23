@@ -225,7 +225,13 @@ pub async fn flush_dns_cache() -> bool {
                 .creation_flags(0x0800_0000)
                 .status()
         };
-        #[cfg(not(any(target_os = "linux", windows)))]
+        // The resolver cache of this user's processes; mDNSResponder's own
+        // cache needs root, and the helper flushes it when DNS changes.
+        #[cfg(target_os = "macos")]
+        let status = std::process::Command::new("/usr/bin/dscacheutil")
+            .arg("-flushcache")
+            .status();
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         let status: std::io::Result<std::process::ExitStatus> =
             Err(std::io::Error::other("unsupported"));
         status.map(|status| status.success()).unwrap_or(false)
@@ -433,9 +439,40 @@ fn default_gateway() -> Option<(Ipv4Addr, Option<String>)> {
     crate::vpn::default_physical_gateway().map(|gateway| (gateway, None))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+/// macOS: the default route of a physical interface. The tunnel takes
+/// 0/1 and 128/1 and leaves the default route alone, so this is the
+/// network's own gateway also while connected; the LAN route to it is more
+/// specific than the tunnel's, so no binding is needed.
+#[cfg(target_os = "macos")]
+fn default_gateway() -> Option<(Ipv4Addr, Option<String>)> {
+    let output = std::process::Command::new("/sbin/route")
+        .args(["-n", "get", "-inet", "default"])
+        .output()
+        .ok()?;
+    parse_route_get(&String::from_utf8_lossy(&output.stdout)).map(|(gateway, _)| (gateway, None))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn default_gateway() -> Option<(Ipv4Addr, Option<String>)> {
     None
+}
+
+/// The gateway and interface from `route -n get default` (macOS), unless the
+/// route is a tunnel's.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_route_get(text: &str) -> Option<(Ipv4Addr, String)> {
+    let field = |name: &str| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.trim().split_once(':')?;
+            (key.trim() == name).then(|| value.trim().to_string())
+        })
+    };
+    let gateway = field("gateway")?.parse::<Ipv4Addr>().ok()?;
+    let interface = field("interface")?;
+    if interface.starts_with("utun") || gateway.is_unspecified() {
+        return None;
+    }
+    Some((gateway, interface))
 }
 
 /// Lowest-metric default route in /proc/net/route that is not a tunnel.
@@ -476,6 +513,18 @@ fn parse_proc_net_route(table: &str) -> Option<(Ipv4Addr, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_the_macos_default_route() {
+        let wifi = "   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING>\n";
+        assert_eq!(
+            super::parse_route_get(wifi),
+            Some(("192.168.1.1".parse().unwrap(), "en0".to_string()))
+        );
+        let tunnel = "destination: default\n    gateway: 198.18.0.1\n  interface: utun199\n";
+        assert_eq!(super::parse_route_get(tunnel), None);
+        assert_eq!(super::parse_route_get("route: writing to routing socket: not in table"), None);
+    }
+
 
     #[test]
     fn sees_a_redirect_to_https() {
