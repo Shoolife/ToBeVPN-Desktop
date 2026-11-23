@@ -62,12 +62,14 @@ gtk = "0.18"
 webkit2gtk = "2.0"
 libc = "0.2"
 rusqlite = { version = "0.43", features = ["bundled"] }
-tauri-plugin-autostart = "2"
 # Linux notifications go through notify-rust directly (see notifications.rs).
 notify-rust = "4.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+tauri-plugin-autostart = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
