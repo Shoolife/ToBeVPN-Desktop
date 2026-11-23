@@ -623,8 +623,14 @@ jobs:
   # Tag-triggered: when push refs/tags/v*, attach both artifacts to a
   # GitHub Release. Branch/PR/manual builds validate compilation without
   # uploading distributable binaries.
+  build-macos:
+    uses: ./.github/workflows/build-macos.yml
+    secrets: inherit
+    permissions:
+      contents: read
+
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     permissions:
@@ -643,7 +649,7 @@ jobs:
         # this manifest from the configured endpoint and uses the embedded
         # ed25519 signature to verify the bundle before applying. The format
         # is the standard one Tauri expects: `version`, `pub_date`, and a
-        # `platforms` map keyed by `os-arch`. We only build for x86_64 today.
+        # `platforms` map keyed by `os-arch`. Linux and Windows x86_64, macOS on Apple Silicon and Intel.
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -651,6 +657,15 @@ jobs:
           mapfile -t DEB_SIGS < <(find dist/ToBeVPN-linux-deb -type f -name "*.deb.sig")
           mapfile -t EXES < <(find dist/ToBeVPN-windows-exe -type f -name "*.exe" ! -name "*.sig")
           mapfile -t EXE_SIGS < <(find dist/ToBeVPN-windows-exe -type f -name "*.exe.sig")
+          MAC_ARM="dist/ToBeVPN-macos-arm64-release/ToBeVPN_${VERSION}_aarch64.app.tar.gz"
+          MAC_X64="dist/ToBeVPN-macos-x64-release/ToBeVPN_${VERSION}_x64.app.tar.gz"
+          for f in "$MAC_ARM" "$MAC_X64"; do
+            if [ ! -s "$f" ] || [ ! -s "$f.sig" ] || [ "$(wc -c < "$f.sig")" -gt 16384 ]; then
+              echo "::error::Missing or bad macOS updater archive: $f"
+              ls -R dist/
+              exit 1
+            fi
+          done
 
           if [ "${#DEBS[@]}" -ne 1 ] || [ "${#DEB_SIGS[@]}" -ne 1 ] \
              || [ "${#EXES[@]}" -ne 1 ] || [ "${#EXE_SIGS[@]}" -ne 1 ]; then
@@ -679,6 +694,7 @@ jobs:
           EXE_NAME=$(basename "$EXE")
           DEB_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${DEB_NAME}"
           EXE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${EXE_NAME}"
+          MAC_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
           DEB_SIG_CONTENT=$(cat "$DEB_SIG")
           EXE_SIG_CONTENT=$(cat "$EXE_SIG")
 
@@ -689,12 +705,18 @@ jobs:
             --arg deb_url "$DEB_URL" \
             --arg exe_signature "$EXE_SIG_CONTENT" \
             --arg exe_url "$EXE_URL" \
+            --arg mac_arm_signature "$(cat "$MAC_ARM.sig")" \
+            --arg mac_arm_url "$MAC_BASE/$(basename "$MAC_ARM")" \
+            --arg mac_x64_signature "$(cat "$MAC_X64.sig")" \
+            --arg mac_x64_url "$MAC_BASE/$(basename "$MAC_X64")" \
             '{
               version: $version,
               pub_date: $pub_date,
               platforms: {
                 "linux-x86_64": { signature: $deb_signature, url: $deb_url },
-                "windows-x86_64": { signature: $exe_signature, url: $exe_url }
+                "windows-x86_64": { signature: $exe_signature, url: $exe_url },
+                "darwin-aarch64": { signature: $mac_arm_signature, url: $mac_arm_url },
+                "darwin-x86_64": { signature: $mac_x64_signature, url: $mac_x64_url }
               }
             }' > latest.json
           jq -e . latest.json > /dev/null
@@ -721,5 +743,7 @@ jobs:
             dist/ToBeVPN-linux-deb/*.deb.sig
             dist/ToBeVPN-windows-exe/*.exe
             dist/ToBeVPN-windows-exe/*.exe.sig
+            dist/ToBeVPN-macos-arm64-release/*
+            dist/ToBeVPN-macos-x64-release/*
             latest.json
           body_path: release-notes.md
