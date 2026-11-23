@@ -29,6 +29,9 @@ download_verified_release_asset() {
   local repo="$1"
   local asset_name="$2"
   local output="$3"
+  # Optional: where to write the release tag (digits only), so the router keeps
+  # the newer Russian sites list of the desktop and phone apps.
+  local tag_output="${4:-}"
   local metadata
   metadata=$(gh api "repos/${repo}/releases/latest")
   local url
@@ -41,6 +44,10 @@ download_verified_release_asset() {
   fi
   curl -fsSL -o "$output" "$url"
   echo "${digest#sha256:}  ${output}" | shasum -a 256 -c -
+  if [ -n "$tag_output" ]; then
+    jq -r '.tag_name' <<<"$metadata" | tr -cd '0-9' > "$tag_output"
+    test -s "$tag_output"
+  fi
 }
 
 extract_plain_category_domains() {
@@ -109,7 +116,8 @@ chmod +x "src-tauri/bin/xray-${TRIPLE}"
 
 echo "Downloading automatic routing rules..."
 download_verified_release_asset \
-  runetfreedom/russia-v2ray-rules-dat geosite.dat src-tauri/bin/geosite.dat
+  runetfreedom/russia-v2ray-rules-dat geosite.dat src-tauri/bin/geosite.dat \
+  public/routing/geosite-version.txt
 download_verified_release_asset \
   runetfreedom/russia-v2ray-rules-dat geoip.dat src-tauri/bin/geoip.dat
 download_verified_release_asset \
