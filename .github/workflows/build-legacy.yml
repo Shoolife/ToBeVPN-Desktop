@@ -27,7 +27,7 @@ on:
 
 jobs:
   legacy:
-    name: Astra Linux 1.7 (legacy .deb)
+    name: .deb
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -20,7 +20,7 @@ on:
 
 jobs:
   arch:
-    name: Arch Linux (.pkg.tar.zst)
+    name: .pkg.tar.zst
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     permissions:
