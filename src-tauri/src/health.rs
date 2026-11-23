@@ -15,17 +15,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 
 const RUN_STATE_FILE: &str = "run-state.json";
-// Process sampling exists for Linux and Windows only.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+// Process sampling exists on Linux and macOS.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const SAMPLE_EVERY: Duration = Duration::from_secs(120);
 const STALL_CHECK_EVERY: Duration = Duration::from_secs(5);
 const STALL_AFTER_SECS: u64 = 10;
 /// Memory (main + WebKit) and CPU that make a sample a warning.
-// Process sampling exists for Linux and Windows only.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+// Process sampling exists on Linux and macOS.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const WARN_RSS_MB: u64 = 900;
-// Process sampling exists for Linux and Windows only.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+// Process sampling exists on Linux and macOS.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const WARN_CPU_PERCENT: f64 = 30.0;
 
 static RUN_STATE_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -150,8 +150,8 @@ fn install_panic_hook() {
 
 // ------------------------------------------------------------- sampling ---
 
-// Process sampling exists for Linux and Windows only.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+// Process sampling exists on Linux and macOS.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 #[derive(Default, Clone, Copy)]
 struct ProcSample {
     rss_kb: u64,
@@ -213,12 +213,67 @@ fn open_files() -> usize {
         .unwrap_or(0)
 }
 
+/// macOS: resident memory, CPU time (in nanoseconds, so the sampler's
+/// "ticks per second" is 1e9 there) and threads from proc_pidinfo.
+// mach_timebase_info is deprecated in libc only in favour of the mach2 crate;
+// one call does not justify a new dependency.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn proc_sample(pid: u32) -> Option<ProcSample> {
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTASKINFO,
+            0,
+            (&mut info as *mut libc::proc_taskinfo).cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    // Task times are in Mach absolute time units (not nanoseconds on Apple
+    // Silicon).
+    let mut timebase = libc::mach_timebase_info { numer: 0, denom: 0 };
+    unsafe {
+        libc::mach_timebase_info(&mut timebase)
+    };
+    let (numer, denom) = if timebase.denom == 0 {
+        (1, 1)
+    } else {
+        (u64::from(timebase.numer), u64::from(timebase.denom))
+    };
+    let cpu = (info.pti_total_user + info.pti_total_system).saturating_mul(numer) / denom;
+    Some(ProcSample {
+        rss_kb: info.pti_resident_size / 1024,
+        cpu_ticks: cpu,
+        threads: u64::try_from(info.pti_threadnum).unwrap_or(0),
+    })
+}
+
+/// WebKit's processes on macOS are XPC services of launchd, not this app's
+/// children, and shared with other apps: only the app itself is sampled.
+#[cfg(target_os = "macos")]
+fn webkit_children() -> Vec<(u32, String)> {
+    Vec::new()
+}
+
+#[cfg(target_os = "macos")]
+fn open_files() -> usize {
+    std::fs::read_dir("/dev/fd").map(|dir| dir.count()).unwrap_or(0)
+}
+
 fn start_sampler() {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     std::thread::Builder::new()
         .name("health-sampler".into())
         .spawn(|| {
+            #[cfg(target_os = "linux")]
             let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+            #[cfg(target_os = "macos")]
+            let ticks_per_second = 1_000_000_000_f64;
             let mut previous: std::collections::HashMap<u32, (ProcSample, std::time::Instant)> =
                 Default::default();
             let mut first = true;
