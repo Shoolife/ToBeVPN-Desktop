@@ -843,3 +843,24 @@
     animation-duration: 1ms;
   }
 }
+
+.home-topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.home-topbar__bell {
+  position: relative;
+}
+
+.home-topbar__dot {
+  position: absolute;
+  top: 8px;
+  right: 9px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f44336;
+  box-shadow: 0 0 0 1.5px var(--bg);
+}

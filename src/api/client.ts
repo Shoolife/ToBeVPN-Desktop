@@ -157,6 +157,7 @@ function diagnosticApiRoute(path: string): string {
     ["api/panel/nodes", "server-metadata"],
     ["api/subscription/current-plan", "current-plan"],
     ["api/purchase/plans", "purchase-plans"],
+    ["api/device/notifications", "notifications"],
   ];
   return routes.find(([prefix]) => normalized.startsWith(prefix))?.[1] ?? "other";
 }
@@ -1042,4 +1043,33 @@ export function getPurchasePlans(): Promise<ApiResponse<PurchasePlansDto>> {
     true,
     { waitForOkHedge: true },
   );
+}
+
+// --- Announcements ---
+// The server picks the recipient from the device session. An announcement ID
+// is a UUID checked before it goes into the path.
+
+export interface NotificationItemDto {
+  id: string;
+  title: string | null;
+  preview: string | null;
+  published_at: string | null;
+  read_at: string | null;
+}
+
+export interface NotificationDetailDto extends NotificationItemDto {
+  body: string | null;
+  action: string | null;
+}
+
+export function getNotifications(): Promise<ApiResponse<NotificationItemDto[]>> {
+  return request("api/device/notifications", { method: "GET" });
+}
+
+export function getNotification(id: string): Promise<ApiResponse<NotificationDetailDto>> {
+  return request(`api/device/notifications/${encodeURIComponent(id)}`, { method: "GET" });
+}
+
+export function markNotificationRead(id: string): Promise<ApiResponse<{ read_at: string | null }>> {
+  return request(`api/device/notifications/${encodeURIComponent(id)}/read`, { method: "POST" });
 }
