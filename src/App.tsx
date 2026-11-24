@@ -7,6 +7,7 @@ import SplashScreen from "./screens/SplashScreen";
 import OnboardingScreen from "./screens/OnboardingScreen";
 import PairingScreen from "./screens/PairingScreen";
 import HomeScreen from "./screens/HomeScreen";
+import NotificationsScreen from "./screens/NotificationsScreen";
 import SettingsScreen, { type SettingsSection } from "./screens/SettingsScreen";
 import ServersScreen from "./screens/ServersScreen";
 import StatsScreen from "./screens/StatsScreen";
@@ -80,7 +81,7 @@ import {
 import KeeneticOfferDialog from "./components/KeeneticOfferDialog";
 import "./App.css";
 
-export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "speedtest-history" | "settings-transfer" | "devices" | "router" | "routing" | "referrals" | "promocodes";
+export type Screen = "splash" | "onboarding" | "pairing" | "home" | "settings" | "servers" | "stats" | "speedtest" | "speedtest-history" | "settings-transfer" | "devices" | "router" | "routing" | "referrals" | "promocodes" | "notifications";
 
 const ONBOARDING_SEEN_KEY = "tobevpn_onboarding_seen_v1";
 
@@ -412,6 +413,8 @@ export default function App({
     };
   }, [browserPreview]);
 
+  // «Открыть тарифы» in an announcement: Home opens its plans sheet.
+  const [openPlansRequested, setOpenPlansRequested] = useState(false);
   const navigate = useCallback((to: Screen, dir: Direction) => {
     // A tap during a crossfade is not lost (as on the phone); only a window
     // morph is waited for.
@@ -999,6 +1002,9 @@ export default function App({
               setSettingsSection("main");
               goForward("settings");
             }}
+            onNotifications={() => goForward("notifications")}
+            openPlansRequested={openPlansRequested}
+            onOpenPlansHandled={() => setOpenPlansRequested(false)}
             onServers={() => goForward("servers")}
             onStats={() => goForward("stats")}
             onSpeedTest={() => goForward("speedtest")}
@@ -1011,6 +1017,16 @@ export default function App({
               selectedServerRef.current = server;
               setSelectedServer(server);
               saveLastServer(server);
+            }}
+          />
+        );
+      case "notifications":
+        return (
+          <NotificationsScreen
+            onBack={() => goBack("home")}
+            onOpenPlans={() => {
+              setOpenPlansRequested(true);
+              goBack("home");
             }}
           />
         );

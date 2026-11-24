@@ -3,6 +3,7 @@ import { exit } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, formatDecimal, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
+import { announcementsOnAppOpened, useAnnouncementsUnread } from "../session/announcements";
 import SubscriptionExpiryText from "../components/SubscriptionExpiryText";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { useAnimatedDialogClose } from "../components/useAnimatedDialogClose";
@@ -291,6 +292,9 @@ let blockDialogShownThisSession = false;
 export default function HomeScreen({
   onLogout: _onLogout,
   onSettings,
+  onNotifications,
+  openPlansRequested = false,
+  onOpenPlansHandled,
   onServers,
   onStats,
   onSpeedTest,
@@ -303,6 +307,10 @@ export default function HomeScreen({
 }: {
   onLogout: () => void;
   onSettings: () => void;
+  onNotifications: () => void;
+  /** «Открыть тарифы» in an announcement: open the plans sheet once. */
+  openPlansRequested?: boolean;
+  onOpenPlansHandled?: () => void;
   onServers: () => void;
   onStats: () => void;
   onSpeedTest: () => void;
@@ -438,6 +446,18 @@ export default function HomeScreen({
       setCheckingSubscriptionAccess(false);
     }
   };
+
+  const hasUnreadAnnouncements = useAnnouncementsUnread();
+  // One feed request per run, for the bell's dot.
+  useEffect(() => {
+    if (!browserPreview) announcementsOnAppOpened();
+  }, [browserPreview]);
+  useEffect(() => {
+    if (!openPlansRequested) return;
+    onOpenPlansHandled?.();
+    void openSubscription();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openPlansRequested]);
 
   // Ping the selected server so the home card mirrors phone (latency on the right).
   useEffect(() => {
@@ -627,12 +647,23 @@ export default function HomeScreen({
           <span className="home-topbar__title">ToBeVPN</span>
           <span className="home-topbar__partner">{t("app_partner")}</span>
         </div>
-        <button className="home-topbar__btn" onClick={onSettings} title={t("settings")}>
+<div className="home-topbar__actions">
+          <button
+            className="home-topbar__btn home-topbar__bell"
+            onClick={onNotifications}
+            title={t("notifications_title")}
+            aria-label={t(hasUnreadAnnouncements ? "notifications_bell_new" : "notifications_title")}
+          >
+            <MaterialIcon name="notifications" size={22} />
+            {hasUnreadAnnouncements && <span className="home-topbar__dot" />}
+          </button>
+                  <button className="home-topbar__btn" onClick={onSettings} title={t("settings")}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
         </button>
+        </div>
       </div>
 
       {!subscriptionUsageBlocked && session.userPlan === "FREE_TRIAL" && (
