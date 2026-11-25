@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { NotificationDetailDto, NotificationItemDto } from "../api/client";
 import BrandLoader from "../components/BrandLoader";
+import TopbarRefreshButton from "../components/TopbarRefreshButton";
+import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
 import MaterialIcon, { type MaterialIconName } from "../components/MaterialIcon";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { getSavedLang, t, tf } from "../i18n";
@@ -90,44 +92,87 @@ function NotificationsFeed({ onBack, onOpen }: { onBack: () => void; onOpen: (id
   const feed = useAnnouncementsFeed();
   const items = feed.items;
   const refreshable = items !== null || feed.error !== null;
+  // A refresh the user asked for (the top bar button, Retry): the list swaps
+  // to placeholders and back as on every screen, and the result lands as the
+  // refresh icon comes to rest.
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshSwap = useRefreshSwap(refreshing);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const refresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    const startedAt = performance.now();
+    try {
+      await loadAnnouncements();
+      await awaitWholeRefreshTurns(startedAt);
+    } finally {
+      if (mountedRef.current) setRefreshing(false);
+    }
+  };
 
   return (
     <div className="notif-root">
       <TopBar onBack={onBack}>
         {refreshable && (
-          <button
-            className="notif-topbar__btn"
-            onClick={() => void loadAnnouncements()}
-            disabled={feed.loading}
-            title={t("refresh")}
-            aria-label={t("refresh")}
-          >
-            <MaterialIcon name="refresh" size={22} className={feed.loading ? "notif-spin" : undefined} />
-          </button>
+          <TopbarRefreshButton
+            label={t("refresh")}
+            loading={feed.loading || refreshing}
+            onClick={() => void refresh()}
+          />
         )}
       </TopBar>
 
-      {items === null && feed.error ? (
-        <Message
-          icon="cloudOff"
-          title={t("notifications_error_title")}
-          text={errorText(feed.error)}
-          actionLabel={t("retry")}
-          onAction={() => void loadAnnouncements()}
-        />
-      ) : items === null ? (
-        <div className="notif-center"><BrandLoader /></div>
-      ) : items.length === 0 ? (
-        <Message icon="notifications" title={t("notifications_empty_title")} text={t("notifications_empty_text")} />
-      ) : (
-        <ScrollEdgeAffordance className="notif-list">
-          {/* A failed refresh keeps the list and says so on top. */}
-          {feed.error && <div className="notif-inline-error">{errorText(feed.error)}</div>}
-          {items.map((item) => (
-            <FeedCard key={item.id} item={item} onClick={() => onOpen(item.id)} />
-          ))}
-        </ScrollEdgeAffordance>
-      )}
+      <div className="refresh-swap notif-swap" style={refreshSwap.style}>
+        {refreshSwap.refreshing ? (
+          <FeedSkeleton count={Math.min(Math.max(items?.length ?? 3, 1), 6)} />
+        ) : items === null && feed.error ? (
+          <Message
+            icon="cloudOff"
+            title={t("notifications_error_title")}
+            text={errorText(feed.error)}
+            actionLabel={t("retry")}
+            onAction={() => void refresh()}
+          />
+        ) : items === null ? (
+          <div className="notif-center"><BrandLoader /></div>
+        ) : items.length === 0 ? (
+          <Message icon="notifications" title={t("notifications_empty_title")} text={t("notifications_empty_text")} />
+        ) : (
+          <ScrollEdgeAffordance className="notif-list">
+            {/* A failed refresh keeps the list and says so on top. */}
+            {feed.error && <div className="notif-inline-error">{errorText(feed.error)}</div>}
+            {items.map((item) => (
+              <FeedCard key={item.id} item={item} onClick={() => onOpen(item.id)} />
+            ))}
+          </ScrollEdgeAffordance>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The feed while a refresh runs: cards shaped like the real ones, pulsing. */
+function FeedSkeleton({ count }: { count: number }) {
+  return (
+    <div className="notif-list notif-skeleton" aria-hidden="true">
+      {Array.from({ length: count }, (_, index) => (
+        <div className="notif-card notif-skeleton__card" key={index}>
+          <span className="notif-skeleton__icon" />
+          <span className="notif-card__body">
+            <span className="notif-skeleton__line notif-skeleton__line--title" />
+            <span className="notif-skeleton__line notif-skeleton__line--wide" />
+            <span className="notif-skeleton__line notif-skeleton__line--mid" />
+            <span className="notif-skeleton__line notif-skeleton__line--small" />
+          </span>
+        </div>
+      ))}
     </div>
   );
 }

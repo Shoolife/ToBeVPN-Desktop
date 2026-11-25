@@ -304,6 +304,9 @@
   font-size: 20px;
   font-weight: 600;
   color: var(--text-muted);
+  /* A long router server name wraps to a second line: both lines stay
+     centred under the button, as a short status is. */
+  text-align: center;
   transition: color 300ms;
 }
 
