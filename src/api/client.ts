@@ -693,6 +693,46 @@ export async function bootstrapDeviceSession(): Promise<void> {
   await bootstrapDeviceSessionInternal();
 }
 
+/**
+ * New tokens for the session this install already has. The bot writes the
+ * Telegram confirmation into that session when the user signs in; refresh
+ * keeps it, while bootstrap replaces the session and drops it, so the server
+ * stops showing announcements meant for the account (subscription or plan
+ * audiences). Bootstrap only when there is no usable refresh token or the
+ * server rejects it; a timeout, network error, 429 or 5xx is asked again
+ * after a pause and never replaces the session.
+ */
+export async function renewDeviceSession(): Promise<void> {
+  const current = getSession();
+  if (hasValidRefreshToken(current) && current.refreshToken) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await refreshDeviceSessionInternal(current.refreshToken);
+        return;
+      } catch (error) {
+        if (isRejectedRefreshError(error)) break;
+        if (attempt >= RENEW_REFRESH_ATTEMPTS - 1) throw error;
+        await new Promise((resolve) => setTimeout(resolve, RENEW_REFRESH_RETRY_MS * (attempt + 1)));
+        if (getSession().refreshToken !== current.refreshToken) return;
+      }
+    }
+  }
+  await bootstrapDeviceSessionInternal();
+}
+
+const RENEW_REFRESH_ATTEMPTS = 3;
+const RENEW_REFRESH_RETRY_MS = 2_000;
+
+/** The server turned the refresh token down: any 4xx except 429. */
+function isRejectedRefreshError(error: unknown): boolean {
+  return (
+    error instanceof ApiHttpError &&
+    error.status !== 429 &&
+    error.status >= 400 &&
+    error.status < 500
+  );
+}
+
 async function refreshDeviceSessionInternal(refreshToken: string): Promise<SessionTokensDto> {
   const generation = getSessionGeneration();
   const requestBody: RefreshRequestDto = {

@@ -2,7 +2,7 @@
 // Mirrors the Kotlin AuthRepository on the TV/phone clients.
 import {
   ApiHttpError,
-  bootstrapDeviceSession,
+  renewDeviceSession,
   checkAuthStatus,
   checkTvPairingStatus,
   createTvPairing,
@@ -110,6 +110,17 @@ const SERVER_METADATA_TIMEOUT_MS = 250;
 // HomeScreen useEffect, manual refresh) all await the same promise.
 let syncInFlight: Promise<void> | null = null;
 let syncInFlightGeneration: number | null = null;
+/** When the last successful sync of this account finished (performance.now()). */
+let lastSyncDone: { generation: number; at: number } | null = null;
+/**
+ * Sign-in syncs and Home then forces one more on mount, a second later: a
+ * sync this fresh already has what the next one would fetch.
+ */
+const SYNC_REUSE_MS = 5_000;
+/** The account the device was last reported for, and when. */
+let lastDeviceRegistration: { telegramId: number | null; at: number } | null = null;
+/** Sign-in, subscription syncs and the VPN start all report the device. */
+const DEVICE_REGISTRATION_REUSE_MS = 60_000;
 let pendingPurchaseRefresh: Promise<void> | null = null;
 let pendingPurchaseRefreshGeneration: number | null = null;
 let pendingPurchaseMemory: PendingPurchaseState | null = null;
@@ -744,6 +755,16 @@ export async function initializeAuthSession(): Promise<void> {
 }
 
 export async function registerCurrentDevice(): Promise<void> {
+  const telegramId = getSession().telegramId;
+  const now = performance.now();
+  // One report a minute for the same account is enough.
+  if (
+    lastDeviceRegistration &&
+    lastDeviceRegistration.telegramId === telegramId &&
+    now - lastDeviceRegistration.at < DEVICE_REGISTRATION_REUSE_MS
+  ) {
+    return;
+  }
   const deviceName = await getDeviceName();
   const res = await registerDevice({
     device_name: deviceName,
@@ -751,6 +772,7 @@ export async function registerCurrentDevice(): Promise<void> {
     platform: PLATFORM,
   });
   if (!res.success) throw new Error(res.message ?? "Could not register device");
+  lastDeviceRegistration = { telegramId, at: performance.now() };
 }
 
 export async function getCurrentDeviceAliases(): Promise<string[]> {
@@ -927,7 +949,9 @@ export async function authenticateWithTelegramId(
 
   const pairingGeneration = getSessionGeneration();
   try {
-    await bootstrapDeviceSession();
+    // New tokens for the session the bot has just confirmed: a refresh keeps
+    // the Telegram confirmation, a bootstrap would drop it.
+    await renewDeviceSession();
   } catch (error) {
     const currentSession = getSession();
     if (
@@ -964,6 +988,13 @@ export async function syncSubscription(opts: { force?: boolean } = {}): Promise<
   if (isDemoSession()) return;
   const generation = getSessionGeneration();
   if (syncInFlight && syncInFlightGeneration === generation) return syncInFlight;
+  if (
+    lastSyncDone &&
+    lastSyncDone.generation === generation &&
+    performance.now() - lastSyncDone.at < SYNC_REUSE_MS
+  ) {
+    return;
+  }
   if (!force) {
     const last = readSubLastSyncAt();
     const age = Date.now() - last;
@@ -971,7 +1002,10 @@ export async function syncSubscription(opts: { force?: boolean } = {}): Promise<
   }
   recordDiagnosticEvent("Subscription", `Subscription synchronization started; forced=${force}`, "D");
   const promise = runSyncSubscription(generation)
-    .then(() => recordDiagnosticEvent("Subscription", "Subscription synchronization completed", "D"))
+    .then(() => {
+      lastSyncDone = { generation, at: performance.now() };
+      recordDiagnosticEvent("Subscription", "Subscription synchronization completed", "D");
+    })
     .catch((error) => {
       recordDiagnosticEvent(
         "Subscription",
@@ -1412,8 +1446,8 @@ async function applyCurrentPlanHeartbeat(
       await disconnectVpn().catch(() => {});
       if (!isCurrent()) return;
     }
-    await bootstrapDeviceSession().catch(() => {});
-    if (!isCurrent()) return;
+    // The new link is applied with the session the app already has: its
+    // tokens stay valid and keep the Telegram confirmation, so no renewal.
   }
   if (!isCurrent()) return;
   const refreshedSession = getSession();
@@ -1548,6 +1582,20 @@ export async function logout(): Promise<void> {
   // response while logout waits for VPN and network cleanup.
   invalidateSessionWork();
   const logoutIdentity = captureSessionWorkIdentity();
+  // Logout's own requests change the session: unlinking this device revokes
+  // its tokens on the server, so the next call gets 401 and the client drops
+  // the tokens (a new session generation). That is not another sign-in
+  // taking over; only a different account or install stops the cleanup.
+  // Stopping on the generation left the old account signed in locally with
+  // no tokens: sign-in then sent its panel user and the server refused it
+  // ("Panel user does not belong to this device"), even after a restart.
+  const sameAccount = () => {
+    const current = getSession();
+    return (
+      current.deviceId === logoutIdentity.deviceId &&
+      current.telegramId === logoutIdentity.telegramId
+    );
+  };
   // Always tear down the tunnel first — clearing identity alone would leave
   // a live VPN session orphaned in the background.
   try {
@@ -1555,23 +1603,23 @@ export async function logout(): Promise<void> {
   } catch {
     // ignore — proceed even if backend already stopped
   }
-  if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
+  if (!sameAccount()) return;
   if (isLinked && !isDemoSession()) {
     try {
       await unlinkCurrentDevice();
     } catch {
       // ignore — clear local state regardless
     }
-    if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
+    if (!sameAccount()) return;
   }
   try {
     await logoutDevice();
   } catch {
     // ignore — local session is cleared regardless
   }
-  if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
+  if (!sameAccount()) return;
   await clearSecureSession();
-  if (!isSessionWorkIdentityCurrent(logoutIdentity)) return;
+  if (!sameAccount()) return;
   clearPendingPurchase();
   clearPendingAuthToken();
   clearVpnServersMemoryCache(shortUuid);
@@ -1707,7 +1755,8 @@ async function refreshAfterDeviceUnlink(
 ): Promise<void> {
   const sessionBefore = getSession();
   const oldShortUuid = sessionBefore.shortUuid;
-  await bootstrapDeviceSession().catch(() => {});
+  // Another device left the account; this one keeps working with its own
+  // session (and the Telegram confirmation in it) as it is.
 
   const refreshedSession = getSession();
   const nextShortUuid = refreshedSession.shortUuid ?? oldShortUuid;

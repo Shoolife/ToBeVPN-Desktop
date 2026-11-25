@@ -298,3 +298,48 @@
   padding: 10px 18px;
   text-align: center;
 }
+
+/* The part that swaps with the refresh placeholders fills the screen under
+   the top bar, as the list did. */
+.notif-swap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.notif-skeleton__card,
+.notif-skeleton__card:hover {
+  cursor: default;
+  background: var(--surface);
+}
+
+.notif-skeleton__icon,
+.notif-skeleton__line {
+  display: block;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+  animation: notif-skeleton-pulse 760ms ease-in-out infinite alternate;
+}
+
+.notif-skeleton__icon {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border-radius: 14px;
+}
+
+.notif-skeleton__line--title { width: 62%; height: 15px; }
+.notif-skeleton__line--wide { width: 92%; height: 11px; margin-top: 9px; }
+.notif-skeleton__line--mid { width: 70%; height: 11px; margin-top: 6px; }
+.notif-skeleton__line--small { width: 30%; height: 9px; margin-top: 8px; }
+
+@keyframes notif-skeleton-pulse {
+  from { opacity: 0.42; }
+  to { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notif-skeleton__icon,
+  .notif-skeleton__line {
+    animation: none;
+  }
+}

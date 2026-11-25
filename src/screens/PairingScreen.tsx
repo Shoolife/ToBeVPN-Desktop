@@ -467,13 +467,21 @@ export default function PairingScreen({ onPaired, wide = false }: { onPaired: ()
         <div className="auth-visual">
         <div className={`auth-qr-panel ${usesTelegram ? "" : "auth-qr-panel--store auth-qr-panel--tobevpn"}`}>
           <div className="auth-qr-plate">
-            {authenticating ? (
-              <span className="auth-qr-plate__state">{t("auth_waiting")}</span>
-            ) : qrValue ? (
-              <QRCodeSVG value={qrValue} size={200} level="M" />
-            ) : (
-              <span className="auth-spinner" aria-hidden="true" />
-            )}
+            {/* Spinner, QR and "signing in" fade into each other instead of
+                switching at once (keyed by what is shown, so a new QR for
+                the same step does not fade again). */}
+            <span
+              key={authenticating ? "authenticating" : qrValue ? "qr" : "loading"}
+              className="auth-qr-plate__swap"
+            >
+              {authenticating ? (
+                <span className="auth-qr-plate__state">{t("auth_waiting")}</span>
+              ) : qrValue ? (
+                <QRCodeSVG value={qrValue} size={200} level="M" />
+              ) : (
+                <span className="auth-spinner" aria-hidden="true" />
+              )}
+            </span>
           </div>
           {!usesTelegram && (
             <div className="auth-store-badge">
@@ -531,12 +539,16 @@ export default function PairingScreen({ onPaired, wide = false }: { onPaired: ()
           </div>
         )}
 
-        {!authenticating && (
-          <div className={`auth-status ${usesTelegram ? "" : "auth-status--tobevpn"} ${error ? "auth-status--error" : ""}`} role="status">
-            <span className="auth-status__dot" aria-hidden="true" />
-            <span>{status}</span>
-          </div>
-        )}
+        {/* Once the bot confirms, the waiting line fades out in place (the
+            layout stays) instead of vanishing. */}
+        <div
+          className={`auth-status ${usesTelegram ? "" : "auth-status--tobevpn"} ${error ? "auth-status--error" : ""} ${authenticating ? "auth-status--done" : ""}`}
+          role="status"
+          aria-hidden={authenticating || undefined}
+        >
+          <span className="auth-status__dot" aria-hidden="true" />
+          <span>{status}</span>
+        </div>
 
         <div className="auth-actions auth-actions--inline">
           {error && (
@@ -593,21 +605,12 @@ function GooglePlayIcon() {
 }
 
 function messageOf(e: unknown): string {
+  // Server and client errors are technical English ("Panel user does not
+  // belong to this device"); the screen says the same thing in the user's
+  // language every time, and the details go to the diagnostic log.
   const message = e instanceof Error ? e.message : String(e);
-  if (
-    /forbidden:\s*not authorized/i.test(message) ||
-    /"errorCode"\s*:\s*403/i.test(message) ||
-    /clienterror/i.test(message) ||
-    /fallback route rejected/i.test(message) ||
-    /network request failed/i.test(message) ||
-    /request timed out/i.test(message) ||
-    /not authorized/i.test(message) ||
-    /not authenticated/i.test(message) ||
-    /http\s*403/i.test(message)
-  ) {
-    return t("pairing_load_error");
-  }
-  return message.trim() ? message : t("pairing_load_error");
+  if (message.trim()) console.warn("[pairing] sign-in step failed:", message);
+  return t("pairing_load_error");
 }
 
 function createPairingDeepLink(code: string): string {

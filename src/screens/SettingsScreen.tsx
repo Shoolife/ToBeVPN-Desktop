@@ -272,7 +272,12 @@ export default function SettingsScreen({
   onSectionChange?: (section: SettingsSection) => void;
   initialSection?: SettingsSection;
 }) {
-  const session = useSession();
+  const liveSession = useSession();
+  // While signing out the screen keeps the account it showed: it fades to the
+  // sign-in screen as a whole instead of first redrawing as "not signed in"
+  // the moment the local identity is cleared.
+  const frozenSessionRef = useRef<ReturnType<typeof useSession> | null>(null);
+  const session = frozenSessionRef.current ?? liveSession;
   const currentLang = getSavedLang();
   const { notice: copyNotice, copyWithNotification, showNotification } = useCopyNotification();
   const diagnosticState = useSyncExternalStore(
@@ -696,6 +701,7 @@ export default function SettingsScreen({
 
   const handleLogout = async () => {
     if (loggingOut) return;
+    frozenSessionRef.current = session;
     setLoggingOut(true);
     try {
       await logout();

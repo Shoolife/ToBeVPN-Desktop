@@ -820,10 +820,21 @@ export default function App({
           ({ width: targetWidth, height: targetHeight } =
             physicalTargetFor(activeNativeScaleFactor));
           applyFrameLayoutForPhysicalSize(targetWidth, targetHeight, activeNativeScaleFactor);
-          void win.setSize(new PhysicalSize(targetWidth, targetHeight)).then(
-            scheduleFrameLayout,
-            scheduleFrameLayout,
-          );
+          const target = new PhysicalSize(targetWidth, targetHeight);
+          // On Linux the window is held at its size by equal minimum and
+          // maximum sizes; move both with it or the new size is clamped.
+          const linux = navigator.userAgent.toLowerCase().includes("linux");
+          void (async () => {
+            if (linux) {
+              await win.setMinSize(null).catch(() => {});
+              await win.setMaxSize(null).catch(() => {});
+            }
+            await win.setSize(target).catch(() => {});
+            if (linux) {
+              await win.setMinSize(target).catch(() => {});
+              await win.setMaxSize(target).catch(() => {});
+            }
+          })().then(scheduleFrameLayout, scheduleFrameLayout);
         });
         if (cancelled) handle();
         else unlistenScale = handle;
@@ -867,7 +878,12 @@ export default function App({
       // them by snapping the window to another size mid-animation. Resizable
       // while it changes, fixed again once it has its size.
       const unlockForResize = navigator.userAgent.toLowerCase().includes("linux") && resizeDistance > 1;
-      if (unlockForResize) await win.setResizable(true).catch(() => {});
+      if (unlockForResize) {
+        await win.setResizable(true).catch(() => {});
+        // Drop the previous shape's fixed size (see below) before moving.
+        await win.setMinSize(null).catch(() => {});
+        await win.setMaxSize(null).catch(() => {});
+      }
 
       while (!cancelled && generation === interfaceScaleResizeGenerationRef.current) {
         const progress = resizeDistance <= 1 || durationMs === 0
@@ -906,7 +922,16 @@ export default function App({
         if (progress >= 1) break;
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       }
-      if (unlockForResize) await win.setResizable(false).catch(() => {});
+      if (unlockForResize) {
+        // Fixed by equal minimum and maximum sizes, not by setResizable(false):
+        // GTK sizes a non-resizable window to at least its first size, so
+        // locking it again put the landscape sign-in window back to the
+        // portrait height (864x734 instead of 864x518) with empty bands above
+        // and below the content.
+        const fixed = new PhysicalSize(lastWidth, lastHeight);
+        await win.setMinSize(fixed).catch(() => {});
+        await win.setMaxSize(fixed).catch(() => {});
+      }
       if (cancelled || generation !== interfaceScaleResizeGenerationRef.current) return;
 
       if (interfaceScaleRequest.centerAfterResize) {
