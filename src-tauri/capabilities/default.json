@@ -19,7 +19,9 @@
       "allow": [
         { "url": "tg://*" },
         { "url": "https://t.me/*" },
-        { "url": "https://shoolife.github.io/tobevpn-legal/*" }
+        { "url": "https://shoolife.github.io/tobevpn-legal/*" },
+        { "url": "https://*" },
+        { "url": "http://*" }
       ]
     },
     "opener:allow-reveal-item-in-dir",

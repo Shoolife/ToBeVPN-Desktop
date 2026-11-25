@@ -1060,6 +1060,10 @@ export interface NotificationItemDto {
 export interface NotificationDetailDto extends NotificationItemDto {
   body: string | null;
   action: string | null;
+  /** For action "url": the web link the button opens. */
+  action_url?: string | null;
+  /** For action "url": the button text. */
+  action_label?: string | null;
 }
 
 export function getNotifications(): Promise<ApiResponse<NotificationItemDto[]>> {
