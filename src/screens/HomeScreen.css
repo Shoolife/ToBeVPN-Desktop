@@ -844,10 +844,16 @@
   }
 }
 
+/* The bell and the gear together at the right edge of the bar. */
 .home-topbar__actions {
   display: flex;
   align-items: center;
   gap: 2px;
+  margin-left: auto;
+}
+
+.home-topbar__actions .home-topbar__btn {
+  margin-left: 0;
 }
 
 .home-topbar__bell {

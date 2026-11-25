@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { NotificationDetailDto, NotificationItemDto } from "../api/client";
 import BrandLoader from "../components/BrandLoader";
@@ -33,17 +33,56 @@ export default function NotificationsScreen({
   onOpenPlans: () => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  // The view that is leaving, kept for one cross-fade (as Settings sections
+  // and App screens do): null is the feed, a string an announcement.
+  const [leaving, setLeaving] = useState<{ view: string | null; forward: boolean } | null>(null);
+  const timerRef = useRef<number | null>(null);
 
   // Entering the section: the feed loaded on app open is shown; the server
   // is asked only if there is none yet.
   useEffect(() => {
     announcementsOnFeedEntered();
+    return () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    };
   }, []);
 
-  return openId ? (
-    <NotificationDetail id={openId} onBack={() => setOpenId(null)} onOpenPlans={onOpenPlans} />
-  ) : (
-    <NotificationsFeed onBack={onBack} onOpen={setOpenId} />
+  const show = (next: string | null) => {
+    if (next === openId) return;
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    setLeaving({ view: openId, forward: next !== null });
+    setOpenId(next);
+    timerRef.current = window.setTimeout(() => {
+      setLeaving(null);
+      timerRef.current = null;
+    }, 700);
+  };
+
+  const render = (view: string | null) =>
+    view === null ? (
+      <NotificationsFeed onBack={onBack} onOpen={(id) => show(id)} />
+    ) : (
+      <NotificationDetail id={view} onBack={() => show(null)} onOpenPlans={onOpenPlans} />
+    );
+  const keyOf = (view: string | null) => (view === null ? "feed" : `detail:${view}`);
+
+  return (
+    <div className="notif-viewport">
+      {leaving && (
+        <div
+          key={keyOf(leaving.view)}
+          className={`screen-layer ${leaving.forward ? "screen-exit-to-left" : "screen-exit-to-right"}`}
+        >
+          {render(leaving.view)}
+        </div>
+      )}
+      <div
+        key={keyOf(openId)}
+        className={`screen-layer ${leaving ? (leaving.forward ? "screen-enter-from-right" : "screen-enter-from-left") : ""}`}
+      >
+        {render(openId)}
+      </div>
+    </div>
   );
 }
 
