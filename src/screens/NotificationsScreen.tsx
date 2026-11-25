@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { NotificationDetailDto, NotificationItemDto } from "../api/client";
 import BrandLoader from "../components/BrandLoader";
 import MaterialIcon, { type MaterialIconName } from "../components/MaterialIcon";
@@ -6,6 +7,7 @@ import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import { getSavedLang, t, tf } from "../i18n";
 import {
   announcementsError,
+  announcementsOnFeedEntered,
   loadAnnouncement,
   loadAnnouncements,
   markAnnouncementRead,
@@ -32,9 +34,10 @@ export default function NotificationsScreen({
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
 
-  // Entering the section: one feed request.
+  // Entering the section: the feed loaded on app open is shown; the server
+  // is asked only if there is none yet.
   useEffect(() => {
-    void loadAnnouncements();
+    announcementsOnFeedEntered();
   }, []);
 
   return openId ? (
@@ -95,7 +98,7 @@ function FeedCard({ item, onClick }: { item: NotificationItemDto; onClick: () =>
   const date = formatPublishedAt(item.published_at);
   return (
     <button type="button" className={`notif-card ${unread ? "notif-card--unread" : ""}`} onClick={onClick}>
-      <span className="notif-card__icon"><MaterialIcon name="notifications" size={22} /></span>
+      <span className="notif-icon-tile"><MaterialIcon name="notifications" size={24} /></span>
       <span className="notif-card__body">
         <span className="notif-card__head">
           <span className="notif-card__title">{item.title ?? ""}</span>
@@ -175,21 +178,70 @@ function NotificationDetail({
         )
       ) : (
         <ScrollEdgeAffordance className="notif-detail">
-          <h2 className="notif-detail__title">{state.detail.title ?? ""}</h2>
-          {formatPublishedAt(state.detail.published_at) && (
-            <div className="notif-detail__date">{formatPublishedAt(state.detail.published_at)}</div>
-          )}
-          {/* Plain text; line breaks kept by white-space: pre-wrap. */}
-          <div className="notif-detail__body">{state.detail.body ?? state.detail.preview ?? ""}</div>
-          {state.detail.action === "plans" && (
-            <button type="button" className="notif-detail__plans" onClick={onOpenPlans}>
-              {t("notification_open_plans")}
-            </button>
-          )}
+          <div className="notif-detail__card">
+            <div className="notif-detail__heading">
+              <span className="notif-icon-tile notif-icon-tile--large"><MaterialIcon name="notifications" size={27} /></span>
+              <div>
+                <h2 className="notif-detail__title">{state.detail.title ?? ""}</h2>
+                {formatPublishedAt(state.detail.published_at) && (
+                  <div className="notif-detail__date">{formatPublishedAt(state.detail.published_at)}</div>
+                )}
+              </div>
+            </div>
+            {/* Plain text; line breaks kept by white-space: pre-wrap. */}
+            <div className="notif-detail__body">{state.detail.body ?? state.detail.preview ?? ""}</div>
+          </div>
+          <DetailAction detail={state.detail} onOpenPlans={onOpenPlans} />
         </ScrollEdgeAffordance>
       )}
     </div>
   );
+}
+
+/**
+ * The button under the text: "plans" opens the plans, "url" hands action_url
+ * to the system (browser, or Telegram for t.me). Anything else, an empty
+ * label or a bad link shows just the text.
+ */
+function DetailAction({ detail, onOpenPlans }: { detail: NotificationDetailDto; onOpenPlans: () => void }) {
+  if (detail.action === "plans") {
+    return (
+      <button type="button" className="notif-primary-button notif-detail__action" onClick={onOpenPlans}>
+        {t("notification_open_plans")}
+      </button>
+    );
+  }
+  if (detail.action === "url") {
+    const label = detail.action_label?.trim() ?? "";
+    const url = webLinkOrNull(detail.action_url);
+    if (!label || !url) return null;
+    return (
+      <button
+        type="button"
+        className="notif-primary-button notif-detail__action"
+        onClick={() => {
+          openUrl(url).catch((e) => console.warn("[notifications] open link failed", e));
+        }}
+      >
+        <MaterialIcon name="link" size={20} />
+        {label}
+      </button>
+    );
+  }
+  return null;
+}
+
+/** action_url when it is a proper http(s) link with a host. */
+function webLinkOrNull(raw: string | null | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
 }
 
 function TopBar({ onBack, children }: { onBack: () => void; children?: React.ReactNode }) {
@@ -226,7 +278,7 @@ function Message({
       <div className="notif-message__title">{title}</div>
       <div className="notif-message__text">{text}</div>
       {actionLabel && (
-        <button type="button" className="notif-message__action" onClick={onAction}>
+        <button type="button" className="notif-primary-button notif-message__action" onClick={onAction}>
           {actionLabel}
         </button>
       )}

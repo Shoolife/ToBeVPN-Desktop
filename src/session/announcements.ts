@@ -12,9 +12,11 @@ import { getSession, subscribeSession } from "./store";
 
 // Announcements from the bot (Рассылка → TobeVPN), as on the Android client:
 // the feed, one announcement, its read mark and the dot on the Home bell.
-// The feed is requested on events only — once when the app opens (for the
-// bell), when the user enters the section, and on Refresh — never in the
-// background. Concurrent loads share one request.
+// As few feed requests as possible (agreed with the bot side): one when the
+// app starts, then at most one a day when the window is shown again, and on
+// the user's Refresh. Entering the section shows the loaded feed; it asks the
+// server only when there is none yet. Nothing is polled in the background.
+// Concurrent loads share one request.
 
 export type AnnouncementsError =
   | { kind: "network" }
@@ -32,6 +34,8 @@ export interface AnnouncementsFeedState {
 let feed: AnnouncementsFeedState = { items: null, loading: false, error: null };
 let inFlight: Promise<void> | null = null;
 let openedThisRun = false;
+const LOADED_AT_KEY = "tobevpn.announcements.loadedAt";
+const DAILY_MS = 24 * 60 * 60 * 1000;
 const listeners = new Set<() => void>();
 
 function setFeed(next: AnnouncementsFeedState): void {
@@ -77,6 +81,11 @@ export function loadAnnouncements(): Promise<void> {
       const response = await getNotifications();
       if (recipient !== recipientKey()) return;
       setFeed({ items: response.data ?? [], loading: false, error: null });
+      try {
+        localStorage.setItem(LOADED_AT_KEY, String(Date.now()));
+      } catch {
+        // storage unavailable: the daily check just runs again
+      }
     } catch (error) {
       if (recipient !== recipientKey()) return;
       const failure = announcementsError(error);
@@ -89,11 +98,35 @@ export function loadAnnouncements(): Promise<void> {
   return inFlight;
 }
 
-/** The app opened: one feed request per run, for the bell. */
+function feedIsADayOld(): boolean {
+  let loadedAt = 0;
+  try {
+    loadedAt = Number(localStorage.getItem(LOADED_AT_KEY)) || 0;
+  } catch {
+    // storage unavailable
+  }
+  return Date.now() - loadedAt >= DAILY_MS;
+}
+
+/**
+ * The app opened: one feed request per run, for the bell. After that the
+ * window being shown again (from the tray, focus) loads it only when the last
+ * feed is a day old.
+ */
 export function announcementsOnAppOpened(): void {
   if (openedThisRun) return;
   openedThisRun = true;
   void loadAnnouncements();
+  const onShown = () => {
+    if (document.visibilityState === "visible" && feedIsADayOld()) void loadAnnouncements();
+  };
+  window.addEventListener("focus", onShown);
+  document.addEventListener("visibilitychange", onShown);
+}
+
+/** The user entered the section: the loaded feed is reused; only a missing one is requested. */
+export function announcementsOnFeedEntered(): void {
+  if (feed.items === null) void loadAnnouncements();
 }
 
 export const isAnnouncementId = (id: string): boolean =>
