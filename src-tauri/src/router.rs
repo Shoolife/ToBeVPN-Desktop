@@ -511,8 +511,208 @@ fn parse_proc_net_route(table: &str) -> Option<(Ipv4Addr, String)> {
         .map(|(_, gateway, interface)| (gateway, interface))
 }
 
+/// What a Keenetic (or Netcraze) router says about itself once logged in.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeeneticVersion {
+    /// The model number from the label, e.g. "KN-1011" (Netcraze: "NC-1011").
+    pub hw_id: String,
+    /// The router's own description, e.g. "Keenetic Giga (KN-1011)".
+    pub description: Option<String>,
+    /// KeeneticOS version, e.g. "4.1.7".
+    pub release: Option<String>,
+}
+
+/// Reads the model number of the Keenetic in this network by logging in to
+/// it as its web interface does (/auth challenge, then `show version`). The
+/// password is used for this one login and kept nowhere. Errors are codes
+/// for the screen: "no_router", "unreachable", "not_keenetic",
+/// "wrong_password", "no_model".
+#[tauri::command]
+pub async fn keenetic_model(login: String, password: String) -> Result<KeeneticVersion, String> {
+    let (gateway, interface) = default_gateway().ok_or("no_router")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        keenetic_model_blocking(gateway, interface, login.trim(), &password)
+    })
+    .await
+    .map_err(|_| "unreachable".to_string())?
+}
+
+fn keenetic_model_blocking(
+    gateway: Ipv4Addr,
+    interface: Option<String>,
+    login: &str,
+    password: &str,
+) -> Result<KeeneticVersion, String> {
+    crate::update_download::install_rustls_provider();
+    let builder = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(6));
+    #[cfg(target_os = "linux")]
+    let builder = match &interface {
+        Some(name) => builder.interface(name),
+        None => builder,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = &interface;
+    let client = builder.build().map_err(|_| "unreachable".to_string())?;
+
+    // The web interface is served over HTTP on the LAN; HTTPS if the owner
+    // turned that on.
+    let mut answer = None;
+    for scheme in ["http", "https"] {
+        if let Ok(response) = client.get(format!("{scheme}://{gateway}/auth")).send() {
+            answer = Some((scheme, response));
+            break;
+        }
+    }
+    let (scheme, challenge) = answer.ok_or("unreachable")?;
+    let base = format!("{scheme}://{gateway}");
+    let mut cookies = CookieJar::default();
+    cookies.take(challenge.headers());
+
+    // 200: the router has no password set, the session is already open.
+    if challenge.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let header = |name: &str| {
+            challenge
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let (Some(realm), Some(nonce)) = (header("x-ndm-realm"), header("x-ndm-challenge")) else {
+            return Err("not_keenetic".into());
+        };
+        let login_answer = client
+            .post(format!("{base}/auth"))
+            .header("Cookie", cookies.header())
+            .json(&serde_json::json!({
+                "login": login,
+                "password": keenetic_password_hash(login, password, &realm, &nonce),
+            }))
+            .send()
+            .map_err(|_| "unreachable".to_string())?;
+        cookies.take(login_answer.headers());
+        if !login_answer.status().is_success() {
+            return Err("wrong_password".into());
+        }
+    } else if !challenge.status().is_success() {
+        return Err("not_keenetic".into());
+    }
+
+    let version: serde_json::Value = client
+        .get(format!("{base}/rci/show/version"))
+        .header("Cookie", cookies.header())
+        .send()
+        .map_err(|_| "unreachable".to_string())?
+        .json()
+        .map_err(|_| "no_model".to_string())?;
+    parse_keenetic_version(&version).ok_or_else(|| "no_model".to_string())
+}
+
+/// KeeneticOS's login answer: SHA-256 of the challenge followed by the hex
+/// MD5 of "login:realm:password", in hex.
+fn keenetic_password_hash(login: &str, password: &str, realm: &str, challenge: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let md5 = md5::compute(format!("{login}:{realm}:{password}").as_bytes());
+    let md5_hex: String = md5.0.iter().map(|byte| format!("{byte:02x}")).collect();
+    Sha256::digest(format!("{challenge}{md5_hex}").as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The model number from `show version`: hw_id ("KN-1011"), or the number in
+/// the description ("Keenetic Giga (KN-1011)") on firmware without hw_id.
+fn parse_keenetic_version(version: &serde_json::Value) -> Option<KeeneticVersion> {
+    let text = |key: &str| {
+        version
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(64).collect::<String>())
+    };
+    let description = text("description");
+    let hw_id = text("hw_id")
+        .or_else(|| {
+            let source = description.clone().or_else(|| text("model"))?;
+            let start = source.find("KN-").or_else(|| source.find("NC-"))?;
+            Some(source[start..].chars().take(7).collect())
+        })
+        .filter(|id| id.len() == 7 && id[3..].chars().all(|c| c.is_ascii_digit()))?;
+    Some(KeeneticVersion {
+        hw_id,
+        description,
+        release: text("release").or_else(|| text("title")),
+    })
+}
+
+/// The session cookies of one login, sent back on the next requests.
+#[derive(Default)]
+struct CookieJar(Vec<(String, String)>);
+
+impl CookieJar {
+    fn take(&mut self, headers: &reqwest::header::HeaderMap) {
+        for value in headers.get_all(reqwest::header::SET_COOKIE) {
+            let Some(pair) = value.to_str().ok().and_then(|v| v.split(';').next()) else {
+                continue;
+            };
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let name = name.trim().to_string();
+            self.0.retain(|(known, _)| *known != name);
+            self.0.push((name, value.trim().to_string()));
+        }
+    }
+
+    fn header(&self) -> String {
+        self.0
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keenetic_login_hash_follows_the_web_interface() {
+        // md5("admin:Keenetic Giga:secret"), then sha256(challenge + that hex).
+        use sha2::{Digest, Sha256};
+        let md5_hex: String = md5::compute(b"admin:Keenetic Giga:secret")
+            .0
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let expected: String = Sha256::digest(format!("NONCE{md5_hex}").as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            keenetic_password_hash("admin", "secret", "Keenetic Giga", "NONCE"),
+            expected
+        );
+        assert_eq!(expected.len(), 64);
+    }
+
+    #[test]
+    fn keenetic_model_comes_from_show_version() {
+        let full = serde_json::json!({
+            "release": "4.1.7", "hw_id": "KN-1011",
+            "description": "Keenetic Giga (KN-1011)", "model": "Giga"
+        });
+        let version = parse_keenetic_version(&full).unwrap();
+        assert_eq!(version.hw_id, "KN-1011");
+        assert_eq!(version.release.as_deref(), Some("4.1.7"));
+        let netcraze = serde_json::json!({ "description": "Netcraze Hopper (NC-3811)" });
+        assert_eq!(parse_keenetic_version(&netcraze).unwrap().hw_id, "NC-3811");
+        assert!(parse_keenetic_version(&serde_json::json!({ "release": "4.1" })).is_none());
+    }
+
     #[test]
     fn reads_the_macos_default_route() {
         let wifi = "   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING>\n";

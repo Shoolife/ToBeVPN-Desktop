@@ -1307,6 +1307,7 @@ pub fn run() {
             notifications::show_system_notification,
             router::detect_router,
             router::router_marks,
+            router::keenetic_model,
             router_agent::router_pair,
             router_agent::router_install,
             router_agent::router_status,
