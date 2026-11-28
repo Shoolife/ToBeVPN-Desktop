@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "../session/externalLinks";
 import type { NotificationDetailDto, NotificationItemDto } from "../api/client";
 import BrandLoader from "../components/BrandLoader";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
@@ -304,7 +304,7 @@ function DetailAction({ detail, onOpenPlans }: { detail: NotificationDetailDto; 
         type="button"
         className="notif-primary-button notif-detail__action"
         onClick={() => {
-          openUrl(url).catch((e) => console.warn("[notifications] open link failed", e));
+          openExternalUrl(url).catch((e) => console.warn("[notifications] open link failed", e));
         }}
       >
         <MaterialIcon name="link" size={20} />

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { openExternalUrl } from "../session/externalLinks";
 import { exit } from "@tauri-apps/plugin-process";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, formatDecimal, getSavedLang, type StringKey } from "../i18n";
 import SubscriptionSheet from "../components/SubscriptionSheet";
 import { announcementsOnAppOpened, useAnnouncementsUnread } from "../session/announcements";
@@ -907,7 +907,7 @@ export default function HomeScreen({
                 onClick={() => {
                   requestClose(() => {
                     setShowBlockedDialog(false);
-                    void openUrl("https://t.me/meow_meow_vpn?direct").catch(() => {});
+                    void openExternalUrl("https://t.me/meow_meow_vpn?direct").catch(() => {});
                   });
                 }}
               >

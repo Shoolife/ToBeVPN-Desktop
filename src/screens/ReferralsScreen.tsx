@@ -7,7 +7,7 @@ import {
 } from "react";
 import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
 import { createPortal } from "react-dom";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "../session/externalLinks";
 import {
   ApiHttpError,
   getReferrals,
@@ -544,7 +544,7 @@ export default function ReferralsScreen({
       window.open(shareUrl.toString(), "_blank", "noopener,noreferrer");
       return;
     }
-    await openUrl(shareUrl.toString()).catch(() => {});
+    await openExternalUrl(shareUrl.toString()).catch(() => {});
   };
 
   return (
