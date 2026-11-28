@@ -1,4 +1,6 @@
 pub mod config;
+mod core_log;
+pub mod dns_cache;
 pub mod state;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,7 +62,7 @@ pub mod manager;
 pub mod manager;
 
 #[cfg(target_os = "windows")]
-mod windows_routes;
+pub(crate) mod windows_routes;
 
 /// Gateway of the lowest-metric physical default route, skipping our tunnel.
 #[cfg(target_os = "windows")]

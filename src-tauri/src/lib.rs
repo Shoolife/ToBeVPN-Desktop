@@ -894,13 +894,49 @@ async fn install_update_parallel(_version: String) -> Result<(), String> {
 
 /// Measure TCP connect latency to `host:port`.
 #[tauri::command]
-async fn tcp_ping(host: String, port: u16, timeout_ms: u64) -> i64 {
+async fn tcp_ping(host: String, port: u16, timeout_ms: u64) -> TcpPingResult {
     let addr = format!("{}:{}", host, port);
     let deadline = Duration::from_millis(timeout_ms);
     let start = Instant::now();
     match timeout(deadline, TcpStream::connect(&addr)).await {
-        Ok(Ok(_)) => start.elapsed().as_millis() as i64,
-        _ => -1,
+        Ok(Ok(_)) => TcpPingResult {
+            ms: start.elapsed().as_millis() as i64,
+            failure: None,
+        },
+        Ok(Err(error)) => TcpPingResult {
+            ms: -1,
+            failure: Some(tcp_ping_failure(&error).to_string()),
+        },
+        Err(_) => TcpPingResult {
+            ms: -1,
+            failure: Some("timeout".to_string()),
+        },
+    }
+}
+
+/// A server ping: the connect time, or -1 and why it failed, so the
+/// diagnostic journal can tell a blocked server (timeout, reset) from one
+/// that is down (refused) or a name that did not resolve (dns).
+#[derive(serde::Serialize)]
+struct TcpPingResult {
+    ms: i64,
+    failure: Option<String>,
+}
+
+fn tcp_ping_failure(error: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::ConnectionRefused => "refused",
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => "reset",
+        ErrorKind::TimedOut => "timeout",
+        ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable => "unreachable",
+        _ if error.to_string().to_ascii_lowercase().contains("lookup")
+            || error.to_string().to_ascii_lowercase().contains("resolve")
+            || error.to_string().contains("No such host") =>
+        {
+            "dns"
+        }
+        _ => "error",
     }
 }
 

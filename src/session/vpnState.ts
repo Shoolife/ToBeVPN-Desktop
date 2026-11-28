@@ -65,6 +65,14 @@ const TUNNEL_RECOVERY_RESTART_DELAY_MS = 2_000;
 const MANUAL_TUNNEL_RECOVERY_ATTEMPTS = 1;
 const AUTOMATIC_TUNNEL_RECOVERY_ATTEMPTS = 2;
 const RECENT_TUNNEL_TRAFFIC_GRACE_MS = 60_000;
+/**
+ * Bytes the server must have sent back within the grace window before
+ * traffic overrules a failed health probe. Only downlink counts: a dead
+ * server still "carries" what apps keep sending it (retries, the probe
+ * itself), and that uplink kept a dead tunnel looking connected for as long
+ * as anything retried, while every request through it timed out.
+ */
+const RECENT_TUNNEL_DOWNLINK_BYTES = 32 * 1024;
 const QUALITY_TRAFFIC_CONFIRM_BYTES = 64 * 1024;
 const NATIVE_CONNECT_TIMEOUT_MS = 45_000;
 const TUNNEL_PROBE_URLS = [
@@ -145,7 +153,11 @@ let watchdogRecoveryAttempts = 0;
 let tunnelHealthFailedCycles = 0;
 /** Whether the current tunnel has carried traffic once since it was connected. */
 let tunnelVerifiedSinceConnect = false;
-let lastTunnelTrafficAt: number | null = null;
+/** Traffic since the last diagnostic sample, by direction. */
+let trafficWindowUplink = 0;
+let trafficWindowDownlink = 0;
+/** Downlink the tunnel received, per poll tick, within the grace window. */
+let recentTunnelDownlink: { at: number; bytes: number }[] = [];
 let currentServerForRecovery: ServerVpnConfig | null = null;
 let resumeRecoveryInFlight = false;
 // A long sleep whose network came back only after the resume wait gave up:
@@ -317,6 +329,8 @@ function startPolling() {
     trafficPollInFlight = true;
 
     let delta = 0;
+    let uplinkDelta = 0;
+    let downlinkDelta = 0;
     try {
       const stats = await getTrafficStats();
       const uplink = Number.isFinite(stats.uplink)
@@ -326,8 +340,12 @@ function startPolling() {
         ? Math.max(0, Math.floor(stats.downlink))
         : 0;
       delta = Math.min(Number.MAX_SAFE_INTEGER, uplink + downlink);
-      if (delta > 0) {
-        lastTunnelTrafficAt = now;
+      uplinkDelta = uplink;
+      downlinkDelta = downlink;
+      if (downlink > 0) {
+        recentTunnelDownlink.push({ at: now, bytes: downlink });
+      }
+      if (hasRecentTunnelTraffic(now)) {
         watchdogRecoveryAttempts = 0;
         tunnelHealthFailedCycles = 0;
       }
@@ -364,11 +382,22 @@ function startPolling() {
       sessionBytes: nextSessionBytes,
       tick: state.tick + 1,
     });
+    trafficWindowUplink += uplinkDelta;
+    trafficWindowDownlink += downlinkDelta;
     if (now - lastDiagnosticTrafficAt >= 10_000) {
+      // Averages over the window since the last sample, split by direction:
+      // uplink with no downlink is a tunnel the server no longer answers.
+      const windowSeconds = lastDiagnosticTrafficAt > 0
+        ? Math.max(1, (now - lastDiagnosticTrafficAt) / 1000)
+        : 1;
+      const upKibS = trafficWindowUplink / 1024 / windowSeconds;
+      const downKibS = trafficWindowDownlink / 1024 / windowSeconds;
+      trafficWindowUplink = 0;
+      trafficWindowDownlink = 0;
       lastDiagnosticTrafficAt = now;
       recordDiagnosticEvent(
         "VPN-Traffic",
-        `Session traffic sample: transfer_kib_s=${(delta / 1024).toFixed(1)}, session_mib=${(nextSessionBytes / (1024 * 1024)).toFixed(2)}`,
+        `Session traffic sample: up_kib_s=${upKibS.toFixed(1)}, down_kib_s=${downKibS.toFixed(1)}, session_mib=${(nextSessionBytes / (1024 * 1024)).toFixed(2)}`,
         "D",
       );
     }
@@ -557,7 +586,7 @@ async function connectVpnInternal(
   const connectionStartedAt = performance.now();
   recordDiagnosticEvent(
     "VPN",
-    `Connection requested; reconnect=${hadConnectedTunnel}, recovery=${!resetWatchdogRecovery}, routing=${server.routing_mode ?? "default"}`,
+    `Connection requested; reconnect=${hadConnectedTunnel}, recovery=${!resetWatchdogRecovery}, routing=${server.routing_mode ?? "default"}, ${describeServerForDiagnostics(server)}`,
   );
   // The subscription response may carry a server-side access block, so this
   // check has to finish before any new tunnel starts.
@@ -606,7 +635,10 @@ async function connectVpnInternal(
     if (gen !== connectionGeneration) return;
     currentServerForRecovery = serverToStart;
     serverStartAttempted = true;
-    recordDiagnosticEvent("VPN", "Starting native VPN core and tunnel");
+    recordDiagnosticEvent(
+      "VPN",
+      `Starting native VPN core and tunnel; ${describeServerForDiagnostics(serverToStart)}`,
+    );
     const nativeStartAt = performance.now();
     await startNativeVpnWithTimeout(serverToStart, gen);
     recordDiagnosticEvent(
@@ -631,7 +663,10 @@ async function connectVpnInternal(
       sessionBytes: 0,
     });
     tunnelHealthFailedCycles = 0;
-    lastTunnelTrafficAt = null;
+    recentTunnelDownlink = [];
+    trafficWindowUplink = 0;
+    trafficWindowDownlink = 0;
+    lastDiagnosticTrafficAt = Date.now();
     trafficQualityConfirmed = false;
     void recordServerConnectionSuccess(serverToStart);
     recordDiagnosticEvent(
@@ -692,7 +727,7 @@ export async function disconnectVpn(): Promise<void> {
   currentServerForRecovery = null;
   resumeRecoveryInFlight = false;
   tunnelHealthFailedCycles = 0;
-  lastTunnelTrafficAt = null;
+  recentTunnelDownlink = [];
   trafficQualityConfirmed = false;
   stopTunnelHealthCheck();
   stopPolling();
@@ -1016,7 +1051,7 @@ async function stopVpnWithError(message: string): Promise<void> {
   currentServerForRecovery = null;
   resumeRecoveryInFlight = false;
   tunnelHealthFailedCycles = 0;
-  lastTunnelTrafficAt = null;
+  recentTunnelDownlink = [];
   trafficQualityConfirmed = false;
   stopTunnelHealthCheck();
   stopPolling();
@@ -1087,7 +1122,8 @@ async function runTunnelProbeAttempts(
   for (let i = 0; i < attempts; i++) {
     if (probe.cancelled) return false;
     const attemptStartedAt = performance.now();
-    if (await probeTunnelOnce(probe, attemptTimeoutMs)) {
+    const result = await probeTunnelOnce(probe, attemptTimeoutMs);
+    if (result.healthy) {
       recordDiagnosticEvent(
         "VPN-Health",
         `Tunnel probe passed; attempt=${i + 1}/${attempts}, attempt_elapsed_ms=${Math.max(0, Math.round(performance.now() - attemptStartedAt))}, total_elapsed_ms=${Math.max(0, Math.round(performance.now() - probeStartedAt))}`,
@@ -1098,7 +1134,7 @@ async function runTunnelProbeAttempts(
     if (probe.cancelled) return false;
     recordDiagnosticEvent(
       "VPN-Health",
-      `Tunnel probe attempt failed; attempt=${i + 1}/${attempts}, elapsed_ms=${Math.max(0, Math.round(performance.now() - attemptStartedAt))}`,
+      `Tunnel probe attempt failed; attempt=${i + 1}/${attempts}, elapsed_ms=${Math.max(0, Math.round(performance.now() - attemptStartedAt))}, targets=${result.failures || "none"}`,
       "D",
     );
     if (i < attempts - 1) await sleepMs(retryDelayMs);
@@ -1106,18 +1142,30 @@ async function runTunnelProbeAttempts(
   return false;
 }
 
+/** Short names of TUNNEL_PROBE_URLS for the journal (it redacts URLs). */
+const TUNNEL_PROBE_TARGETS = ["cloudflare", "github"] as const;
+
+/**
+ * One probe of every target. `failures` names each failed target and how it
+ * failed: "timeout" (no answer in time, typical of a tunnel that stalls) or
+ * "network" after N ms (refused, reset or unresolved, a fast failure).
+ */
 async function probeTunnelOnce(
   probe: ActiveTunnelProbe,
   timeoutMs: number,
-): Promise<boolean> {
-  if (probe.cancelled) return false;
+): Promise<{ healthy: boolean; failures: string }> {
+  if (probe.cancelled) return { healthy: false, failures: "cancelled" };
   const controllers = TUNNEL_PROBE_URLS.map(() => new AbortController());
   controllers.forEach((controller) => probe.controllers.add(controller));
+  const failures: string[] = [];
+  let timedOut = false;
+  const startedAt = performance.now();
   const timeoutId = window.setTimeout(() => {
+    timedOut = true;
     controllers.forEach((controller) => controller.abort());
   }, timeoutMs);
   try {
-    return await new Promise<boolean>((resolve) => {
+    const healthy = await new Promise<boolean>((resolve) => {
       let pending = TUNNEL_PROBE_URLS.length;
       let settled = false;
 
@@ -1136,13 +1184,18 @@ async function probeTunnelOnce(
           // Any HTTP response means routing, DNS and TLS reached the internet.
           .then(() => finish(true))
           .catch(() => {
+            const elapsed = Math.max(0, Math.round(performance.now() - startedAt));
+            failures.push(
+              `${TUNNEL_PROBE_TARGETS[index] ?? `target${index}`}=${timedOut ? "timeout" : `network(${elapsed}ms)`}`,
+            );
             pending--;
             if (pending <= 0) finish(false);
           });
       });
     });
+    return { healthy, failures: failures.join(", ") };
   } catch {
-    return false;
+    return { healthy: false, failures: failures.join(", ") || "error" };
   } finally {
     clearTimeout(timeoutId);
     controllers.forEach((controller) => probe.controllers.delete(controller));
@@ -1158,11 +1211,29 @@ function cancelActiveTunnelProbe() {
   probe.controllers.clear();
 }
 
-function hasRecentTunnelTraffic(): boolean {
-  return (
-    lastTunnelTrafficAt !== null &&
-    Date.now() - lastTunnelTrafficAt <= RECENT_TUNNEL_TRAFFIC_GRACE_MS
-  );
+/**
+ * The server as the journal shows it: the name from the list and how it is
+ * reached, never its address (the journal redacts hosts and IPs anyway).
+ */
+function describeServerForDiagnostics(server: ServerVpnConfig): string {
+  const transport = [
+    server.protocol || "vless",
+    server.network || "tcp",
+    server.security || "none",
+  ].join("/");
+  const addressKind = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(server.address) || server.address.includes(":")
+    ? "ip"
+    : "hostname";
+  return `server="${server.name ?? "unknown"}", country=${server.country || "unknown"}, transport=${transport}, flow=${server.flow || "none"}, address=${addressKind}`;
+}
+
+/** Whether the server sent back enough within the grace window to prove the tunnel works. */
+function hasRecentTunnelTraffic(now = Date.now()): boolean {
+  const since = now - RECENT_TUNNEL_TRAFFIC_GRACE_MS;
+  recentTunnelDownlink = recentTunnelDownlink.filter((sample) => sample.at >= since);
+  let bytes = 0;
+  for (const sample of recentTunnelDownlink) bytes += sample.bytes;
+  return bytes >= RECENT_TUNNEL_DOWNLINK_BYTES;
 }
 
 export function clearVpnError() {
@@ -1191,7 +1262,7 @@ function ensureVpnDiedListener() {
     currentServerForRecovery = null;
     resumeRecoveryInFlight = false;
     tunnelHealthFailedCycles = 0;
-    lastTunnelTrafficAt = null;
+    recentTunnelDownlink = [];
     trafficQualityConfirmed = false;
     stopTunnelHealthCheck();
     stopPolling();
