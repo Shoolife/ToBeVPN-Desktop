@@ -261,3 +261,9 @@ html[data-window-frame="windows"] .whats-new-overlay {
     animation-duration: 1ms;
   }
 }
+
+/* Kept on their own layers for their whole life: a layer WebKitGTK makes
+   only for an animation and drops when it ends re-rasterises the text, and
+   the text on screen seemed to shake as the animation started and ended. */
+.whats-new-overlay { will-change: opacity; }
+.whats-new-dialog { will-change: opacity, transform; }

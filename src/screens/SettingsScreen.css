@@ -2414,3 +2414,11 @@
   padding: 8px 16px;
   font-size: 15px;
 }
+
+/* Kept on their own layers for their whole life: a layer WebKitGTK makes
+   only for an animation and drops when it ends re-rasterises the text, and
+   the text on screen seemed to shake as the animation started and ended. */
+.settings-layer { will-change: opacity; }
+.dialog-overlay { will-change: opacity; }
+.dialog { will-change: opacity, transform; }
+.faq-item__a { will-change: opacity, transform; }

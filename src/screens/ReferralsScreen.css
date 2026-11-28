@@ -1084,3 +1084,12 @@
 .referrals-sheet .refresh-swap {
   --refresh-swap-bg: var(--sheet-bg);
 }
+
+/* Kept on their own layers for their whole life: a layer WebKitGTK makes
+   only for an animation and drops when it ends re-rasterises the text, and
+   the text on screen seemed to shake as the animation started and ended. */
+.referrals-sheet-overlay { will-change: opacity; }
+.referrals-sheet { will-change: transform; }
+.referrals-confirm-overlay { will-change: opacity; }
+.referrals-confirm,
+.referrals-rewards-dialog { will-change: opacity, transform; }
