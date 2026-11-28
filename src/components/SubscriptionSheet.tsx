@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { telegramDeepLink } from "../session/telegramLinks";
 import { QRCodeSVG } from "qrcode.react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, type StringKey } from "../i18n";
@@ -74,35 +75,9 @@ interface TelegramOpenTargets {
 }
 
 function telegramOpenTargets(value: string): TelegramOpenTargets | null {
-  try {
-    const browser = new URL(value);
-    if (
-      browser.protocol !== "https:" ||
-      browser.hostname.toLocaleLowerCase("en-US") !== "t.me" ||
-      browser.username ||
-      browser.password ||
-      browser.port
-    ) return null;
-
-    const pathParts = browser.pathname
-      .split("/")
-      .filter(Boolean)
-      .map((part) => decodeURIComponent(part));
-    if (pathParts.length !== 1 || !/^[A-Za-z0-9_]{5,64}$/.test(pathParts[0])) return null;
-
-    const desktop = new URL("tg://resolve");
-    desktop.searchParams.set("domain", pathParts[0]);
-    // Purchase links currently use `start`; retain `startapp` as well for a
-    // future Telegram Mini App flow without forwarding arbitrary parameters
-    // into the local protocol handler.
-    for (const key of ["start", "startapp"] as const) {
-      const parameter = browser.searchParams.get(key);
-      if (parameter) desktop.searchParams.set(key, parameter);
-    }
-    return { desktopUrl: desktop.toString(), browserUrl: browser.toString() };
-  } catch {
-    return null;
-  }
+  // The same mapping as every other Telegram link in the app.
+  const desktopUrl = telegramDeepLink(value);
+  return desktopUrl ? { desktopUrl, browserUrl: value } : null;
 }
 
 const FALLBACK_PLAN_DURATIONS = [

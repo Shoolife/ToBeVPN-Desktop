@@ -294,6 +294,7 @@ jobs:
         run: |
           npm run check:window-scale-config
           npm run test:api-fallback
+          npm run test:telegram-links
           npx tsc --noEmit
 
       - name: Check and test Rust core
@@ -580,6 +581,7 @@ jobs:
         run: |
           npm run check:window-scale-config
           npm run test:api-fallback
+          npm run test:telegram-links
           npx tsc --noEmit
 
       - name: Test Windows Rust core

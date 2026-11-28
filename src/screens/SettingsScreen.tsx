@@ -1,7 +1,7 @@
 import { isPauseAtHomeEnabled, setPauseAtHomeEnabled } from "../session/homePause";
+import { openExternalUrl } from "../session/externalLinks";
 import { ROUTER_SECTION_AVAILABLE } from "../session/router";
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tf, getSavedLang, saveLang, type Lang, type StringKey } from "../i18n";
 import { getCurrentPlan } from "../api/client";
 import { getCachedVpnServers, isAvailableVpnServer, logout, saveEmail, type VpnServer } from "../session/auth";
@@ -714,11 +714,11 @@ export default function SettingsScreen({
   };
 
   const openSupport = () => {
-    void openUrl(SUPPORT_URL).catch(() => {});
+    void openExternalUrl(SUPPORT_URL).catch(() => {});
   };
 
   const openLink = (url: string) => {
-    void openUrl(url).catch(() => {});
+    void openExternalUrl(url).catch(() => {});
   };
 
   const clearDiagnosticHold = () => {
