@@ -405,17 +405,103 @@ async fn tcp_open_bypassing_tunnel(
     )
 }
 
-/// Windows: no unprivileged way to pin this socket to the adapter here, and a
-/// probe through the tunnel would fail for the wrong reason. Let the Xray
-/// check (bound to the adapter) decide.
-#[cfg(not(target_os = "linux"))]
+/// Windows and macOS: the socket is pinned to the physical adapter by its
+/// index (IP_UNICAST_IF / IP_BOUND_IF, neither needs elevation), so with the
+/// tunnel up a closed or silent port fails here within the TCP budget, as on
+/// Linux, instead of costing the whole Xray timeout. An adapter that cannot
+/// be found or pinned, or a host with no IPv4 address, is left to the Xray
+/// check (bound to the adapter too), as before.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 async fn tcp_open_bypassing_tunnel(
-    _host: &str,
-    _port: u16,
-    _timeout: Duration,
-    _interface: &str,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    interface: &str,
 ) -> bool {
-    true
+    let Some(index) = physical_interface_index(interface) else {
+        return true;
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    let attempt = async {
+        let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+            .await
+            .ok()?
+            .filter(SocketAddr::is_ipv4)
+            .collect();
+        if addresses.is_empty() {
+            return Some(true);
+        }
+        // As on Linux: every address gets a share of what is left.
+        for (position, address) in addresses.iter().enumerate() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let share = remaining / (addresses.len() - position) as u32;
+            let Some(socket) = ipv4_socket_bound_to(index) else {
+                return Some(true);
+            };
+            if matches!(
+                tokio::time::timeout(share, socket.connect(*address)).await,
+                Ok(Ok(_))
+            ) {
+                return Some(true);
+            }
+        }
+        Some(false)
+    };
+    matches!(
+        tokio::time::timeout_at(deadline, attempt).await,
+        Ok(Some(true))
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn physical_interface_index(alias: &str) -> Option<u32> {
+    crate::vpn::windows_routes::adapter_ipv4_index(alias)
+}
+
+#[cfg(target_os = "macos")]
+fn physical_interface_index(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+    (index != 0).then_some(index)
+}
+
+/// A non-blocking IPv4 TCP socket whose traffic leaves through the adapter
+/// with this index, whatever the routing table says.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn ipv4_socket_bound_to(index: u32) -> Option<tokio::net::TcpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .ok()?;
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Networking::WinSock::{setsockopt, IPPROTO_IP, IP_UNICAST_IF, SOCKET};
+        // IP_UNICAST_IF takes the IPv4 interface index in network byte order.
+        let value = index.to_be_bytes();
+        let result = unsafe {
+            setsockopt(
+                SOCKET(socket.as_raw_socket() as usize),
+                IPPROTO_IP.0,
+                IP_UNICAST_IF,
+                Some(&value),
+            )
+        };
+        if result != 0 {
+            return None;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    socket
+        .bind_device_by_index_v4(std::num::NonZeroU32::new(index))
+        .ok()?;
+    socket.set_nonblocking(true).ok()?;
+    Some(tokio::net::TcpSocket::from_std_stream(socket.into()))
 }
 
 /// A free loopback port not handed to another probe of this run (the OS may

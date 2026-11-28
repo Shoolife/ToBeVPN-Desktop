@@ -121,6 +121,7 @@ function startPingProbeBatch(probes: PendingPingProbe[]): void {
     probe.resolve(ping);
   };
 
+  const failures = new Map<PendingPingProbe, string>();
   void (async () => {
     recordDiagnosticEvent(
       "Servers-Ping",
@@ -151,14 +152,28 @@ function startPingProbeBatch(probes: PendingPingProbe[]): void {
                 }),
                 timeoutMs: CORE_PING_TIMEOUT_MS,
               })
-              : await invoke<number>("tcp_ping", {
+              : await invoke<{ ms: number; failure: string | null }>("tcp_ping", {
                 host: target,
                 port: probe.server.port,
                 timeoutMs: PING_TIMEOUT_MS,
+              }).then((result) => {
+                if (result.ms < 0) {
+                  // A host name the ping bypass could not resolve was pinged
+                  // by name, through the tunnel's resolver.
+                  failures.set(
+                    probe,
+                    target === probe.server.address && !isIpLiteral(target)
+                      ? `dns/${result.failure ?? "error"}`
+                      : result.failure ?? "error",
+                  );
+                }
+                return result.ms;
               });
             ping = measured >= 0 ? Math.max(measured, 1) : -1;
+            if (ping < 0 && !failures.has(probe)) failures.set(probe, "core");
           } catch {
             ping = -1;
+            failures.set(probe, "error");
           }
           finish(probe, ping);
         }
@@ -186,8 +201,22 @@ function startPingProbeBatch(probes: PendingPingProbe[]): void {
           : `TCP latency measurement completed; reachable=0, unavailable=${probes.length}`,
         successfulPings.length > 0 ? "D" : "W",
       );
+      const unavailable = probes
+        .filter((probe) => probe.value < 0)
+        .map((probe) => `"${probe.server.name}"=${failures.get(probe) ?? "not_measured"}`);
+      if (unavailable.length > 0) {
+        recordDiagnosticEvent(
+          "Servers-Ping",
+          `Unavailable servers: ${unavailable.join(", ")}`,
+          "D",
+        );
+      }
     }
   })();
+}
+
+function isIpLiteral(host: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":");
 }
 
 function isQualityRecord(value: unknown): value is QualityRecord {

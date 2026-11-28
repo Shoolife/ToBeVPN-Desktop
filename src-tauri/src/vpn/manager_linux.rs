@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
@@ -553,15 +552,12 @@ impl VpnManager {
         eprintln!("[VPN] xray spawned OK, PID: {:?}", xray_pid);
         diagnostic_linux!("VPN core process started");
 
-        // Spawn stderr reader for logging
+        // The core logs to stdout; core_log reads both streams.
+        if let Some(stdout) = xray_child.stdout.take() {
+            super::core_log::spawn_reader(stdout, |line| eprintln!("[xray] {line}"));
+        }
         if let Some(stderr) = xray_child.stderr.take() {
-            tokio::spawn(async move {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("[xray] {line}");
-                }
-            });
+            super::core_log::spawn_reader(stderr, |line| eprintln!("[xray] {line}"));
         }
 
         *self.xray_process.lock().await = Some(xray_child);
@@ -829,7 +825,7 @@ impl VpnManager {
             Err(_) => {}
         }
         let addrs = tokio::select! {
-            result = Self::lookup_ipv4s(address.to_string(), 0, DNS_RESOLVE_TIMEOUT) => result?,
+            result = Self::lookup_ipv4s(address.to_string(), 0, DNS_RESOLVE_TIMEOUT, "server") => result?,
             _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
         };
         if let Some(ip) = addrs.into_iter().next() {
@@ -842,19 +838,9 @@ impl VpnManager {
         host: String,
         port: u16,
         timeout_dur: Duration,
+        purpose: &'static str,
     ) -> Result<Vec<String>, String> {
-        let lookup = timeout(
-            timeout_dur,
-            tokio::net::lookup_host(format!("{}:{}", host, port)),
-        );
-        let addrs = lookup
-            .await
-            .map_err(|_| "DNS resolve timed out".to_string())?
-            .map_err(|e| format!("DNS resolve failed: {}", e))?;
-        Ok(addrs
-            .filter(|addr| addr.is_ipv4())
-            .map(|addr| addr.ip().to_string())
-            .collect())
+        super::dns_cache::lookup_ipv4s(host, port, timeout_dur, purpose).await
     }
 
     async fn resolve_bypass_ips(
@@ -875,7 +861,7 @@ impl VpnManager {
             }
             let host = trimmed.to_string();
             tasks.push(tokio::spawn(async move {
-                Self::lookup_ipv4s(host, 443, BYPASS_DNS_RESOLVE_TIMEOUT).await
+                Self::lookup_ipv4s(host, 443, BYPASS_DNS_RESOLVE_TIMEOUT, "direct-access").await
             }));
         }
         for task in tasks {
@@ -883,11 +869,9 @@ impl VpnManager {
                 result = task => result,
                 _ = attempt.cancelled() => return Err(CONNECT_CANCELLED.into()),
             };
-            match result {
-                Ok(Ok(found)) => ips.extend(found),
-                Ok(Err(_)) | Err(_) => {
-                    eprintln!("[VPN] Direct-access destination DNS lookup failed")
-                }
+            // dns_cache records why a lookup failed.
+            if let Ok(Ok(found)) = result {
+                ips.extend(found);
             }
         }
         Ok(ips.into_iter().collect())
@@ -917,7 +901,7 @@ impl VpnManager {
             }
             let host = trimmed.to_string();
             tasks.push(tokio::spawn(async move {
-                let ip = Self::lookup_ipv4s(host.clone(), 443, BYPASS_DNS_RESOLVE_TIMEOUT)
+                let ip = Self::lookup_ipv4s(host.clone(), 443, BYPASS_DNS_RESOLVE_TIMEOUT, "ping")
                     .await
                     .ok()
                     .and_then(|ips| ips.into_iter().next());
@@ -925,9 +909,9 @@ impl VpnManager {
             }));
         }
         for task in tasks {
-            match task.await {
-                Ok(Some(mapping)) => out.push(mapping),
-                Ok(None) | Err(_) => eprintln!("[VPN] Ping destination DNS lookup failed"),
+            // dns_cache records why a lookup failed.
+            if let Ok(Some(mapping)) = task.await {
+                out.push(mapping);
             }
         }
         out
