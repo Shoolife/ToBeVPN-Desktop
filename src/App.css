@@ -767,4 +767,12 @@ html[data-window-frame="desktop"] .update-banner-overlay {
   opacity: var(--refresh-swap-cover, 0);
   transition: var(--refresh-swap-transition, none);
   pointer-events: none;
+  /* Kept on its own layer for its whole life: when the fade starts or ends
+     WebKitGTK would otherwise re-rasterise the text and the screen shook. */
+  will-change: opacity;
 }
+
+/* Kept on their own layers for their whole life: a layer WebKitGTK makes
+   only for an animation and drops when it ends re-rasterises the text, and
+   the text on screen seemed to shake as the animation started and ended. */
+.screen-layer { will-change: opacity; }

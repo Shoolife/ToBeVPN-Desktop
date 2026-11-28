@@ -873,3 +873,10 @@
   background: #f44336;
   box-shadow: 0 0 0 1.5px var(--bg);
 }
+
+/* Kept on their own layers for their whole life: a layer WebKitGTK makes
+   only for an animation and drops when it ends re-rasterises the text, and
+   the text on screen seemed to shake as the animation started and ended. */
+.home-trial-dialog-overlay { will-change: opacity; }
+.home-trial-dialog { will-change: opacity, transform; }
+.home-payment-success { will-change: opacity, transform; }

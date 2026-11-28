@@ -8,6 +8,10 @@
   flex-direction: column;
   justify-content: flex-end;
   animation: sub-sheet-backdrop-in 420ms cubic-bezier(0.4, 0, 0.2, 1);
+  /* The backdrop and the sheet keep their layers while open: a layer made
+     only for the slide and dropped when it settled made WebKitGTK
+     re-rasterise the text, which shook as the sheet opened and closed. */
+  will-change: opacity;
 }
 
 .sub-sheet-overlay--closing {
@@ -37,6 +41,7 @@
   overflow: hidden;
   animation: sub-sheet-slide-up 420ms cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--modal-shadow);
+  will-change: transform;
 }
 
 .sub-sheet--dragging {
@@ -849,3 +854,11 @@
 .sub-qr-card__close:hover {
   background: var(--surface-2);
 }
+
+/* Kept on their own layers for their whole life: a layer WebKitGTK makes
+   only for an animation and drops when it ends re-rasterises the text, and
+   the text on screen seemed to shake as the animation started and ended. */
+.sub-qr-overlay { will-change: opacity; }
+.sub-qr-card { will-change: opacity, transform; }
+.sub-periods { will-change: opacity; }
+.sub-discount-slot { will-change: opacity; }
