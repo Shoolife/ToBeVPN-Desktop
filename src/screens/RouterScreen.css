@@ -1338,3 +1338,199 @@
 .router-panel--centered {
   text-align: center;
 }
+
+/* Keenetic: the model check, laid out like the OpenWrt install. */
+.keenetic-check__intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.keenetic-check__intro .router-panel__text {
+  flex: 1;
+  padding-top: 2px;
+}
+
+/* The round "i" that opens the memo, as on the referrals screen. */
+.keenetic-check__info {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: -4px -6px -4px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--info);
+  cursor: pointer;
+  transition: background-color 150ms ease, transform 150ms ease;
+}
+
+.keenetic-check__info:hover { background: color-mix(in srgb, var(--info) 13%, transparent); }
+.keenetic-check__info:active { transform: scale(0.94); }
+.keenetic-check__info:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+
+/* A field that must be filled: red frame and label, nothing below it. */
+.router-field--invalid > span:first-child { color: var(--danger); }
+.router-field--invalid input { border-color: var(--danger); }
+
+/* The router's answer, like the app's other inline errors. */
+.keenetic-check__notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--danger) 11%, var(--surface));
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.keenetic-check__notice > svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--danger);
+}
+
+/* What happens next under the result: an explanation, not a problem. */
+.router-compat__note {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* The brand loader in place of the form while the router is asked. */
+
+.keenetic-check__state {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* A closed fold takes no gap: its own top margin replaces the form's gap. */
+.keenetic-check .router-form > .fold-in,
+.keenetic-check__state > .fold-in { margin-top: -10px; }
+.keenetic-check .router-form > .fold-in .fold-in__inner > *,
+.keenetic-check__state > .fold-in .fold-in__inner > * { margin-top: 10px; }
+
+/* A model not in the list yet: not a failure, so amber rather than red. */
+.router-compat--warn { border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.router-compat--warn .router-compat__title { color: var(--warning); }
+.router-compat__row--warn .router-compat__mark,
+.router-compat__row--warn .router-compat__value { color: var(--warning); }
+
+.keenetic-check__copied { text-align: center; }
+
+/* The memo over the screen, styled like the referral rewards window. */
+.keenetic-memo {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.keenetic-memo__hero {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 20px;
+  background: linear-gradient(135deg, var(--info), color-mix(in srgb, var(--info) 55%, #fff));
+  color: #fff;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--info) 42%, transparent);
+}
+
+.keenetic-memo__title {
+  margin: 12px 0 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.keenetic-memo__lead {
+  margin: 6px 8px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.keenetic-memo__items {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.keenetic-memo__item {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 12px;
+  padding: 11px 14px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+}
+
+.keenetic-memo__icon {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.keenetic-memo__icon--info { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.keenetic-memo__icon--success { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.keenetic-memo__icon--violet { background: color-mix(in srgb, #8b5cf6 15%, transparent); color: #8b5cf6; }
+
+.keenetic-memo__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.keenetic-memo__text strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.keenetic-memo__text span {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.keenetic-memo__note {
+  margin: 12px 4px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.keenetic-memo__close {
+  width: 100%;
+  margin-top: 16px;
+}
+
+
+/* Kept on their own layers for their whole life: a layer WebKitGTK makes
+   only for an animation and drops when it ends re-rasterises the text, and
+   the text on screen seemed to shake as the animation started and ended. */
+.router-content,
+.router-compat,
+.router-form,
+.router-update-wrap,
+.router-notice-wrap { will-change: opacity; }

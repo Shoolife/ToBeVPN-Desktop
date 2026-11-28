@@ -2,19 +2,28 @@ import { createPortal } from "react-dom";
 import FadeText from "../components/FadeText";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "../session/externalLinks";
 import { formatDecimal, t, tf, type StringKey } from "../i18n";
 import { countryFlagForUi, serverDisplayName } from "../components/serverDisplay";
 import { periodRanges } from "../session/stats";
 import { loadLastServer } from "../session/lastServer";
 import { findSameServer } from "../session/serverSelection";
 import { useRouterTraffic } from "../session/useRouterTraffic";
+import {
+  detectKeeneticModel,
+  keeneticArch,
+  keeneticModelLabel,
+  parseKeeneticModel,
+  type KeeneticDetectError,
+} from "../session/keeneticModels";
 import TopbarRefreshButton from "../components/TopbarRefreshButton";
 import { awaitWholeRefreshTurns, useRefreshSwap } from "../components/refreshSwap";
 import { repairRouterCredentials } from "../session/routerCredentials";
+import MaterialIcon from "../components/MaterialIcon";
 import Spinner from "../components/Spinner";
 import BrandLoader from "../components/BrandLoader";
 import SmoothHeight from "../components/SmoothHeight";
+import FadeSwap, { FoldIn } from "../components/FadeSwap";
 import ScrollEdgeAffordance from "../components/ScrollEdgeAffordance";
 import CenterDialog from "../components/CenterDialog";
 import ResetLinkOption from "../components/ResetLinkOption";
@@ -832,21 +841,11 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
           ) : (
             <>
               {info.firmware === "keenetic" && !reconnect ? (
-                // Keenetic: nothing to install yet; its owners are invited
-                // to test Keenetic support instead.
+                // Keenetic: nothing to install yet; its owner checks the model
+                // from the label, then is invited to test or to write to support.
                 <>
                   <div className="devices-section-title">{t("router_vpn_section")}</div>
-                  <div className="router-panel router-panel--centered">
-                    <p className="router-panel__text"><strong>{t("router_keenetic_test_title")}</strong></p>
-                    <p className="router-panel__text">{t("router_keenetic_test_description")}</p>
-                    <button
-                      type="button"
-                      className="router-button router-button--primary"
-                      onClick={() => void openUrl(SUPPORT_URL).catch(() => {})}
-                    >
-                      {t("support_contact_button")}
-                    </button>
-                  </div>
+                  <KeeneticModelCheck />
                 </>
               ) : (
               <>
@@ -912,19 +911,7 @@ export default function RouterScreen({ onBack }: { onBack: () => void }) {
                             setPasswordVisible((visible) => !visible);
                           }}
                         >
-                          {passwordVisible ? (
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-                              <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-                              <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
-                              <line x1="1" y1="1" x2="23" y2="23" />
-                            </svg>
-                          ) : (
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                              <circle cx="12" cy="12" r="3" />
-                            </svg>
-                          )}
+                          <PasswordEyeIcon visible={passwordVisible} />
                         </button>
                       </span>
                     </label>
@@ -2026,6 +2013,329 @@ function CompatibilityCard({ check }: { check: RouterCheck }) {
       {check.problems.map((problem) => (
         <p key={problem} className="router-compat__problem">{t(`router_problem_${problem}` as StringKey)}</p>
       ))}
+    </div>
+  );
+}
+
+/** The eye on a password field: crossed out while the password is shown. */
+function PasswordEyeIcon({ visible }: { visible: boolean }) {
+  return visible ? (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+      <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
+  ) : (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+/** Longest model a person can type in. */
+const MODEL_INPUT_MAX = 32;
+
+/** Shortest time the brand loader is shown while the router is asked. */
+const KEENETIC_LOADER_MIN_MS = 900;
+
+/** What the form says when the check cannot run or fails. */
+type KeeneticFormError = KeeneticDetectError | "need_login" | "need_model";
+
+const KEENETIC_DETECT_ERRORS: Record<KeeneticFormError, StringKey> = {
+  need_login: "router_keenetic_login_needed",
+  need_model: "router_keenetic_model_needed",
+  no_router: "router_keenetic_detect_no_router",
+  unreachable: "router_keenetic_detect_unreachable",
+  not_keenetic: "router_keenetic_detect_not_keenetic",
+  wrong_password: "router_keenetic_detect_wrong_password",
+  no_model: "router_keenetic_detect_no_model",
+};
+
+/**
+ * A Keenetic router, laid out like the OpenWrt install: a line and one
+ * button; the button opens the login (the app reads the model number from
+ * the router itself, or the owner types it from the label), and the answer
+ * comes as the same compatibility card. Owners of listed models are invited
+ * to test whole-home VPN, the others to write to support; that button copies
+ * the model for the message (the support chat link cannot carry text).
+ */
+function KeeneticModelCheck() {
+  const [formOpen, setFormOpen] = useState(false);
+  const [manual, setManual] = useState(false);
+  const [login, setLogin] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<KeeneticFormError | null>(null);
+  const [result, setResult] = useState<{ label: string; description: string | null } | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [memoOpen, setMemoOpen] = useState(false);
+
+  const number = result ? parseKeeneticModel(result.label) : null;
+  const arch = number ? keeneticArch(number) : null;
+
+  const check = async () => {
+    if (busy) return;
+    // Every check goes the same way, whatever answers it (the router, or the
+    // form itself): the form gives way to the brand loader, then to the
+    // result or back to the form with the reason in red.
+    setBusy(true);
+    setError(null);
+    const wait = new Promise((resolve) => window.setTimeout(resolve, KEENETIC_LOADER_MIN_MS));
+    let found: { label: string; description: string | null } | null = null;
+    let failure: KeeneticFormError | null = null;
+    if (manual) {
+      // Any model is an answer: one from the list or not, it is said which.
+      const model = typed.trim();
+      if (model) found = { label: keeneticModelLabel(model) ?? model.slice(0, MODEL_INPUT_MAX), description: null };
+      else failure = "need_model";
+    } else if (!login.trim()) {
+      failure = "need_login";
+    } else {
+      try {
+        const detected = await detectKeeneticModel(login, password);
+        found = { label: keeneticModelLabel(detected.hwId) ?? detected.hwId, description: detected.description };
+        // Used for this one login only.
+        setPassword("");
+      } catch (reason) {
+        failure = reason as KeeneticDetectError;
+      }
+    }
+    await wait;
+    if (found) setResult(found);
+    else setError(failure);
+    setBusy(false);
+  };
+  const again = () => {
+    setResult(null);
+    setError(null);
+    setTyped("");
+    setCopied(false);
+  };
+  const contact = () => {
+    if (!result) return;
+    void navigator.clipboard?.writeText(`Keenetic/Netcraze ${result.label}`).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2500);
+    }).catch(() => {});
+    void openExternalUrl(SUPPORT_URL).catch(() => {});
+  };
+
+  return (
+    <div
+      className="router-panel keenetic-check"
+      aria-busy={busy || undefined}
+      aria-label={busy ? t("router_keenetic_detecting") : undefined}
+    >
+        <div className="keenetic-check__intro">
+          <p className="router-panel__text">{t("router_keenetic_intro")}</p>
+          <button
+            type="button"
+            className="keenetic-check__info"
+            onClick={() => setMemoOpen(true)}
+            aria-label={t("router_keenetic_memo_button")}
+            title={t("router_keenetic_memo_button")}
+          >
+            <MaterialIcon name="info" size={22} />
+          </button>
+        </div>
+
+        <SmoothHeight duration={280} bleed>
+        <FadeSwap loader={<BrandLoader />} loaderKeys={["loading"]} swapKey={busy ? "loading" : result ? `result:${result.label}` : formOpen ? (manual ? "manual" : "login") : "start"}>
+        <div className="keenetic-check__state">
+        {/* While busy FadeSwap shows its loader step in the card's height. */}
+        {busy ? null : result ? (
+          <>
+            <div className={`router-compat ${arch ? "router-compat--ok" : "router-compat--warn"}`}>
+              <div className="router-compat__title">
+                {tf(arch ? "router_keenetic_supported_title" : "router_keenetic_unsupported_title", result.label)}
+              </div>
+              <div className="router-compat__row">
+                <span className="router-compat__mark" aria-hidden="true">✓</span>
+                <span className="router-compat__label">{t("router_keenetic_row_model")}</span>
+                <span className="router-compat__value">{result.description ?? `Keenetic/Netcraze ${result.label}`}</span>
+              </div>
+              <div className={`router-compat__row ${arch ? "" : "router-compat__row--warn"}`}>
+                <span className="router-compat__mark" aria-hidden="true">{arch ? "✓" : "?"}</span>
+                <span className="router-compat__label">{t("router_keenetic_row_list")}</span>
+                <span className="router-compat__value">
+                  {t(arch === null ? "router_keenetic_row_list_no" : arch === "aarch64" ? "router_keenetic_row_list_fast" : "router_keenetic_row_list_slow")}
+                </span>
+              </div>
+              <p className="router-compat__note">
+                {t(
+                  arch === null
+                    ? "router_keenetic_unsupported_text"
+                    : arch === "aarch64"
+                      ? "router_keenetic_supported_text"
+                      : "router_keenetic_supported_slow_text",
+                )}
+              </p>
+            </div>
+            <div className="router-actions">
+              <button type="button" className="router-button router-button--primary" onClick={contact}>
+                {t("support_contact_button")}
+              </button>
+              <button type="button" className="router-button" onClick={again}>
+                {t("router_keenetic_other")}
+              </button>
+            </div>
+            <FoldIn open={copied}>
+              <p className="router-panel__hint keenetic-check__copied">{t("router_keenetic_model_copied")}</p>
+            </FoldIn>
+          </>
+        ) : formOpen ? (
+          <form
+            className="router-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void check();
+            }}
+          >
+            {manual ? (
+              <label className={`router-field ${error === "need_model" ? "router-field--invalid" : ""}`}>
+                <span>{t(error === "need_model" ? "router_keenetic_model_needed" : "router_keenetic_model_label")}</span>
+                <input
+                  value={typed}
+                  placeholder="KN-1012"
+                  maxLength={MODEL_INPUT_MAX}
+                  aria-invalid={error === "need_model" || undefined}
+                  spellCheck={false}
+                  autoComplete="off"
+                  autoFocus
+                  onChange={(event) => {
+                    setTyped(event.target.value);
+                    setError(null);
+                  }}
+                />
+              </label>
+            ) : (
+              <>
+                <label className={`router-field ${error === "need_login" ? "router-field--invalid" : ""}`}>
+                  <span>{t(error === "need_login" ? "router_keenetic_login_needed" : "router_login")}</span>
+                  <input
+                    value={login}
+                    aria-invalid={error === "need_login" || undefined}
+                    placeholder={t("router_keenetic_login_placeholder")}
+                    onChange={(event) => {
+                      setLogin(event.target.value);
+                      setError(null);
+                    }}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={busy}
+                    autoFocus
+                  />
+                </label>
+                <label className={`router-field ${error === "wrong_password" ? "router-field--invalid" : ""}`}>
+                  <span>{t("router_password")}</span>
+                  <span className="router-password">
+                    <input
+                      type={passwordVisible ? "text" : "password"}
+                      value={password}
+                      onChange={(event) => {
+                        setPassword(event.target.value);
+                        setError(null);
+                      }}
+                      placeholder={t("router_password_placeholder")}
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={busy}
+                    />
+                    <button
+                      type="button"
+                      className="router-password__toggle"
+                      aria-label={passwordVisible ? t("router_password_hide") : t("router_password_show")}
+                      title={passwordVisible ? t("router_password_hide") : t("router_password_show")}
+                      aria-pressed={passwordVisible}
+                      disabled={busy}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        setPasswordVisible((visible) => !visible);
+                      }}
+                    >
+                      <PasswordEyeIcon visible={passwordVisible} />
+                    </button>
+                  </span>
+                </label>
+                <p className="router-panel__hint">{t("router_keenetic_password_hint")}</p>
+              </>
+            )}
+            {/* The router's answer, as a card like the app's other inline
+                errors; an empty field is shown on the field itself. */}
+            <FoldIn open={error !== null && error !== "need_login" && error !== "need_model"}>
+              <div className="keenetic-check__notice" role="alert">
+                <MaterialIcon name="info" size={18} />
+                <span>
+                  {error && error !== "need_login" && error !== "need_model"
+                    ? t(KEENETIC_DETECT_ERRORS[error])
+                    : null}
+                </span>
+              </div>
+            </FoldIn>
+            <div className="router-actions">
+              <button type="submit" className="router-button router-button--primary">
+                {t("router_keenetic_check_submit")}
+              </button>
+              <button
+                type="button"
+                className="router-button"
+                disabled={busy}
+                onClick={() => {
+                  setManual((value) => !value);
+                  setError(null);
+                }}
+              >
+                {t(manual ? "router_keenetic_auto_button" : "router_keenetic_manual_button")}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <button type="button" className="router-button router-button--primary" onClick={() => setFormOpen(true)}>
+            {t("router_keenetic_check_button")}
+          </button>
+        )}
+        </div>
+        </FadeSwap>
+        </SmoothHeight>
+
+        {memoOpen && (
+          <CenterDialog label={t("router_keenetic_memo_title")} onClose={() => setMemoOpen(false)}>
+            {(close) => (
+              <div className="keenetic-memo">
+                <div className="keenetic-memo__hero" aria-hidden="true">
+                  <MaterialIcon name="router" size={30} />
+                </div>
+                <h2 className="keenetic-memo__title">{t("router_keenetic_memo_title")}</h2>
+                <p className="keenetic-memo__lead">{t("router_keenetic_memo_lead")}</p>
+                <div className="keenetic-memo__items">
+                  {([
+                    ["login", "info", "router_keenetic_memo_login_title", "router_keenetic_memo_login_text"],
+                    ["lock", "success", "router_keenetic_memo_safe_title", "router_keenetic_memo_safe_text"],
+                    ["descriptionOutlined", "violet", "router_keenetic_memo_label_title", "router_keenetic_memo_label_text"],
+                  ] as const).map(([icon, tone, title, text]) => (
+                    <div key={title} className="keenetic-memo__item">
+                      <span className={`keenetic-memo__icon keenetic-memo__icon--${tone}`} aria-hidden="true">
+                        <MaterialIcon name={icon} size={18} />
+                      </span>
+                      <span className="keenetic-memo__text">
+                        <strong>{t(title)}</strong>
+                        <span>{t(text)}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="keenetic-memo__note">{t("router_keenetic_memo_netcraze")}</p>
+                <button type="button" className="router-button router-button--primary keenetic-memo__close" onClick={() => close()}>
+                  {t("router_keenetic_memo_close")}
+                </button>
+              </div>
+            )}
+          </CenterDialog>
+        )}
     </div>
   );
 }
